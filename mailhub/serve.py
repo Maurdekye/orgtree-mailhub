@@ -3,6 +3,14 @@ HUB_PUBLIC is set — the FR-10 public listener (API-only, see public.py) on
 the fixed internal port 7371. Compose maps that to a host port; the expose
 tooling tunnels the HOST side, never 7370.
 
+HUB_BIND (default 0.0.0.0) is which interface the FULL app binds. Inside
+Docker this stays 0.0.0.0 and the compose port mapping controls exposure —
+exactly as before. It exists for NON-Docker hosting (an embedding desktop
+process), where there is no port mapping and loopback-only must be
+expressible at the app itself. The public listener always binds 0.0.0.0:
+every route it serves is authenticated, and remote reachability is its
+entire purpose.
+
     python -m mailhub.serve
 """
 
@@ -19,7 +27,8 @@ from .public import PublicHub
 
 def main() -> None:
     port = int(os.environ.get("HUB_PORT", "7370"))
-    servers = [uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port))]
+    bind = (os.environ.get("HUB_BIND") or "").strip() or "0.0.0.0"
+    servers = [uvicorn.Server(uvicorn.Config(app, host=bind, port=port))]
     if (os.environ.get("HUB_PUBLIC") or "").strip():
         servers.append(uvicorn.Server(uvicorn.Config(
             PublicHub(app), host="0.0.0.0", port=7371)))
@@ -28,7 +37,7 @@ def main() -> None:
         await asyncio.gather(*(s.serve() for s in servers))
 
     if len(servers) == 1:
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        uvicorn.run(app, host=bind, port=port)
         return
     asyncio.run(serve_all())
 

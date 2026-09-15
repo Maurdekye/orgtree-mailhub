@@ -17,7 +17,7 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_RETENTION_DAYS` | `30` | hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state** |
 | `HUB_ORG_RETENTION_DAYS` | `45` | roster rows silent this long are pruned, except rows still holding queued mail; a pruned client re-registers itself on its next 401 |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
-| `HUB_BIND` | `0.0.0.0` | compose-level: which host interface the FULL app binds. Set `127.0.0.1` once every remote client uses the public port |
+| `HUB_BIND` | `0.0.0.0` | which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker `mailhub.serve` honors it directly (an embedding desktop process sets `127.0.0.1`). The public listener always binds 0.0.0.0 — all its routes are authenticated |
 
 ## Health and logs
 
