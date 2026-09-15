@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orgtree mail hub</title>
+<style>
+  /* follows the orgtree ui-guide visual language: dark greys, terracotta
+     accent, chip idiom — deliberately no build step and no external assets */
+  :root {
+    color-scheme: dark;
+    --bg: #1f1f1f; --side: #181818; --panel: #252526; --panel-2: #2d2d30;
+    --ink: #cccccc; --ink-strong: #e8e8e8; --dim: #9d9d9d;
+    --line: #3c3c3c; --line-soft: #2b2b2b;
+    --accent: #d97757; --ok: #6fd377; --bad: #f14c4c; --sky: #7cc0ff;
+    --mono: Consolas, 'Cascadia Mono', 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 13px/1.5 'Segoe UI', system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 10px;
+           padding: 10px 16px; border-bottom: 1px solid var(--line-soft); }
+  header h1 { font-size: 15px; margin: 0; color: var(--ink-strong); }
+  header .dim { color: var(--dim); font-size: 12px; }
+  .chip { border: 1px solid var(--line); border-radius: 10px;
+          padding: 1px 8px; font-size: 11px; color: var(--dim); }
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 0;
+         height: calc(100vh - 45px); }
+  aside { border-right: 1px solid var(--line-soft); background: var(--side);
+          overflow-y: auto; padding: 8px; }
+  .org { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+         border-radius: 5px; cursor: pointer;
+         border-left: 3px solid transparent; }
+  .org:hover { background: var(--panel-2); }
+  .org.current { background: var(--panel-2); outline: 1px solid var(--line); }
+  /* FR-11: kind is the color axis — an org row wears the terracotta accent,
+     an independently connected CHAT wears sky, so the two kinds read apart
+     at a glance even inside one client's group */
+  .org.k-org { border-left-color: var(--accent); }
+  .org.k-chat { border-left-color: var(--sky); }
+  .kindtag { font-size: 9.5px; border: 1px solid var(--line);
+             border-radius: 8px; padding: 0 5px; color: var(--sky);
+             flex: none; }
+  /* FR-11: one header per CLIENT (the slug's username part) — grouping is
+     spatial, color is spent on org-vs-chat. The header is also a FILTER
+     (user spec 2026-08-05): clicking it shows every mail touching any of
+     that client's slugs. */
+  .client { color: var(--dim); font-size: 10.5px; text-transform: uppercase;
+            letter-spacing: 0.06em; padding: 10px 8px 3px;
+            border-bottom: 1px solid var(--line-soft); margin-bottom: 3px;
+            cursor: pointer; border-radius: 5px 5px 0 0; }
+  .client:hover { background: var(--panel-2); color: var(--ink); }
+  .client.current { background: var(--panel-2); color: var(--ink-strong);
+                    outline: 1px solid var(--line); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none;
+         background: var(--line); }
+  .dot.on { background: var(--ok); }
+  .org .slug { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .org .fp { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+  .org .q { margin-left: auto; color: var(--sky); font-size: 11px; }
+  /* per-row copy-id button: puts the full slug (the send target) on the
+     clipboard without triggering the row's filter click */
+  .org .copy { flex: none; margin-left: auto; background: none;
+               border: 1px solid transparent; border-radius: 4px;
+               color: var(--dim); cursor: pointer; padding: 0 4px;
+               font: 12px var(--mono); line-height: 16px; }
+  .org .copy:hover { color: var(--ink-strong); border-color: var(--line);
+                     background: var(--panel); }
+  .org .copy.did { color: var(--ok); }
+  .org .q + .copy { margin-left: 4px; }
+  .org .last { color: var(--dim); font-size: 10.5px; }
+  /* the mail area (user spec 2026-08-05): the orgtree inbox shape — a list
+     pane of every mail (who → whom, when, state, snippet) and a reading
+     pane that opens the clicked one. Nothing is selected by default;
+     clicking the selected row deselects it. */
+  section { display: grid; grid-template-columns: minmax(300px, 38%) 1fr;
+            gap: 0; overflow: hidden; }
+  #mlist { overflow-y: auto; border-right: 1px solid var(--line-soft);
+           padding: 8px; }
+  #mread { overflow-y: auto; padding: 12px 16px; }
+  .mrow { border: 1px solid var(--line-soft); border-radius: 6px;
+          padding: 6px 9px; margin-bottom: 6px; background: var(--panel);
+          cursor: pointer; }
+  .mrow:hover { background: var(--panel-2); }
+  .mrow.on { background: var(--panel-2); outline: 1px solid var(--accent); }
+  .mrow .l1 { display: flex; gap: 6px; align-items: baseline;
+              font-size: 11.5px; color: var(--dim); flex-wrap: wrap; }
+  .mrow .l1 b { color: var(--ink-strong); font-weight: 600;
+                overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; max-width: 38%; }
+  .mrow .arrow { color: var(--accent); }
+  .mrow .when { margin-left: auto; flex: none; }
+  .mrow .snip { color: var(--dim); font-size: 12px; white-space: nowrap;
+                overflow: hidden; text-overflow: ellipsis; }
+  .state { font-size: 10.5px; flex: none; }
+  .state.queued { color: var(--sky); }
+  .state.read { color: var(--ok); }
+  .mhead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+           font-size: 12px; color: var(--dim);
+           border-bottom: 1px solid var(--line-soft); padding-bottom: 8px;
+           margin-bottom: 8px; }
+  .mhead b { color: var(--ink-strong); }
+  .mhead .arrow { color: var(--accent); }
+  .mbody { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  .att { margin-top: 10px; font-size: 11.5px; color: var(--dim); }
+  .empty { color: var(--dim); text-align: center; padding: 40px 0; }
+  .allbtn { width: 100%; text-align: left; background: none; color: var(--ink);
+            border: none; padding: 6px 8px; border-radius: 5px; cursor: pointer;
+            font: inherit; }
+  .allbtn:hover, .allbtn.current { background: var(--panel-2); }
+  /* the disconnected dropdown (user spec 2026-08-06) */
+  .offhead { color: var(--dim); font-size: 11px; padding: 8px 8px 4px;
+             margin-top: 8px; border-top: 1px solid var(--line-soft);
+             cursor: pointer; user-select: none; }
+  .offhead:hover { color: var(--ink); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="hubname">mail hub</h1>
+  <span class="chip" id="stats"></span>
+  <span class="dim">read-only · everything here is visible to anyone who can
+    reach this page — run the hub on a box you control</span>
+</header>
+<main>
+  <aside id="orgs"></aside>
+  <section>
+    <div id="mlist"></div>
+    <div id="mread"></div>
+  </section>
+</main>
+<script>
+'use strict'
+let filter = ''       // '' = global · '<slug>' = one client row ·
+                      // 'client:<username>' = a whole client group
+let sel = ''          // selected message id — '' = nothing (the default)
+let MSGS = []         // accumulated newest-first (top window + paged-in tail)
+let showOff = false   // the disconnected section (user spec 2026-08-06):
+                      // online rows on top, offline behind this dropdown
+// lazy loading (user spec 2026-08-05, the orgtree inbox shape): render a
+// WINDOW of rows and page in near the bottom — first from what is already
+// fetched, then by cursor-fetching older mail from the hub. One page per
+// gesture; `vis`/`atEnd` reset when the filter changes.
+const WINDOW = 40
+const TOP = 100       // the poll's head fetch — state refresh for these rows
+let vis = WINDOW      // rows rendered
+let atEnd = false     // an older-page fetch came back empty — start reached
+let loadingOlder = false
+const el = (id) => document.getElementById(id)
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g,
+  (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]))
+
+function ago (iso) {
+  if (!iso) return 'never'
+  const s = (Date.now() - Date.parse(iso)) / 1000
+  if (!isFinite(s)) return iso
+  if (s < 90) return 'just now'
+  if (s < 5400) return Math.round(s / 60) + ' min ago'
+  if (s < 129600) return Math.round(s / 3600) + ' h ago'
+  return Math.round(s / 86400) + ' d ago'
+}
+
+const stateOf = (x) => x.read_at ? 'read' : x.delivered_at ? 'delivered'
+  : x.state === 'fetched' ? 'fetched' : 'queued'
+
+function renderMail () {
+  if (!MSGS.length) {
+    el('mlist').innerHTML = '<div class="empty">no mail yet</div>'
+    el('mread').innerHTML = ''
+    return
+  }
+  // the tail status line mirrors the orgtree inbox: it reserves height so
+  // the list does not jump as rows append, and at the start it is the only
+  // thing explaining why scrolling stopped producing mail
+  const tail = loadingOlder
+    ? '<div class="empty">loading earlier mail…</div>'
+    : atEnd && vis >= MSGS.length
+      ? '<div class="empty">— start of retained mail —</div>'
+      : MSGS.length > vis
+        ? '<div class="empty">' + (MSGS.length - vis) + ' earlier</div>'
+        : ''
+  el('mlist').innerHTML = MSGS.slice(0, vis).map((x) => {
+    const st = stateOf(x)
+    const snip = String(x.body ?? '').replace(/\s+/g, ' ').slice(0, 110)
+    return '<div class="mrow' + (sel === x.id ? ' on' : '')
+      + '" onclick="selmsg(\'' + esc(x.id) + '\')">'
+      + '<div class="l1"><b>' + esc(x.from) + '</b>'
+      + '<span class="arrow">→</span><b>' + esc(x.to) + '</b>'
+      + '<span class="state ' + st + '">' + st + '</span>'
+      + '<span class="when">' + ago(x.received_at) + '</span></div>'
+      + '<div class="snip">' + esc(snip) + '</div>'
+      + '</div>'
+  }).join('') + tail
+  const cur = MSGS.find((x) => x.id === sel)
+  el('mread').innerHTML = cur
+    ? '<div class="mhead"><b>' + esc(cur.from) + '</b>'
+      + '<span class="arrow">→</span><b>' + esc(cur.to) + '</b>'
+      + '<span>' + esc((cur.received_at ?? '').slice(0, 16).replace('T', ' '))
+      + '</span>'
+      + '<span class="state ' + stateOf(cur) + '">' + stateOf(cur) + '</span>'
+      + '</div>'
+      + '<div class="mbody">' + esc(cur.body) + '</div>'
+      + (cur.attachments && cur.attachments.length
+        ? '<div class="att">📎 ' + cur.attachments.map(
+            (a) => esc(a.name) + ' (' + Math.round(a.bytes / 1024) + ' KB)')
+            .join(' · ') + '</div>' : '')
+    : '<div class="empty">select a mail to read it</div>'
+}
+
+async function refresh () {
+  try {
+    const d = await (await fetch('/ui/data')).json()
+    el('hubname').textContent = d.name + ' · mail hub'
+    document.title = d.name + ' · orgtree mail hub'
+    const total = d.orgs.reduce((a, o) => a + o.queued, 0)
+    el('stats').textContent = d.orgs.length + ' orgs · ' + total + ' queued · '
+      + d.retention_days + ' d retention'
+    const side = ['<button class="allbtn' + (filter ? '' : ' current')
+      + '" onclick="pick(\'\')">all traffic</button>']
+    // FR-11: group by CLIENT (username — every org/chat registered from one
+    // machine profile shares it), then render each group under a header.
+    // Color codes KIND (org vs independently connected chat), not client:
+    // grouping is the spatial signal, color is the categorical one.
+    // §11c: the grouping key is FOLDED (lowercase, _ → -) so a chat's raw
+    // username (ncola_k8bx) and an org's sanitized slug segment
+    // (ncola-k8bx) land in ONE group — the same fold the server applies
+    // to ?client=, so the header filter always matches its own group.
+    // Connected/disconnected split (user spec 2026-08-06): ONLINE rows sit
+    // at the top (grouped as before); every OFFLINE row lives behind one
+    // collapsible "offline" section, collapsed by default. A client with
+    // members in both states appears in both sections; its header filters
+    // the same either way.
+    const fold = (s) => String(s || '').toLowerCase().replace(/_/g, '-')
+    const orgRow = (o) => {
+      const parts = o.slug.split('.')
+      const fp = parts.length > 2 ? parts.pop() : ''
+      const kind = o.kind === 'chat' ? 'chat' : 'org'
+      return '<div class="org k-' + kind
+        + (filter === o.slug ? ' current' : '')
+        + '" onclick="pick(\'' + esc(o.slug) + '\')">'
+        + '<span class="dot' + (o.online ? ' on' : '') + '"></span>'
+        + '<span><div class="slug">' + esc(parts.join('.'))
+        + ' <span class="fp">·' + esc(fp) + '</span>'
+        + (kind === 'chat' ? ' <span class="kindtag">chat</span>' : '')
+        + '</div>'
+        + '<div class="last">' + (o.online ? 'online' : ago(o.last_seen))
+        + (o.blurb ? ' · ' + esc(o.blurb) : '') + '</div></span>'
+        + (o.queued ? '<span class="q">' + o.queued + ' queued</span>' : '')
+        + '<button class="copy" title="copy id: ' + esc(o.slug)
+        + '" onclick="copyId(event, \'' + esc(o.slug) + '\')">⧉</button>'
+        + '</div>'
+    }
+    const section = (rows) => {
+      const groups = new Map()
+      for (const o of rows) {
+        const client = fold(o.username || o.slug.split('.')[1] || '?')
+        if (!groups.has(client)) groups.set(client, [])
+        groups.get(client).push(o)
+      }
+      const out = []
+      for (const client of [...groups.keys()].sort()) {
+        const rs = groups.get(client).sort((a, b) => a.slug < b.slug ? -1 : 1)
+        out.push('<div class="client' + (filter === 'client:' + client
+          ? ' current' : '') + '" title="all mail touching this client"'
+          + ' onclick="pick(\'client:' + esc(client) + '\')">' + esc(client)
+          + ' · ' + rs.length + '</div>')
+        for (const o of rs) out.push(orgRow(o))
+      }
+      return out
+    }
+    const on = d.orgs.filter((o) => o.online)
+    const off = d.orgs.filter((o) => !o.online)
+    side.push(...section(on))
+    if (off.length) {
+      side.push('<div class="offhead" onclick="toggleOff()">'
+        + (showOff ? '▼' : '▶') + ' ' + off.length + ' disconnected</div>')
+      if (showOff) side.push(...section(off))
+    }
+    el('orgs').innerHTML = side.join('')
+    const m = await (await fetch('/ui/messages?limit=' + TOP
+      + filterArg())).json()
+    // merge: the fresh head (state changes live there) + the already
+    // paged-in older tail. Anything the head re-covers takes the head's
+    // copy; rows a deep scroll accumulated stay put.
+    const top = m.messages
+    const seen = new Set(top.map((x) => x.id))
+    MSGS = top.concat(MSGS.filter((x) => !seen.has(x.id)
+      && (!top.length || x.received_at <= top[top.length - 1].received_at)))
+    renderMail()
+  } catch (e) {
+    el('stats').textContent = 'hub unreachable'
+  }
+}
+
+function filterArg () {
+  return !filter ? ''
+    : filter.startsWith('client:')
+      ? '&client=' + encodeURIComponent(filter.slice(7))
+      : '&org=' + encodeURIComponent(filter)
+}
+
+// page in near the bottom — from memory first, then the cursor fetch
+async function more () {
+  if (vis < MSGS.length) { vis += WINDOW; renderMail(); return }
+  if (atEnd || loadingOlder || !MSGS.length) return
+  loadingOlder = true
+  renderMail()
+  try {
+    const last = MSGS[MSGS.length - 1]
+    const m = await (await fetch('/ui/messages?limit=' + TOP + filterArg()
+      + '&before_at=' + encodeURIComponent(last.received_at)
+      + '&before_n=' + (last.n ?? 0))).json()
+    const seen = new Set(MSGS.map((x) => x.id))
+    const older = m.messages.filter((x) => !seen.has(x.id))
+    if (!older.length) atEnd = true
+    MSGS = MSGS.concat(older)
+    vis += WINDOW
+  } catch (e) { /* transient — the next gesture retries */
+  } finally { loadingOlder = false; renderMail() }
+}
+
+function pick (slug) {
+  filter = slug
+  MSGS = []; vis = WINDOW; atEnd = false   // a new filter = a new folder
+  refresh()
+}
+function selmsg (id) { sel = (sel === id ? '' : id); renderMail() }
+function toggleOff () { showOff = !showOff; refresh() }
+// copy a row's full slug — the id hubtool send/read take as TARGET-SLUG.
+// clipboard API needs a secure context (localhost qualifies); the hidden-
+// textarea path covers plain-http LAN access to the hub UI.
+async function copyId (ev, slug) {
+  ev.stopPropagation()
+  const b = ev.currentTarget
+  try { await navigator.clipboard.writeText(slug) }
+  catch (e) {
+    const t = document.createElement('textarea')
+    t.value = slug
+    t.style.position = 'fixed'
+    t.style.opacity = '0'
+    document.body.appendChild(t)
+    t.select()
+    try { document.execCommand('copy') } finally { t.remove() }
+  }
+  b.textContent = '✓'
+  b.classList.add('did')
+  setTimeout(() => { b.textContent = '⧉'; b.classList.remove('did') }, 1200)
+}
+window.copyId = copyId
+window.pick = pick
+window.selmsg = selmsg
+window.toggleOff = toggleOff
+el('mlist').addEventListener('scroll', () => {
+  const l = el('mlist')
+  if (l.scrollHeight - l.scrollTop - l.clientHeight < 240) more()
+})
+refresh()
+setInterval(refresh, 5000)
+</script>
+</body>
+</html>
