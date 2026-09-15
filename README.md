@@ -5,12 +5,12 @@ mail each other. Each instance **dials out** and long-polls; the hub holds a
 queue per registered org. Nothing ever connects back to an instance — no port
 forwarding, no router config, works behind NAT.
 
-Full design: `../docs/mailserver-spec.md`.
+Full design: `docs/mailserver-spec.md`.
 
 ## Run it
 
 ```sh
-cd hub
+cd orgtree-mailhub
 HUB_NAME="office" docker compose up -d --build
 ```
 

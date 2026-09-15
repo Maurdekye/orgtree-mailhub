@@ -44,8 +44,8 @@ import traceback
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
-sys.path.insert(0, os.path.join(_REPO, "hub"))
+_REPO = os.path.normpath(os.path.join(_HERE, ".."))
+sys.path.insert(0, _REPO)
 
 _TMP = tempfile.mkdtemp(prefix="orgtree-hubtool-")
 os.environ["HUB_DATA"] = os.path.join(_TMP, "hub")
@@ -957,7 +957,7 @@ def sec_chat_receipts() -> None:
     # and reads the error — is told the available set and unregister is not
     # in it. A verb nobody can discover is a verb nobody has.
     def _every_cli_verb_is_advertised():
-        src = open(os.path.join(_REPO, "hub", "hubtool.py"),
+        src = open(os.path.join(_REPO, "hubtool.py"),
                    encoding="utf-8").read()
         i = src.index("def cli(")
         body = src[i:]

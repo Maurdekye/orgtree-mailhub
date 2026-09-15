@@ -1,0 +1,13 @@
+.git
+.gitignore
+.gitattributes
+__pycache__
+*.pyc
+.env
+tests/
+docs/
+*.md
+expose-hub.ps1
+install-hook.py
+session-start.sh
+hubtool.py

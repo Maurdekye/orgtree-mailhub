@@ -51,8 +51,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
-sys.path.insert(0, os.path.join(_REPO, "hub"))
+_REPO = os.path.normpath(os.path.join(_HERE, ".."))
+sys.path.insert(0, _REPO)
 
 _TMP = tempfile.mkdtemp(prefix="orgtree-hub-")
 os.environ["HUB_DATA"] = _TMP                    # BEFORE the import — db reads it
