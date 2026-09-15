@@ -21,8 +21,12 @@ Identity (user-ruled 2026-08-05, superseding the per-profile single
 identity): EACH SESSION mints its own unique identity, keyed by a NAME the
 session chooses itself — semantically appropriate to its own context /
 directive / purpose (e.g. "orgtree-redteam", "nebula-builder"). Identities
-live one-per-file at ~/.orgtree/hub-clients/<name>.json: the 256-bit uid in
-the file is the secret (the hub stores sha256(uid)), and the address is
+live in ONE SQLite database at ~/.orgtree/hub-clients/clients.sqlite3
+(orgtree-mailhub ruling 2026-09-14: all mutable hub data is SQLite; the
+pre-extraction one-file-per-identity JSONs are read ONCE as migration input,
+recorded in the `migrations` table, and NEVER modified or deleted — they are
+the rollback boundary). The 256-bit uid in the row is the secret (the hub
+stores sha256(uid)), and the address is
     <name>.<username>.<sha256(uid)[:6]>        (kind: chat)
 The session REMEMBERS its chosen name and registers with it again to resume
 the same address — the name is the key, so a different name is a different
@@ -55,6 +59,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -148,65 +153,259 @@ def _active_name(explicit: str | None = None) -> str:
     return _norm_name(os.environ.get("MAILHUB_NAME") or "")
 
 
-def _load_ident(name: str) -> dict[str, Any]:
-    try:
-        # with-block, deliberately: on a parse error the open handle would
-        # otherwise live on inside the exception's traceback, and Windows
-        # then refuses the quarantine rename below (PermissionError)
-        with open(_id_path(name), encoding="utf-8") as f:
-            d = json.load(f)
-        if isinstance(d, dict) and cast("dict[str, Any]", d).get("uid"):
-            return cast("dict[str, Any]", d)
-    except ValueError:
-        # the file EXISTS but does not parse — a torn write (the 2026-08-05
-        # power cut left one full of zeros). The uid is unrecoverable, so a
-        # re-mint is the only way forward — but it must be LOUD, not silent:
-        # quarantine the wreck and let register() report the address change
-        # (silent churn strands the old address with nobody told).
-        try:
-            os.replace(_id_path(name),
-                       _id_path(name) + f".corrupt-{int(time.time())}")
+_DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS identities (
+  name       TEXT PRIMARY KEY,
+  uid        TEXT NOT NULL,             -- the secret: sha256(uid) is the hub fingerprint
+  slug       TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS identity_hubs (
+  name     TEXT NOT NULL,
+  position INTEGER NOT NULL,            -- list order is meaningful (send resolution)
+  address  TEXT NOT NULL,
+  PRIMARY KEY (name, address)
+);
+CREATE TABLE IF NOT EXISTS seen_ids (
+  name TEXT NOT NULL,
+  hub  TEXT NOT NULL,                   -- ring is PER HUB: ids unique per hub only
+  seq  INTEGER NOT NULL,                -- ring order; trimmed to the newest 200
+  id   TEXT NOT NULL,
+  PRIMARY KEY (name, hub, id)
+);
+CREATE TABLE IF NOT EXISTS migrations (
+  source_path TEXT PRIMARY KEY,         -- the JSON file this row accounts for
+  sha256      TEXT NOT NULL,
+  state       TEXT NOT NULL,            -- imported | duplicate | conflict
+  migrated_at TEXT NOT NULL
+);
+"""
+
+
+def _db() -> sqlite3.Connection:
+    """The identity store (orgtree-mailhub SQLite ruling). WAL + busy_timeout
+    because the intended usage — several Claude Code chats on one machine —
+    is exactly the concurrent case the old per-file store solved with O_EXCL;
+    here a UNIQUE name + BEGIN IMMEDIATE gives the same one-winner mint.
+    First open migrates any pre-extraction `<name>.json` files IN, read-only:
+    the JSONs are never modified or deleted (they are the rollback boundary),
+    and the `migrations` table is the durable record of what was taken."""
+    os.makedirs(_ID_DIR, exist_ok=True)
+    # resolved at CALL time, not import: _ID_DIR is the test seam the old
+    # store already honored, and the database must follow it
+    db_path = os.path.join(_ID_DIR, "clients.sqlite3")
+    fresh_db = not os.path.exists(db_path)
+    con = sqlite3.connect(db_path, timeout=10.0)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=10000")
+    con.execute("PRAGMA synchronous=FULL")   # the uid is the ONLY copy of the
+    con.executescript(_DB_SCHEMA)            # secret — durability over speed
+    if fresh_db:
+        try:                    # the uid IS the credential: owner-only where
+            os.chmod(db_path, 0o600)         # the OS can express it (POSIX)
         except OSError:
             pass
-        return {"_corrupt": True}
+    _migrate_json(con)
+    return con
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _import_ident_tx(con: sqlite3.Connection, name: str, d: dict[str, Any],
+                     path: str, digest: str) -> None:
+    """One identity file → one transaction. Idempotent by PRIMARY KEYs; the
+    source file is not touched. A name already owned by a DIFFERENT uid is a
+    CONFLICT: the database row (the active store) wins, nothing is imported,
+    and the row is recorded so register() can say so out loud — a silent
+    pick between two secrets would strand one address either way."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        row = con.execute("SELECT uid FROM identities WHERE name=?",
+                          (name,)).fetchone()
+        uid = str(d["uid"])
+        if row is not None and str(row["uid"]) != uid:
+            state = "conflict"
+        else:
+            state = "duplicate" if row is not None else "imported"
+            if row is None:
+                con.execute(
+                    "INSERT INTO identities (name, uid, slug, created_at) "
+                    "VALUES (?,?,?,?)",
+                    (name, uid, str(d.get("slug") or "") or None, _now_iso()))
+            for i, h in enumerate(
+                    [str(x).rstrip("/") for x in
+                     cast("list[Any]", d.get("hubs") or []) if str(x)]):
+                con.execute(
+                    "INSERT OR IGNORE INTO identity_hubs (name, position, "
+                    "address) VALUES (?,?,?)", (name, i, h))
+            rings = cast("dict[str, Any]", d.get("seen") or {})
+            if not rings and d.get("seen_ids"):
+                # pre-multi-hub identities carried ONE flat ring — it belonged
+                # to the bootstrap hub, so it migrates under that key
+                rings = {HUB: d.get("seen_ids")}
+            for hub_addr, ring in rings.items():
+                for mid in [str(x) for x in cast("list[Any]", ring or [])]:
+                    con.execute(
+                        "INSERT OR IGNORE INTO seen_ids (name, hub, seq, id) "
+                        "VALUES (?, ?, COALESCE((SELECT MAX(seq)+1 FROM "
+                        "seen_ids WHERE name=? AND hub=?), 0), ?)",
+                        (name, str(hub_addr).rstrip("/"), name,
+                         str(hub_addr).rstrip("/"), mid))
+        con.execute(
+            "INSERT OR REPLACE INTO migrations (source_path, sha256, state, "
+            "migrated_at) VALUES (?,?,?,?)", (path, digest, state, _now_iso()))
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+
+
+def _migrate_json(con: sqlite3.Connection) -> None:
+    """Read every not-yet-accounted-for `<name>.json` (and the pre-ruling
+    single-profile `hub-client.json`) into the database. Deterministic
+    (sorted), idempotent (keyed on path+sha), transactional (per file), and
+    STRICTLY NON-DESTRUCTIVE: source files are opened read-only. A file that
+    does not parse is left exactly where it is — register() reports it as
+    corrupt, loudly, the way the old store did."""
+    candidates: list[str] = []
+    try:
+        candidates = sorted(
+            os.path.join(_ID_DIR, f) for f in os.listdir(_ID_DIR)
+            if f.endswith(".json") and not f.endswith(".tmp"))
     except OSError:
         pass
-    # one-time adoption of the pre-ruling single-profile identity: if the
-    # legacy file carries THIS name, its uid moves here so the already-
-    # registered address keeps working (the hub is first-write-wins)
+    if os.path.isfile(_LEGACY_ID):
+        candidates.append(_LEGACY_ID)
+    for path in candidates:
+        try:
+            raw = open(path, "rb").read()
+        except OSError:
+            continue
+        digest = hashlib.sha256(raw).hexdigest()
+        done = con.execute(
+            "SELECT sha256 FROM migrations WHERE source_path=?",
+            (path,)).fetchone()
+        if done is not None and str(done["sha256"]) == digest:
+            continue                       # already accounted for, unchanged
+        try:
+            d = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            continue                       # corrupt: preserved; loud later
+        if not isinstance(d, dict) or not cast("dict[str, Any]", d).get("uid"):
+            continue                       # not an identity file
+        dd = cast("dict[str, Any]", d)
+        base = os.path.basename(path)
+        name = _norm_name(str(dd.get("name") or "")) if path == _LEGACY_ID \
+            else _norm_name(base[:-5])
+        if not name:
+            continue
+        try:
+            _import_ident_tx(con, name, dd, path, digest)
+        except sqlite3.Error:
+            pass                           # next open retries; nothing lost
+
+
+def _migration_conflicts(name: str) -> list[str]:
+    """Source files whose secret DIFFERS from this name's active row —
+    surfaced by register() so the split is never silent."""
+    suffix = os.sep + f"{name}.json"
     try:
-        legacy = json.load(open(_LEGACY_ID, encoding="utf-8"))
-        if isinstance(legacy, dict) \
-                and cast("dict[str, Any]", legacy).get("uid") \
-                and _norm_name(str(cast("dict[str, Any]",
-                                        legacy).get("name") or "")) == name:
-            d2 = cast("dict[str, Any]", legacy)
-            _save_ident(name, d2)
-            return d2
-    except (OSError, ValueError):
+        con = _db()
+    except sqlite3.Error:
+        return []
+    try:
+        return [str(r["source_path"]) for r in con.execute(
+            "SELECT source_path FROM migrations WHERE state='conflict'"
+        ).fetchall() if str(r["source_path"]).endswith(suffix)]
+    finally:
+        con.close()
+
+
+def _row_to_ident(con: sqlite3.Connection, name: str) -> dict[str, Any]:
+    row = con.execute("SELECT uid, slug FROM identities WHERE name=?",
+                      (name,)).fetchone()
+    if row is None:
+        return {}
+    d: dict[str, Any] = {"uid": str(row["uid"]), "name": name}
+    if row["slug"]:
+        d["slug"] = str(row["slug"])
+    hubs = [str(r["address"]) for r in con.execute(
+        "SELECT address FROM identity_hubs WHERE name=? ORDER BY position",
+        (name,)).fetchall()]
+    if hubs:
+        d["hubs"] = hubs
+    seen: dict[str, list[str]] = {}
+    for r in con.execute(
+            "SELECT hub, id FROM seen_ids WHERE name=? ORDER BY seq",
+            (name,)).fetchall():
+        seen.setdefault(str(r["hub"]), []).append(str(r["id"]))
+    if seen:
+        d["seen"] = seen
+    return d
+
+
+def _load_ident(name: str) -> dict[str, Any]:
+    try:
+        con = _db()
+    except sqlite3.Error:
+        return {}
+    try:
+        d = _row_to_ident(con, name)
+    finally:
+        con.close()
+    if d.get("uid"):
+        return d
+    # no row — a `<name>.json` that EXISTS but does not parse is a torn
+    # write (the 2026-08-05 power cut left one full of zeros). The uid is
+    # unrecoverable, so a re-mint is the only way forward — but it must be
+    # LOUD, not silent (register() reports the address change). Unlike the
+    # old store the wreck is NOT renamed: migration input is read-only.
+    try:
+        with open(_id_path(name), encoding="utf-8") as f:
+            json.load(f)
+    except ValueError:
+        return {"_corrupt": True}
+    except OSError:
         pass
     return {}
 
 
 def _save_ident(name: str, d: dict[str, Any]) -> None:
-    """Durable write: tmp + fsync + atomic replace. A plain open/write here
-    cost a real identity on 2026-08-05 — a power cut left the file full of
-    zeros (NTFS makes the rename durable before the data), and the uid IS
-    the only copy of the secret: a torn identity file is a PERMANENTLY
-    stranded address on the first-write-wins hub."""
-    os.makedirs(_ID_DIR, exist_ok=True)
-    path = _id_path(name)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=1)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    """One durable transaction (synchronous=FULL): the uid IS the only copy
+    of the secret, so the write must survive the same power cut that tore a
+    JSON identity file full of zeros on 2026-08-05."""
+    con = _db()
     try:
-        # the uid IS the credential (redteam ④): owner-only on POSIX
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        con.execute("BEGIN IMMEDIATE")
+        con.execute(
+            "INSERT INTO identities (name, uid, slug, created_at) "
+            "VALUES (?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
+            "uid=excluded.uid, slug=excluded.slug",
+            (name, str(d["uid"]), str(d.get("slug") or "") or None,
+             _now_iso()))
+        con.execute("DELETE FROM identity_hubs WHERE name=?", (name,))
+        for i, h in enumerate([str(x) for x in
+                               cast("list[Any]", d.get("hubs") or [])]):
+            con.execute("INSERT OR IGNORE INTO identity_hubs (name, position,"
+                        " address) VALUES (?,?,?)", (name, i, h))
+        con.execute("DELETE FROM seen_ids WHERE name=?", (name,))
+        seq = 0
+        for hub_addr, ring in cast("dict[str, Any]",
+                                   d.get("seen") or {}).items():
+            for mid in [str(x) for x in cast("list[Any]", ring or [])][-200:]:
+                con.execute("INSERT OR IGNORE INTO seen_ids (name, hub, seq, "
+                            "id) VALUES (?,?,?,?)",
+                            (name, str(hub_addr), seq, mid))
+                seq += 1
+        con.commit()
+    except BaseException:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def _mint_uid(name: str) -> dict[str, Any]:
@@ -214,32 +413,37 @@ def _mint_uid(name: str) -> dict[str, Any]:
     choosing the SAME name concurrently must end up with ONE uid — the
     losing writer of an unlocked read-modify-write registered an address
     whose secret died at its restart, stranding the slug on the
-    first-write-wins hub forever. O_EXCL means exactly one minter wins;
-    everyone else adopts the file."""
-    os.makedirs(_ID_DIR, exist_ok=True)
+    first-write-wins hub forever. The UNIQUE name under BEGIN IMMEDIATE
+    means exactly one minter wins; everyone else adopts the stored row."""
     fresh = {"uid": uuid.uuid4().hex + uuid.uuid4().hex}     # 256-bit uid
+    con = _db()
     try:
-        fd = os.open(_id_path(name), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(fresh, f, indent=1)
-            f.flush()
-            os.fsync(f.fileno())      # §2d: the mint is as torn-proof as the
-                                      # save — this uid is the ONLY copy
-        try:
-            os.chmod(_id_path(name), 0o600)
-        except OSError:
-            pass
-        return fresh
-    except FileExistsError:
-        return _load_ident(name)      # the other starter won — adopt theirs
+        con.execute("BEGIN IMMEDIATE")
+        cur = con.execute(
+            "INSERT INTO identities (name, uid, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(name) DO NOTHING",
+            (name, str(fresh["uid"]), _now_iso()))
+        con.commit()
+        if cur.rowcount > 0:
+            return fresh
+        return _row_to_ident(con, name)   # the other starter won — adopt
+    except sqlite3.Error:
+        con.rollback()
+        return _load_ident(name)
+    finally:
+        con.close()
 
 
 def _known_names() -> list[str]:
     try:
-        return sorted(f[:-5] for f in os.listdir(_ID_DIR)
-                      if f.endswith(".json"))
-    except OSError:
+        con = _db()
+    except sqlite3.Error:
         return []
+    try:
+        return sorted(str(r["name"]) for r in
+                      con.execute("SELECT name FROM identities").fetchall())
+    finally:
+        con.close()
 
 
 def _ident(name: str | None = None, mint: bool = True) -> dict[str, Any]:
@@ -359,6 +563,15 @@ def register(name: str | None = None) -> dict[str, Any]:
             f"in an earlier session, this is correct; if you did not, "
             f"another live session owns this mailbox and you two would "
             f"split each other's mail — choose a different name")
+    conflicts = _migration_conflicts(nm)
+    if conflicts:
+        res["migration_conflict"] = (
+            f"⚠ a pre-SQLite identity file for {nm!r} carries a DIFFERENT "
+            f"secret than the active identity ({', '.join(conflicts)}). The "
+            f"active identity keeps this address; the file was NOT imported "
+            f"and NOT modified. If the FILE's identity is the one this "
+            f"session meant, resolve by hand: unregister/rename the active "
+            f"one, then delete the migrations row for that path")
     return res
 
 

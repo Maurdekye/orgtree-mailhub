@@ -31,6 +31,26 @@ listed is meant to be byte-identical or behavior-identical to V1.
    `.env.example` documents every variable instead.
 4. **Scaffolding added** — `.gitignore`, `.gitattributes`, `.dockerignore`,
    this file. No product behavior.
+5. **hubtool identity storage: JSON files → SQLite** (the one ruled product
+   enhancement, 2026-09-14: all mutable hub data is SQLite; no active JSON
+   store may remain). Identities now live in
+   `~/.orgtree/hub-clients/clients.sqlite3` (WAL, synchronous=FULL,
+   0o600); the old one-file-per-identity JSONs are read ONCE as migration
+   input — deterministic, idempotent, transactional, recorded in the
+   `migrations` table, and strictly non-destructive (sources never renamed,
+   rewritten or deleted; they are the rollback boundary). Every identity
+   property survives: uid (the secret → the same address), hub list order,
+   per-hub seen-ring order. Behavioral deltas, all strictly narrower than
+   V1's: a corrupt pre-SQLite file is preserved IN PLACE instead of being
+   quarantine-renamed (`register` still refuses read-only verbs and warns
+   `reminted`); a name owned by both a database row and a JSON with a
+   different secret is a recorded CONFLICT — the active row wins, nothing
+   is imported, and `register` discloses it (`migration_conflict`).
+   `tests/test_hubtool.py` keeps every behavioral check (36/36) with only
+   its storage probes translated (fsync probes → synchronous=FULL +
+   commit-before-return; quarantine → preserved-in-place);
+   `tests/test_hubtool_migration.py` covers the migration itself (7 checks).
+   The hub SERVER needed no change: V1 already stored everything in SQLite.
 
 ## Known V1 gaps carried across deliberately
 

@@ -185,15 +185,15 @@ def fresh_ident():
 
 
 def ident_file():
-    """The ACTIVE identity's file (per-session name-keyed since the
-    2026-08-05 ruling)."""
+    """The ACTIVE identity's PERSISTED record (per-session name-keyed since
+    the 2026-08-05 ruling; stored in the SQLite identity store since the
+    orgtree-mailhub extraction — this reads what is durably on disk, exactly
+    as the old JSON read did)."""
     nm = hubtool._active_name()
     if not nm:
         return {}
-    try:
-        return json.load(open(hubtool._id_path(nm), encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    d = hubtool._load_ident(nm)
+    return d if d.get("uid") else {}
 
 
 def become(name: str) -> str:
@@ -431,9 +431,8 @@ def sec_names() -> None:
         assert "no identity named" in out and "nebula-builder" in out, (
             f"a typo'd listen neither refused nor named the known "
             f"identities: {out!r}")
-        assert not os.path.exists(
-            hubtool._id_path("nebula-buidler")), (
-            "the typo'd listen MINTED an identity file anyway")
+        assert "nebula-buidler" not in hubtool._known_names(), (
+            "the typo'd listen MINTED an identity anyway")
     check("names · a typo'd listener refuses and prints the known names, "
           "minting nothing", _typo_listener_refuses_and_names_the_known)
 
@@ -494,20 +493,17 @@ def sec_crash() -> None:
     print("\n§2c  crash safety — the file that IS the credential")
 
     def _corrupt_file_is_loud_and_preserved():
-        # was a gap; the shipped fix chose QUARANTINE + LOUD REMINT over the
-        # prescribed refusal: the uid in a torn file is unrecoverable either
-        # way (there is no backup to restore), and a hook-onboarded session
-        # that refuses forever is a silent no-mail-channel fleet failure —
-        # so instead (a) the wreck is preserved beside the file
-        # (.corrupt-<ts>), never overwritten, (b) register() carries a
-        # `reminted` warning naming the consequence (new address, old one
-        # dead, tell your correspondents), and (c) read-only verbs
-        # (mint=False) still refuse rather than proceed.
+        # was a gap; the shipped V1 fix chose QUARANTINE + LOUD REMINT over
+        # the prescribed refusal. The SQLite store keeps the same TWO
+        # promises — read-only verbs refuse, register() re-mints LOUDLY —
+        # and strengthens the third: the wreck (now a pre-SQLite JSON file,
+        # i.e. migration input) is preserved IN PLACE, byte-identical, never
+        # renamed or overwritten. The scenario is a machine that inherited a
+        # torn V1 identity file the migration could not read.
         fresh_ident()
-        first = dict(hubtool._ident("survivor"))
-        assert first.get("uid"), "fixture: an identity must exist first"
+        os.makedirs(hubtool._ID_DIR, exist_ok=True)
         with open(hubtool._id_path("survivor"), "w", encoding="utf-8") as f:
-            f.write("")                # the crash artifact
+            f.write("")                # the inherited crash artifact
         hubtool._CUR.clear()
         ro = hubtool._ident("survivor", mint=False)
         assert not ro.get("uid"), (
@@ -516,39 +512,37 @@ def sec_crash() -> None:
         assert out.get("reminted"), (
             "re-registering over a corrupt file carried no warning — the "
             "session keeps its name, loses its address, and is told nothing")
-        assert out.get("slug") and first["uid"] not in json.dumps(out)
-        wrecks = [f for f in os.listdir(hubtool._ID_DIR)
-                  if f.startswith("survivor.json.corrupt-")]
-        assert wrecks, "the damaged file was overwritten, not quarantined"
-    check("crash · a damaged identity file is quarantined and the re-mint is "
-          "LOUD (`reminted`), never silent", _corrupt_file_is_loud_and_preserved)
+        assert out.get("slug")
+        assert io_read(hubtool._id_path("survivor")) == "", (
+            "the corrupt source file was modified — migration input is "
+            "read-only, and the wreck is the post-mortem evidence")
+    check("crash · a corrupt inherited identity file is preserved in place "
+          "and the re-mint is LOUD (`reminted`), never silent",
+          _corrupt_file_is_loud_and_preserved)
 
     def _an_interrupted_save_does_not_destroy_the_old_identity():
         fresh_ident()
         hubtool._ident("durable")
-        before = io_read(hubtool._id_path("durable"))
-        assert '"uid"' in before
-        real_dump = hubtool.json.dump
+        before = ident_file()
+        assert before.get("uid")
 
-        def boom(*a, **k):                    # the write dies mid-flight
-            raise OSError("power cut")
-        hubtool.json.dump = boom              # type: ignore[assignment]
+        class _PowerCut(dict):                # dies mid-transaction, AFTER
+            def items(self):                  # the identity row was already
+                raise OSError("power cut")    # rewritten inside the tx
         try:
-            try:
-                hubtool._save_ident("durable", {"uid": "n" * 64,
-                                                "name": "durable"})
-            except OSError:
-                pass
-        finally:
-            hubtool.json.dump = real_dump     # type: ignore[assignment]
-        after = io_read(hubtool._id_path("durable"))
-        assert after == before, (
-            "an interrupted save left the identity file as "
-            f"{after[:40]!r} — open(path, 'w') truncates BEFORE anything is "
-            "written, so the credential is destroyed by the attempt")
-    # promoted from gap() 2026-08-05: _save_ident is tmp + fsync + replace
-    # since 5ef6028 — the interrupted dump dies in the .tmp file and the
-    # live credential survives untouched
+            hubtool._save_ident("durable", {"uid": "n" * 64,
+                                            "name": "durable",
+                                            "seen": _PowerCut(x=[1])})
+        except OSError:
+            pass
+        after = ident_file()
+        assert after.get("uid") == before["uid"], (
+            f"an interrupted save left the identity as {after!r} — the "
+            "store must roll the whole transaction back, or the credential "
+            "is destroyed by the attempt")
+    # the old store proved this with tmp + fsync + replace (5ef6028); the
+    # SQLite store proves it with a transaction: the poisoned save above
+    # fails AFTER the row rewrite ran, so only a real rollback passes
     check("crash · an interrupted save leaves the previous identity intact",
           _an_interrupted_save_does_not_destroy_the_old_identity)
 
@@ -576,67 +570,67 @@ def io_read(path: str) -> str:
 
 # ══════════════════════════════════════════════ §2d (redteam, post-fix)
 def sec_mint_durability() -> None:
-    """The 5ef6028 fix made _save_ident durable (tmp + fsync + replace). The
-    OTHER writer — _mint_uid, the O_EXCL create that brings an identity into
-    existence — still writes buffered. That is the highest-risk window in the
-    whole flow, because the hub's copy of the fingerprint IS durable: the
-    remote side remembers an address whose local secret was never flushed."""
-    print("\n§2d  durability of the MINT path (the fix's other half)")
+    """The old store's durability was per-file (tmp + fsync + replace, and an
+    O_EXCL mint that fsynced inside the handle). The SQLite store carries the
+    SAME property as engine configuration: synchronous=FULL under WAL on
+    every connection — the uid is the ONLY copy of the secret, and the hub's
+    copy of the fingerprint IS durable, so a power cut between the mint and
+    the OS flush must not strand a hub-registered address (2026-08-05)."""
+    print("\n§2d  durability of the store (the fix's other half)")
 
-    def _fsync_probe(fn):
-        """Run fn with os.fsync counted. Returns the call count."""
-        seen = [0]
-        real = hubtool.os.fsync
-
-        def counting(fd):
-            seen[0] += 1
-            return real(fd)
-        hubtool.os.fsync = counting          # type: ignore[assignment]
+    def _store_is_full_synchronous():
+        fresh_ident()
+        con = hubtool._db()
         try:
-            fn()
+            sync = con.execute("PRAGMA synchronous").fetchone()[0]
+            mode = str(con.execute("PRAGMA journal_mode").fetchone()[0])
+            assert int(sync) == 2, (
+                f"the identity store runs synchronous={sync} — the uid is "
+                f"the only copy of the secret, so anything below FULL "
+                f"re-opens the torn-identity window the 2026-08-05 power "
+                f"cut proved real")
+            assert mode.lower() == "wal", mode
         finally:
-            hubtool.os.fsync = real          # type: ignore[assignment]
-        return seen[0]
+            con.close()
+    check("mint · the identity store runs synchronous=FULL under WAL (the "
+          "uid is the only copy of the secret)", _store_is_full_synchronous)
 
-    def _save_is_durable():
-        """ANTI-VACUITY: the same probe must SEE the fsync the fix added, or
-        the gap below would 'pass' on a broken probe rather than a real hole."""
+    def _mint_is_committed_before_return():
         fresh_ident()
-        n = _fsync_probe(lambda: hubtool._save_ident(
-            "durable-probe", {"uid": "d" * 64, "name": "durable-probe"}))
-        assert n >= 1, "the probe cannot see _save_ident's fsync"
-    check("mint · the probe sees _save_ident's fsync (so the next check is a "
-          "real absence)", _save_is_durable)
+        fresh = hubtool._mint_uid("newborn")
+        assert fresh.get("uid")
+        con = hubtool._db()      # a SEPARATE connection sees only COMMITTED
+        try:                     # state — an open transaction would not show
+            row = con.execute("SELECT uid FROM identities WHERE name=?",
+                              ("newborn",)).fetchone()
+        finally:
+            con.close()
+        assert row and str(row["uid"]) == str(fresh["uid"]), (
+            "_mint_uid returned before its transaction committed — a crash "
+            "here leaves register() handing the hub a durable fingerprint "
+            "of a secret that never reached disk, which is exactly the "
+            "stranded-address shape the 2026-08-05 outage produced")
+    check("mint · the minted uid is COMMITTED before register() can hand "
+          "the hub a fingerprint", _mint_is_committed_before_return)
 
-    def _mint_is_durable():
+    def _wreck_is_preserved_in_place():
+        # the old fix preserved a corrupt file by QUARANTINE (renamed
+        # .corrupt-<ts>); the SQLite store preserves it IN PLACE, unmodified
+        # — pre-SQLite files are migration input and migration input is
+        # read-only. Same promise, stronger form: the evidence keeps its name.
         fresh_ident()
-        n = _fsync_probe(lambda: hubtool._mint_uid("newborn"))
-        assert n >= 1, (
-            "_mint_uid created the identity file with no flush/fsync — a "
-            "power cut between the mint and the OS flush leaves the file "
-            "empty while the hub already holds sha256(uid), which is exactly "
-            "the stranded-address shape the 2026-08-05 outage produced")
-    # promoted from gap() 2026-08-05, fixed same day (§2d): _mint_uid now
-    # flush+fsyncs inside the O_EXCL handle before register() hands the hub
-    # a durable fingerprint of a secret that exists only in that file
-    check("mint · the O_EXCL mint fsyncs the file it just created",
-          _mint_is_durable)
-
-    def _quarantine_keeps_the_wreck():
-        # the fix's own promise, measured: a corrupt file is preserved as
-        # evidence rather than overwritten
-        fresh_ident()
-        hubtool._ident("wrecked")
-        with open(hubtool._id_path("wrecked"), "w", encoding="utf-8") as f:
-            f.write("\x00\x00\x00")
+        os.makedirs(hubtool._ID_DIR, exist_ok=True)
+        with open(hubtool._id_path("wrecked"), "wb") as f:
+            f.write(b"\x00\x00\x00")
         hubtool._CUR.clear()
-        hubtool._ident("wrecked")
-        wrecks = [f for f in os.listdir(hubtool._ID_DIR)
-                  if f.startswith("wrecked.json.corrupt-")]
-        assert wrecks, os.listdir(hubtool._ID_DIR)
-    check("mint · a corrupt identity is quarantined as .corrupt-<ts>, not "
-          "overwritten — the wreck survives for post-mortem",
-          _quarantine_keeps_the_wreck)
+        hubtool._ident("wrecked")            # mints a NEW identity in the DB
+        raw = open(hubtool._id_path("wrecked"), "rb").read()
+        assert raw == b"\x00\x00\x00", (
+            f"the corrupt source file was altered to {raw!r} — the wreck "
+            f"must survive byte-identical for post-mortem")
+    check("mint · a corrupt pre-SQLite identity file is preserved in place, "
+          "byte-identical — the wreck survives for post-mortem",
+          _wreck_is_preserved_in_place)
 
 
 # ══════════════════════════════════════════════════════════════════════ §3
@@ -673,27 +667,30 @@ def sec_secret() -> None:
     check("hub_register's result carries the address, never the uid",
           _register_result_is_clean)
 
-    def _the_identity_file_is_not_world_readable():
-        # promoted from gap() 2026-08-05: both write paths chmod 0o600. On
-        # Windows chmod cannot clear group/other bits (st_mode is fabricated
-        # from the read-only flag), so the POSIX property is measured by stat
-        # only where stat can express it; on Windows the guard is that the
-        # chmod calls EXIST on both writers — a drift check on the mechanism,
-        # since the deployment the spec targets (Linux) enforces the real bit.
+    def _the_identity_store_is_not_world_readable():
+        # promoted from gap() 2026-08-05: the store is chmod 0o600 at
+        # creation. On Windows chmod cannot clear group/other bits (st_mode
+        # is fabricated from the read-only flag), so the POSIX property is
+        # measured by stat only where stat can express it; on Windows the
+        # guard is that the chmod call EXISTS on the store creator — a drift
+        # check on the mechanism, since the deployment the spec targets
+        # (Linux) enforces the real bit.
         fresh_ident()
         hubtool._ident("perms")
+        db = os.path.join(hubtool._ID_DIR, "clients.sqlite3")
+        assert os.path.isfile(db)
         if os.name != "nt":
-            mode = os.stat(hubtool._id_path("perms")).st_mode & 0o777
+            mode = os.stat(db).st_mode & 0o777
             assert mode & 0o077 == 0, (
-                f"the identity file holding the SECRET is mode {mode:o} — on "
-                f"a shared machine any other user can read it and become "
-                f"this chat")
+                f"the identity store holding the SECRETS is mode {mode:o} — "
+                f"on a shared machine any other user can read it and become "
+                f"every chat on this machine")
         else:
             src = open(hubtool.__file__, encoding="utf-8").read()
-            assert src.count("os.chmod(") >= 2 and "0o600" in src, \
-                "the 0o600 chmod calls left _save_ident/_mint_uid"
-    check("the identity file is not readable by other users",
-          _the_identity_file_is_not_world_readable)
+            assert "os.chmod(" in src and "0o600" in src, \
+                "the 0o600 chmod left the store creator"
+    check("the identity store is not readable by other users",
+          _the_identity_store_is_not_world_readable)
 
 
 # ══════════════════════════════════════════════════════════════════════ §4
