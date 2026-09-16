@@ -51,6 +51,23 @@ listed is meant to be byte-identical or behavior-identical to V1.
    commit-before-return; quarantine → preserved-in-place);
    `tests/test_hubtool_migration.py` covers the migration itself (7 checks).
    The hub SERVER needed no change: V1 already stored everything in SQLite.
+6. **`serve.py` honors `HUB_BIND` at the app** (`de2ffc4`, recorded here
+   retroactively — it landed without a ledger entry). V1's compose already
+   used `HUB_BIND` to qualify the host-side port mapping; the app itself
+   always bound 0.0.0.0. For non-Docker hosting (the embedding desktop
+   process) loopback-only must be expressible at the app, so `mailhub.serve`
+   now reads it directly. Default unchanged; Docker behavior unchanged.
+7. **`HUB_PUBLIC_BIND` + parameterized container name** (2026-09-16,
+   coordinator ruling on a cross-org request from neoja). The public
+   listener's interface becomes expressible the same two ways as the full
+   app's: `HUB_PUBLIC_BIND` qualifies the compose mapping's host interface
+   and is honored directly by `mailhub.serve` outside Docker; default stays
+   0.0.0.0 both places, so no deployment moves. `HUB_PUBLIC_HOST_PORT`
+   remains a bare port (an IP embedded in it used to interpolate into a
+   valid mapping by accident; that form now fails compose validation).
+   `container_name` becomes `${HUB_CONTAINER_NAME:-orgtree-mailhub}` —
+   container names are host-global, so a fixed one blocked a second
+   instance per host; the default is unchanged.
 
 ## Known V1 gaps carried across deliberately
 

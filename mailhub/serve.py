@@ -7,9 +7,12 @@ HUB_BIND (default 0.0.0.0) is which interface the FULL app binds. Inside
 Docker this stays 0.0.0.0 and the compose port mapping controls exposure —
 exactly as before. It exists for NON-Docker hosting (an embedding desktop
 process), where there is no port mapping and loopback-only must be
-expressible at the app itself. The public listener always binds 0.0.0.0:
-every route it serves is authenticated, and remote reachability is its
-entire purpose.
+expressible at the app itself. HUB_PUBLIC_BIND (default 0.0.0.0) is the
+same knob for the public listener: every route it serves is authenticated
+and remote reachability is its usual purpose, so the default stays wide —
+but non-Docker hosting that fronts it with a proxy or tunnel can now pin
+it to loopback the same way, instead of the interface being the one thing
+the two listeners configure differently.
 
     python -m mailhub.serve
 """
@@ -30,8 +33,10 @@ def main() -> None:
     bind = (os.environ.get("HUB_BIND") or "").strip() or "0.0.0.0"
     servers = [uvicorn.Server(uvicorn.Config(app, host=bind, port=port))]
     if (os.environ.get("HUB_PUBLIC") or "").strip():
+        public_bind = (os.environ.get("HUB_PUBLIC_BIND") or "").strip() \
+            or "0.0.0.0"
         servers.append(uvicorn.Server(uvicorn.Config(
-            PublicHub(app), host="0.0.0.0", port=7371)))
+            PublicHub(app), host=public_bind, port=7371)))
 
     async def serve_all() -> None:
         await asyncio.gather(*(s.serve() for s in servers))

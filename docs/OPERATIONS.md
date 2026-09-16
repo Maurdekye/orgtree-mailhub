@@ -17,7 +17,16 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_RETENTION_DAYS` | `30` | hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state** |
 | `HUB_ORG_RETENTION_DAYS` | `45` | roster rows silent this long are pruned, except rows still holding queued mail; a pruned client re-registers itself on its next 401 |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
-| `HUB_BIND` | `0.0.0.0` | which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker `mailhub.serve` honors it directly (an embedding desktop process sets `127.0.0.1`). The public listener always binds 0.0.0.0 — all its routes are authenticated |
+| `HUB_BIND` | `0.0.0.0` | which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker `mailhub.serve` honors it directly (an embedding desktop process sets `127.0.0.1`) |
+| `HUB_PUBLIC_BIND` | `0.0.0.0` | the same knob for the PUBLIC listener: under compose the host-side interface of its port mapping, outside Docker honored directly by `mailhub.serve`. Every public route is authenticated, hence the wide default; set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
+| `HUB_PUBLIC_HOST_PORT` | `7378` | compose only: the host PORT mapped to the public listener's internal 7371. A bare port — the interface comes from `HUB_PUBLIC_BIND` |
+| `HUB_CONTAINER_NAME` | `orgtree-mailhub` | compose only: the container's name. Container names are host-global (volumes are compose-project-prefixed, names are not), so a second instance on one host must override it |
+
+Two instances on one host need three distinct things: a separate compose
+project (`docker compose -p <name>`, or a second checkout directory — this
+alone gives each instance its own volume, because compose prefixes volume
+names with the project), a `HUB_CONTAINER_NAME` override, and their own
+host ports. Nothing else collides.
 
 ## Health and logs
 
@@ -47,8 +56,23 @@ If you want TLS, put a reverse proxy (e.g. Caddy) in front — see README.
 
 The whole state is `HUB_DATA`: `hub.sqlite3` (+ WAL sidecars) and `blobs/`.
 
+⚠ **The volume's real name is not the name in `compose.yaml`** (cross-org
+find 2026-09-16, neoja): compose prefixes volume names with the project
+name — by default the checkout directory — so the volume is typically
+`orgtree-mailhub_orgtree-hub-data`, not `orgtree-hub-data`. This matters
+because `docker run -v <name>:...` silently CREATES a missing volume: a
+backup written against the short name copies a fresh empty volume and
+looks successful. Resolve the real name first, and let a wrong name fail
+loudly before anything copies:
+
+```
+docker volume ls --filter name=orgtree-hub-data     # find the real name
+VOL=orgtree-mailhub_orgtree-hub-data
+docker volume inspect "$VOL" >/dev/null             # errors if it does not exist
+```
+
 - **Backup**: `docker compose stop mailhub`, copy the volume contents
-  (`docker run --rm -v orgtree-hub-data:/data -v <dest>:/out alpine cp -a
+  (`docker run --rm -v "$VOL":/data -v <dest>:/out alpine cp -a
   /data /out/`), start again. Online backup is also safe via SQLite's backup
   API if you prefer not to stop; copying the raw files while the hub is
   running is NOT safe (WAL).
