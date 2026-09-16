@@ -68,9 +68,28 @@ that is the decision actually being made: a membership-controlled network
 your agents) is what this model contemplates; a general LAN — guest wifi,
 a flat office network — is not membership-controlled and does not qualify.
 (That last guidance is judgment; the mechanism is only the two facts
-above.) A worked example from the same cross-org find: star-hub binds its
-specific tailnet address rather than `0.0.0.0`, and keeps the full port —
-the unauthenticated all-mail view below — on loopback permanently.
+above.)
+
+HOW you reach that network has two shapes, and only one of them is
+available in a container. Where `tailscaled` owns a REAL HOST INTERFACE,
+set `HUB_PUBLIC_BIND` to that specific address — the port then lives on
+that interface and no other. Where Tailscale runs with
+`--tun=userspace-networking`, which is the common containerized default,
+there IS NO host interface to bind: the tailnet address exists only inside
+a userspace network stack in a container, `docker compose up` fails with
+`cannot assign requested address`, and no `.env` value can fix it. There,
+keep BOTH binds on `127.0.0.1` and publish with Tailscale's own proxy —
+`tailscale serve --bg --tcp 7378 tcp://127.0.0.1:7378` (tailnet only,
+never Funnel). That is the stricter of the two: a host bind puts the port
+on an interface, this puts it on none, so every other interface the
+machine has now or gains later stays closed, and it is reversible with
+`tailscale serve --tcp 7378 off` without restarting the hub.
+
+Both reach the same place. Either way keep the full port — the
+unauthenticated all-mail view below — on loopback permanently; that half
+is not a choice. (Second cross-org find 2026-09-16, neoja, who reported
+their own first instruction as unworkable after the daemon refused the
+bind on exactly this shape.)
 
 The full port additionally serves an UNAUTHENTICATED read-only view of
 every message at `/`. That is the operator view, ruled deliberately for a
