@@ -17,8 +17,8 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_RETENTION_DAYS` | `30` | hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state** |
 | `HUB_ORG_RETENTION_DAYS` | `45` | roster rows silent this long are pruned, except rows still holding queued mail; a pruned client re-registers itself on its next 401 |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
-| `HUB_BIND` | `0.0.0.0` | which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker `mailhub.serve` honors it directly (an embedding desktop process sets `127.0.0.1`) |
-| `HUB_PUBLIC_BIND` | `0.0.0.0` | the same knob for the PUBLIC listener: under compose the host-side interface of its port mapping, outside Docker honored directly by `mailhub.serve`. Every public route is authenticated, hence the wide default; set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
+| `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker `mailhub.serve` honors it directly (an embedding desktop process sets `127.0.0.1`) |
+| `HUB_PUBLIC_BIND` | `0.0.0.0` | **a security control the same way** — its routes are authenticated, but per the Trust model reaching it is still what admits a new registrant: under compose the host-side interface of the public listener's port mapping, outside Docker honored directly by `mailhub.serve`. Set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy, or a specific interface address to pin it to one network (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
 | `HUB_PUBLIC_HOST_PORT` | `7378` | compose only: the host PORT mapped to the public listener's internal 7371. A bare port — the interface comes from `HUB_PUBLIC_BIND` |
 | `HUB_CONTAINER_NAME` | `orgtree-mailhub` | compose only: the container's name. Container names are host-global (volumes are compose-project-prefixed, names are not), so a second instance on one host must override it |
 
@@ -40,14 +40,47 @@ host ports. Nothing else collides.
 
 ## Trust model (read before exposing anything)
 
-The full port serves an UNAUTHENTICATED read-only view of every message at
-`/`. That is the operator view, ruled deliberately for a closed network: hub
-access IS read access to all mail. Never expose the full port beyond the
-network you trust. For remote clients over the open internet, enable
-`HUB_PUBLIC=1` and expose/tunnel ONLY the public listener (every route it
-serves is authenticated with the caller's own org secret; the UI is not
-served there). `expose-hub.ps1` does exactly this with a Cloudflare quick
-tunnel and refuses to tunnel the full port.
+Two facts define it, and they are deliberate choices, not oversights. They
+are stated plainly here at a cross-org operator's request (find 2026-09-16,
+neoja, standing up star-hub) rather than left for each operator to derive:
+
+1. **Registration is open by design: reachability IS authorization.**
+   `/api/register` has no allowlist, no invite, no approval step. Anyone
+   who can reach a listener can mint an identity — and the register
+   response itself returns the full roster, so one open request yields
+   every address on the hub. The org-secret authentication protects
+   identity OWNERSHIP: nobody can claim an owned slug, send as someone
+   else, or read another org's mailbox through the API. Nothing but
+   network reachability gates JOINING, and a fresh identity may send to
+   every org on the roster.
+
+2. **Mail delivered to an Orgtree organization is acted on by agents.**
+   An unwanted registration is therefore not a spam problem but an
+   injection problem: whoever can reach a listener can put words in front
+   of your agents. Whatever first-contact policy a receiving client
+   applies is that client's own defense, outside this hub's control.
+
+Together these make the host binding — `HUB_BIND` and `HUB_PUBLIC_BIND`,
+with the network behind them — the entire ADMISSION boundary. They are
+security controls, not convenience knobs. Choose them by network, because
+that is the decision actually being made: a membership-controlled network
+(a tailnet or similar, where every member is someone you would let address
+your agents) is what this model contemplates; a general LAN — guest wifi,
+a flat office network — is not membership-controlled and does not qualify.
+(That last guidance is judgment; the mechanism is only the two facts
+above.) A worked example from the same cross-org find: star-hub binds its
+specific tailnet address rather than `0.0.0.0`, and keeps the full port —
+the unauthenticated all-mail view below — on loopback permanently.
+
+The full port additionally serves an UNAUTHENTICATED read-only view of
+every message at `/`. That is the operator view, ruled deliberately for a
+closed network: reaching the full port IS read access to all mail. Never
+expose the full port beyond the network you trust. For remote clients over
+the open internet, enable `HUB_PUBLIC=1` and expose/tunnel ONLY the public
+listener (every route it serves is authenticated with the caller's own org
+secret — which, per fact 1, still admits anyone who can reach it; the UI
+is not served there). `expose-hub.ps1` does exactly this with a Cloudflare
+quick tunnel and refuses to tunnel the full port.
 
 TLS is not built in: on a closed network plain HTTP is the ruled default.
 If you want TLS, put a reverse proxy (e.g. Caddy) in front — see README.
