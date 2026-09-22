@@ -30,10 +30,15 @@
 //! decoder does not reproduce. Where the crate CAN reproduce them it does,
 //! rather than declaring a gap: object entries keep CPython's insertion order
 //! (see [`PyValue`]) because the source reads mappings in order, and the
-//! integer token `-0` decodes to the `int` 0 exactly as CPython's does. Where that happens the crate returns
-//! [`RunOutcome::Unrepresentable`] with a reason, and the shared profile
-//! carries the input as a NAMED unimplemented obligation. It never guesses an
-//! answer and never lets an unmodelled input read as a pass:
+//! integer token `-0` decodes to the `int` 0 exactly as CPython's does.
+//!
+//! The rest it declares. Where the crate cannot model an input it returns
+//! [`RunOutcome::Unrepresentable`] carrying a [`Refusal`] — a STABLE reason
+//! name plus the fields that make it specific, not just prose — and the
+//! shared profile carries that input as a NAMED unimplemented obligation
+//! bound to that same reason. It never guesses an answer, never lets an
+//! unmodelled input read as a pass, and never lets one declared gap's refusal
+//! stand in for another's:
 //!
 //! * CPython's `json` accepts the bare tokens `NaN`, `Infinity` and
 //!   `-Infinity`, and integers of unbounded width. `serde_json` rejects the
@@ -71,6 +76,6 @@ pub mod envelope;
 pub use envelope::{
     decode_line, process_line, py_dumps, python_repr, python_str, python_strip, run, run_scripted,
     tool_names, tools, universal_lines, Call, DecodeError, DispatchOutcome, Dispatcher,
-    LineOutcome, PyDict, PyValue, RunOutcome, RunReport, ScriptedDispatcher, MAX_NESTING_DEPTH,
-    PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION, SOURCE_COMMIT, TOOLS_JSON,
+    LineOutcome, PyDict, PyValue, Refusal, RunOutcome, RunReport, ScriptedDispatcher,
+    MAX_NESTING_DEPTH, PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION, SOURCE_COMMIT, TOOLS_JSON,
 };

@@ -158,7 +158,7 @@
     {
       "id": "repr-domain.non-ascii-inside-a-container",
       "implementation": "rust",
-      "summary": "repr() of a non-ASCII string follows CPython's printability table, which the crate does not carry. It reports `unrepresentable` rather than guessing an answer. str() of a bare string tool name, which is the case an MCP client can actually reach, is already exact.",
+      "summary": "repr() of a non-ASCII string follows CPython's printability table, which the crate does not carry. It reports `unrepresentable` rather than guessing an answer. str() of a bare string tool name, which is the case an MCP client can actually reach, is already exact. The refusal carries the stable reason `repr-of-non-ascii-string` and the string itself, and the profile case binds to both.",
       "exercised_by": "profile case",
       "disposition": "open - needs a Unicode category table."
     },
@@ -179,13 +179,13 @@
     {
       "id": "depth-domain.nesting-past-the-stated-bound",
       "implementation": "rust",
-      "summary": "CPython's decoder accepts nesting far deeper than this crate states a bound for. serde_json's own default bound is 128, which ordinary input can cross, so the crate raises it and enforces its own MAX_NESTING_DEPTH of 256 instead. Past that bound the crate REFUSES the input by name rather than letting a decoder error read as the source's silent skip.",
+      "summary": "CPython's decoder accepts nesting far deeper than this crate states a bound for. serde_json's own default bound is 128, which ordinary input can cross, so the crate raises it and enforces its own MAX_NESTING_DEPTH of 256 instead. Past that bound the crate REFUSES the input by name rather than letting a decoder error read as the source's silent skip. The refusal carries the stable reason `nesting-depth-exceeded` and the bound it exceeded, and the profile case binds to both, so another refusal cannot stand in for this one.",
       "exercised_by": "profile case",
       "disposition": "open - the port has to choose a decoder whose depth behaviour is bounded by an explicit policy rather than by a library default. The bound is declared and exercised on both sides here: 140 deep is answered identically by both implementations, 257 deep is refused by name."
     }
   ],
   "case_manifest": {
-    "count": 146,
+    "count": 154,
     "ids": [
       "arguments.booleans-and-numbers-stay-distinct",
       "arguments.empty-list",
@@ -193,6 +193,9 @@
       "arguments.empty-string",
       "arguments.false",
       "arguments.missing",
+      "arguments.negative-zero-exponent-value",
+      "arguments.negative-zero-float-value",
+      "arguments.negative-zero-integer-value",
       "arguments.nested-140-deep-is-answered",
       "arguments.null",
       "arguments.object-element-takes-its-keys-in-order",
@@ -211,6 +214,11 @@
       "framing.invalid-json-skipped",
       "framing.leading-and-trailing-spaces",
       "framing.lone-cr-separated",
+      "framing.minus-zero-after-a-closing-bracket-is-malformed",
+      "framing.minus-zero-after-a-float-is-malformed",
+      "framing.minus-zero-after-a-space-is-malformed",
+      "framing.minus-zero-after-an-exponent-is-malformed",
+      "framing.minus-zero-after-an-integer-is-malformed",
       "framing.mixed-valid-and-invalid",
       "framing.nbsp-padding",
       "framing.no-trailing-newline",
@@ -4151,13 +4159,17 @@
       "unimplemented": {
         "rust": {
           "obligation": "repr-domain.non-ascii-inside-a-container",
-          "difference": "the crate REFUSES the input by name at line 0 rather than guessing CPython's repr escaping, so no reply is written and the prepared handler outcome is left unconsumed",
+          "difference": "the crate REFUSES the input by name at line 0 because repr() of the non-ASCII string 'café' needs CPython's printability table, rather than guessing the escaping, so no reply is written and the prepared handler outcome is left unconsumed",
           "observed": {
             "frames": [],
             "calls": [],
             "outcome": "unrepresentable",
             "unrepresentable": {
-              "line_index": 0
+              "line_index": 0,
+              "reason": "repr-of-non-ascii-string",
+              "fields": {
+                "text": "café"
+              }
             },
             "lines_unprocessed": 1,
             "lines_total": 1,
@@ -5336,13 +5348,17 @@
       "unimplemented": {
         "rust": {
           "obligation": "depth-domain.nesting-past-the-stated-bound",
-          "difference": "the crate REFUSES the line by name at line 0 because it nests past its stated MAX_NESTING_DEPTH of 256, so no reply is written and the prepared handler outcome is left unconsumed. It is NOT skipped in silence, which is what a bare decoder error would have looked like",
+          "difference": "the crate REFUSES the input by name at line 0 for exceeding its stated MAX_NESTING_DEPTH of 256, rather than decoding it the way CPython does, so no reply is written and the prepared handler outcome is left unconsumed",
           "observed": {
             "frames": [],
             "calls": [],
             "outcome": "unrepresentable",
             "unrepresentable": {
-              "line_index": 0
+              "line_index": 0,
+              "reason": "nesting-depth-exceeded",
+              "fields": {
+                "limit": 256
+              }
             },
             "lines_unprocessed": 1,
             "lines_total": 1,
@@ -5384,6 +5400,215 @@
               "count": 1,
               "off": false,
               "zero": 0
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.minus-zero-after-an-integer-is-malformed",
+      "title": "an integer followed by -0 is not valid JSON, so the line is skipped",
+      "input": "{\"id\":\"z\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"x\":1-0}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1,
+        "dispatch_unused": 1
+      }
+    },
+    {
+      "id": "framing.minus-zero-after-a-float-is-malformed",
+      "title": "a float followed by -0 is not valid JSON either",
+      "input": "{\"id\":\"z\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"x\":1.2-0}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1,
+        "dispatch_unused": 1
+      }
+    },
+    {
+      "id": "framing.minus-zero-after-an-exponent-is-malformed",
+      "title": "an exponent form followed by -0 is not valid JSON either",
+      "input": "{\"id\":\"z\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"x\":1e2-0}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1,
+        "dispatch_unused": 1
+      }
+    },
+    {
+      "id": "framing.minus-zero-after-a-closing-bracket-is-malformed",
+      "title": "trailing -0 after a complete value is not valid JSON",
+      "input": "[1]-0\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1,
+        "dispatch_unused": 1
+      }
+    },
+    {
+      "id": "framing.minus-zero-after-a-space-is-malformed",
+      "title": "a space does not make a second number token valid",
+      "input": "{\"a\":1 -0}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1,
+        "dispatch_unused": 1
+      }
+    },
+    {
+      "id": "arguments.negative-zero-integer-value",
+      "title": "a -0 argument value is the int 0, exactly as CPython decodes it",
+      "input": "{\"id\":\"z\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"x\":-0}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "z",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "x": 0
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "arguments.negative-zero-float-value",
+      "title": "a -0.0 argument value stays the negative float",
+      "input": "{\"id\":\"z\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"x\":-0.0}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "z",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "x": -0.0
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "arguments.negative-zero-exponent-value",
+      "title": "a 1e-0 argument value is 1.0; the exponent sign is not a value position",
+      "input": "{\"id\":\"z\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"x\":1e-0}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "z",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "x": 1.0
             }
           }
         ],

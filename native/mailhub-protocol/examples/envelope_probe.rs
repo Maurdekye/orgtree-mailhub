@@ -154,12 +154,20 @@ fn run_job(job: &PyDict) -> Result<PyDict, String> {
             terminal.insert("message".to_string(), text(message));
             out.insert("terminal".to_string(), PyValue::Dict(terminal));
         }
-        RunOutcome::Unrepresentable { line_index, detail } => {
+        RunOutcome::Unrepresentable {
+            line_index,
+            refusal,
+        } => {
             out.insert("outcome".to_string(), text("unrepresentable"));
-            let mut refusal = PyDict::new();
-            refusal.insert("line_index".to_string(), count(*line_index));
-            refusal.insert("detail".to_string(), text(detail));
-            out.insert("unrepresentable".to_string(), PyValue::Dict(refusal));
+            let mut row = PyDict::new();
+            row.insert("line_index".to_string(), count(*line_index));
+            // `reason` and `fields` are the machine-readable half, and they
+            // are what an expectation binds to. `detail` is prose and is
+            // reported so a human reading a failure can see what happened.
+            row.insert("reason".to_string(), text(refusal.reason));
+            row.insert("fields".to_string(), PyValue::Dict(refusal.fields.clone()));
+            row.insert("detail".to_string(), text(&refusal.detail));
+            out.insert("unrepresentable".to_string(), PyValue::Dict(row));
         }
     }
     for (key, value) in [
@@ -218,12 +226,17 @@ fn main() -> ExitCode {
                 emit(&mut out, &PyValue::Dict(row));
                 continue;
             }
-            Err(DecodeError::Malformed(error) | DecodeError::Unrepresentable(error)) => {
+            Err(error) => {
+                // A JOB that does not decode is a harness fault, not a
+                // protocol observation, so both arms read the same way here.
+                let why = match &error {
+                    DecodeError::Malformed(message) => message.clone(),
+                    DecodeError::Unrepresentable(refusal) => {
+                        format!("{}: {}", refusal.reason, refusal.detail)
+                    }
+                };
                 let mut row = PyDict::new();
-                row.insert(
-                    "error".to_string(),
-                    text(&format!("unreadable job: {error}")),
-                );
+                row.insert("error".to_string(), text(&format!("unreadable job: {why}")));
                 emit(&mut out, &PyValue::Dict(row));
                 continue;
             }

@@ -10,7 +10,7 @@
 use mailhub_protocol::{
     decode_line, process_line, py_dumps, python_repr, python_str, python_strip, run, run_scripted,
     tool_names, tools, universal_lines, DecodeError, DispatchOutcome, LineOutcome, PyValue,
-    RunOutcome, ScriptedDispatcher, MAX_NESTING_DEPTH, PROTOCOL_VERSION, SERVER_NAME,
+    Refusal, RunOutcome, ScriptedDispatcher, MAX_NESTING_DEPTH, PROTOCOL_VERSION, SERVER_NAME,
     SERVER_VERSION,
 };
 use serde_json::{json, Value};
@@ -453,10 +453,17 @@ fn nesting_past_the_stated_bound_is_refused_by_name_and_never_skipped() {
         "140 is well within CPython"
     );
     assert!(decode_line(&deep(MAX_NESTING_DEPTH)).is_ok());
-    assert!(matches!(
-        decode_line(&deep(MAX_NESTING_DEPTH + 1)),
-        Err(DecodeError::Unrepresentable(_))
-    ));
+    match decode_line(&deep(MAX_NESTING_DEPTH + 1)) {
+        Err(DecodeError::Unrepresentable(refusal)) => {
+            assert_eq!(refusal.reason, Refusal::NESTING_DEPTH_EXCEEDED);
+            assert_eq!(
+                refusal.fields.get("limit"),
+                Some(&PyValue::Int(MAX_NESTING_DEPTH as i128)),
+                "the bound that was exceeded is part of the refusal, not just its prose"
+            );
+        }
+        other => panic!("expected a named depth refusal, got {other:?}"),
+    }
     assert!(matches!(
         decode_line("{\"a\":}"),
         Err(DecodeError::Malformed(_))
@@ -488,10 +495,75 @@ fn nesting_past_the_stated_bound_is_refused_by_name_and_never_skipped() {
 }
 
 #[test]
+fn a_minus_before_a_zero_is_only_rewritten_when_it_is_a_whole_number_token() {
+    // THE REGRESSION THIS EXISTS FOR. The `-0` rewrite used to fire on any
+    // `-0` outside a string, so `{"x":1-0}` — which CPython's decoder REJECTS,
+    // making the source skip the line in silence — lost its minus, became the
+    // perfectly valid `{"x":10}`, and was dispatched to a handler as work the
+    // source would never have done.
+    for malformed in [
+        "{\"x\":1-0}",
+        "{\"x\":1.2-0}",
+        "{\"x\":1e2-0}",
+        "[1]-0",
+        "{\"a\":1 -0}",
+        "[1,2-0]",
+        "-0-0",
+    ] {
+        assert!(
+            matches!(decode_line(malformed), Err(DecodeError::Malformed(_))),
+            "{malformed} is not valid JSON and must stay invalid, not be repaired \
+             into something dispatchable"
+        );
+    }
+
+    // And nothing that IS a whole `-0` token lost its meaning in the fixing.
+    for (text, expected) in [
+        ("-0", "0"),
+        ("  -0  ", "0"),
+        ("[-0]", "[0]"),
+        ("[-0,1]", "[0, 1]"),
+        ("{\"a\":-0}", "{'a': 0}"),
+        ("[ -0 ]", "[0]"),
+        // Untouched spellings, all still the negative float.
+        ("-0.0", "-0.0"),
+        ("-0e0", "-0.0"),
+        // An exponent sign is not a value position, so `1e-0` is left exactly
+        // as it stands — and decodes to the same 1.0 it always did.
+        ("1e-0", "1.0"),
+        // A `-0` inside a string is data.
+        ("\"x-0y\"", "x-0y"),
+    ] {
+        assert_eq!(python_str(&py(text)).as_deref(), Ok(expected), "{text}");
+    }
+
+    // The whole envelope, not just the decoder: the malformed line is skipped
+    // in silence and the prepared handler outcome is never consumed.
+    let mut dispatcher = ScriptedDispatcher::new(vec![DispatchOutcome::Text("ok".to_string())]);
+    let report = run(
+        "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\
+         \"arguments\":{\"x\":1-0}}}",
+        &mut dispatcher,
+    );
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert!(report.frames.is_empty(), "a skipped line answers nothing");
+    assert!(
+        dispatcher.calls.is_empty(),
+        "no handler may run on a line the source would have skipped"
+    );
+    assert_eq!(dispatcher.unused(), 1);
+}
+
+#[test]
 fn repr_of_a_non_ascii_string_is_refused_rather_than_guessed() {
     // Inside a container the source would call repr(), whose escaping depends
     // on CPython's printability table. Refusing is the declared obligation.
-    assert!(python_repr(&py("[\"caf\\u00e9\"]")).is_err());
+    let refusal = python_repr(&py("[\"caf\\u00e9\"]")).expect_err("this must refuse");
+    assert_eq!(refusal.reason, Refusal::REPR_OF_NON_ASCII_STRING);
+    assert_eq!(
+        refusal.fields.get("text"),
+        Some(&PyValue::Str("caf\u{e9}".to_string()))
+    );
     // But str() of that same string, which is what a tool name actually goes
     // through, is fully supported.
     assert_eq!(python_str(&py("\"caf\\u00e9\"")).unwrap(), "caf\u{e9}");
@@ -507,9 +579,19 @@ fn an_unmodellable_input_is_refused_and_never_answered() {
         &mut dispatcher,
     );
     match report.outcome {
-        RunOutcome::Unrepresentable { line_index, detail } => {
+        RunOutcome::Unrepresentable {
+            line_index,
+            refusal,
+        } => {
             assert_eq!(line_index, 0);
-            assert!(detail.contains("int"), "{detail}");
+            // The REASON is the part an expectation binds to, so it is the
+            // part this test pins. Prose stays prose.
+            assert_eq!(refusal.reason, Refusal::NON_STRING_DICT_KEY);
+            assert_eq!(
+                refusal.fields.get("key_type"),
+                Some(&PyValue::Str("int".to_string()))
+            );
+            assert!(refusal.detail.contains("int"), "{}", refusal.detail);
         }
         other => panic!("expected a refusal, got {other:?}"),
     }

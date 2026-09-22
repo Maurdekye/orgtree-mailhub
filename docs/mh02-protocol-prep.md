@@ -70,7 +70,7 @@ reading of MCP or JSON-RPC, and the profile asserts the source, not the reading.
 | `native/mailhub-protocol/src/envelope.rs` | Parsing, the envelope, the CPython coercion helpers and the injected dispatcher boundary. |
 | `native/mailhub-protocol/tests/envelope_contract.rs` | The crate's own behaviour and framing checks. |
 | `native/mailhub-protocol/examples/envelope_probe.rs` | Test-only pipe driver. Never a service. |
-| `tests/fixtures/mh02-mcp-envelope.json` | The language-neutral profile: 146 cases, a case manifest, the source digests, the eight cards and the declared obligations with their bounded divergences. |
+| `tests/fixtures/mh02-mcp-envelope.json` | The language-neutral profile: 154 cases, a case manifest, the source digests, the eight cards and the declared obligations with their bounded divergences. |
 | `tests/mh02_mcp_contract.py` | The shared assertions plus the Python and Rust adapters. |
 | `docs/mh02-protocol-prep.md` | This file. |
 
@@ -105,24 +105,55 @@ package at all. `PyDict` applies CPython's duplicate-key rule: the first
 occurrence keeps its position and the last assignment wins, so
 `{"b":1,"a":2,"b":3}` is `{'b': 3, 'a': 2}`.
 
-Three further decoder differences are reproduced rather than declared away:
+Four further points about the decoder — the first two are differences it
+reproduces rather than declares away, and the last two are how it reports the
+ones it cannot:
 
 * **`-0`.** `serde_json` special-cases the integer token `-0` into the float
   -0.0, whose `str()` is `"-0.0"`; CPython decodes it with `int` and gets the
   `int` 0, whose `str()` is `"0"`. The two tokens denote one CPython object,
-  so the decoder rewrites integer-syntax `-0` to `0` outside string literals
-  before parsing. `-0.0` and `-0e0` are untouched and stay negative zero.
+  so the decoder exchanges a complete `-0` number token for `0` outside string
+  literals before parsing. `-0.0` and `-0e0` are untouched and stay negative
+  zero. **Two things bound that rewrite, and both are load-bearing.**
+  `decode_line` parses the ORIGINAL text first and returns its error unchanged,
+  so syntactic validity is decided before any rewriting exists — malformed
+  input cannot become executable whatever the scanner does. The scanner then
+  independently requires a COMPLETE number token: the `-` must sit where a
+  value may begin (start of document, or after `[`, `,` or `:`, ignoring
+  whitespace) and `-0` must end the token (end of input, whitespace, `,`, `]`
+  or `}`). Without those guards `{"x":1-0}` — which CPython's decoder rejects,
+  so the source skips the line in silence — lost its minus, became the valid
+  `{"x":10}`, and was dispatched to a handler as real work. `framing.minus-zero-*`
+  carries that input and its neighbours at the public boundary.
 * **Nesting depth.** `serde_json`'s default bound is 128 nested containers,
   which ordinary input can cross while CPython's decoder does not. The crate
   raises that bound (`unbounded_depth`, a serde_json-only feature that adds no
   package) and enforces its own stated `MAX_NESTING_DEPTH` of 256, so 140-deep
   input is answered identically on both sides.
-* **Refusal versus silence.** `DecodeError` separates `Malformed` — input
-  CPython's `json` would also have rejected, which the source's
-  `except ValueError: continue` covers — from `Unrepresentable`, input CPython
-  would have decoded successfully. Only the first is skipped in silence. The
-  second stops the run with a NAMED refusal, because routing it to the skip
-  arm would dress a divergence up as the source's own behaviour.
+* **Refusal versus silence.** `DecodeError` separates `Malformed`, which is
+  skipped in silence under the source's `except ValueError: continue`, from
+  `Unrepresentable`, which stops the run with a NAMED refusal because routing
+  it to the skip arm would dress a divergence up as the source's own
+  behaviour. Read that split precisely. `Unrepresentable` is exact: it is
+  reached only where the crate KNOWS CPython would have succeeded — past the
+  depth bound, and on the two `repr`/mapping-key boundaries below.
+  `Malformed` is the default arm, and it is **not** a proof that CPython would
+  have rejected the same text. It carries every parser failure other than the
+  depth bound, and `serde_json` rejects some input CPython accepts. The four
+  known ones — the bare `NaN`/`Infinity` tokens, a lone surrogate escape, an
+  integer wider than 64 bits, and an overflowing literal such as `1e999` — are
+  recorded as named obligations and exercised from both sides, so they are
+  visible rather than hidden. What the split cannot promise is that no
+  FURTHER such input exists; only the ones written down are accounted for, and
+  finding another one means adding an obligation, not widening this arm.
+* **Which refusal, not just that one happened.** Every `Unrepresentable`
+  carries a `Refusal`: a STABLE reason name — `nesting-depth-exceeded`,
+  `repr-of-non-ascii-string`, `non-string-dict-key` — plus the `fields` that
+  make it specific (the bound exceeded, the string, the key type), plus prose
+  that is never load-bearing. A profile case that declares a refusal must name
+  the reason and the fields, and is judged against both. Binding only the line
+  number and "some prose is present" meant any refusal at all satisfied a
+  declared gap, including one belonging to a different obligation.
 
 Reply frames are written by the crate's own `json.dumps`-faithful encoder —
 `", "`/`": "` separators, `ensure_ascii`, mappings in their own order — rather
@@ -224,15 +255,25 @@ dropped handler call, a request skipped entirely — passes as though it were th
 difference the obligation names. Standing controls break each declaration in a
 way it does not name and require the bound to reject it.
 
+A declaration whose bounded outcome is a **refusal** carries one more thing:
+the refusal's stable `reason` and its `fields`. Without them the bound says
+only that something was refused on that line, and an entirely unrelated
+refusal — a different obligation's, or an invented transport-policy rejection
+— satisfies it while the whole suite stays green. Five standing controls hold
+that shut: three replace the observed reason or its fields (with an unrelated
+one, with another obligation's, and with the wrong stated bound), and two
+strip `reason` and `fields` out of the DECLARATION and require the real
+observation to stop being accepted by it.
+
 | Obligation | What Rust cannot do |
 |---|---|
 | `numeric-domain.integer-wider-than-64-bits` | CPython integers are unbounded; `serde_json` narrows anything outside i64/u64 to f64, so a 23-digit id loses its exact value. |
 | `numeric-domain.bare-non-standard-tokens` | CPython's `json` accepts bare `NaN`/`Infinity`/`-Infinity` and returns a float, which ends the source's loop. `serde_json` rejects them, so Rust skips the line and keeps going. |
 | `string-domain.lone-surrogate-escape` | CPython decodes a lone `\ud800` into an unpaired surrogate and returns a `str`, ending the loop. `serde_json` rejects it; a Rust `String` cannot hold one. |
-| `repr-domain.non-ascii-inside-a-container` | `repr()` of a non-ASCII string follows CPython's printability table. The crate reports `unrepresentable` instead of guessing. `str()` of a bare string tool name — the reachable case — is exact. |
-| `key-domain.non-string-dictionary-key` | `dict([[1,2]])` is `{1: 2}`. A JSON object key must be a string, so the crate refuses rather than coercing it to `"1"`. Exercised by the crate's own test, because a language-neutral case cannot state the expectation. |
+| `repr-domain.non-ascii-inside-a-container` | `repr()` of a non-ASCII string follows CPython's printability table. The crate refuses with reason `repr-of-non-ascii-string` and the string itself, instead of guessing. `str()` of a bare string tool name — the reachable case — is exact. |
+| `key-domain.non-string-dictionary-key` | `dict([[1,2]])` is `{1: 2}`. A JSON object key must be a string, so the crate refuses with reason `non-string-dict-key` and the offending key's type, rather than coercing it to `"1"`. Exercised by the crate's own test, because a language-neutral case cannot state the expectation. |
 | `numeric-domain.overflowing-float-literal` | CPython decodes a finite literal whose exponent overflows, such as `1e999`, to the float `inf`, which ends the source's loop. `serde_json` reports it as out of range, so Rust skips the line. |
-| `depth-domain.nesting-past-the-stated-bound` | CPython's decoder accepts nesting far deeper than this crate states a bound for. Past `MAX_NESTING_DEPTH` the crate refuses the line BY NAME rather than letting a decoder error read as the source's silent skip. 140 deep is answered identically by both; 257 deep is the declared refusal. |
+| `depth-domain.nesting-past-the-stated-bound` | CPython's decoder accepts nesting far deeper than this crate states a bound for. Past `MAX_NESTING_DEPTH` the crate refuses the line with reason `nesting-depth-exceeded` and the bound it exceeded, rather than letting a decoder error read as the source's silent skip. 140 deep is answered identically by both; 257 deep is the declared refusal. |
 
 `arbitrary_precision` is deliberately **not** enabled on `serde_json`: it would
 change the numeric domain this slice is characterising rather than record it.

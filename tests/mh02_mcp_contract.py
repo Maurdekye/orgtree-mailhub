@@ -718,13 +718,34 @@ def case_errors(case: dict, observation: dict, profile: dict) -> list:
         errors.append("unrepresentable: this implementation declined to model the input (%s)"
                       % (refusal.get("detail"),))
     elif expect["outcome"] == "unrepresentable" and outcome == "unrepresentable":
-        want_line = (expect.get("unrepresentable") or {}).get("line_index")
+        # A refusal is bound to WHICH refusal it is, not merely to the fact
+        # that one happened. `reason` is a stable code the implementation
+        # cannot reword by accident, and `fields` carries the values that make
+        # it specific — the bound that was exceeded, the type that could not be
+        # a key. Binding only the line and "some prose is present" is what let
+        # an unrelated refusal — a transport-policy rejection, in the round-4
+        # review's own native mutation — satisfy the nesting-depth obligation
+        # with the whole suite green.
+        want_refusal = expect.get("unrepresentable") or {}
+        want_line = want_refusal.get("line_index")
         if not json_equal(refusal.get("line_index"), want_line):
             errors.append("unrepresentable: expected the refusal at line %r, observed %r"
                           % (want_line, refusal.get("line_index")))
+        want_reason = want_refusal.get("reason")
+        if not want_reason:
+            errors.append("unrepresentable: this expectation names no refusal reason, so ANY "
+                          "refusal on this input would satisfy it, including one belonging "
+                          "to a different obligation entirely")
+        elif not json_equal(refusal.get("reason"), want_reason):
+            errors.append("unrepresentable: expected the refusal reason %r, observed %r"
+                          % (want_reason, refusal.get("reason")))
+        want_fields = want_refusal.get("fields", {})
+        if not json_equal(refusal.get("fields") or {}, want_fields):
+            errors.append("unrepresentable: expected the refusal fields %r, observed %r"
+                          % (want_fields, refusal.get("fields")))
         if not (refusal.get("detail") or "").strip():
-            errors.append("unrepresentable: the refusal names no reason, so it says nothing "
-                          "about which obligation it belongs to")
+            errors.append("unrepresentable: the refusal carries no detail at all, so a human "
+                          "reading this failure is told nothing about what happened")
 
     # Framing first, and defensively: a defect that merges two replies onto one
     # line produces something that is not a JSON document at all, and that has
@@ -1433,6 +1454,48 @@ def _install_tests():
             _expect_empty(bounded_obligation_errors(case, RUST_OBSERVATIONS[cid], PROFILE))
         add("obligation", label, obligation_control)
 
+    # ...and the same hole from the DECLARATION side. The three controls above
+    # break the observation; this one breaks the bound, which is where the
+    # round-4 defect actually lived.
+    add("obligation", "a declared refusal that names no reason is not a bound at all",
+        lambda self: _declaration_without_a_reason_control(self))
+    add("obligation", "a declared refusal that names no fields is not a bound at all",
+        lambda self: _declaration_without_fields_control(self))
+
+
+_DEPTH_CASE = "obligation.nesting-past-the-stated-bound"
+
+
+def _declaration_control(self, drop: str):
+    """Strip one binding field out of a real declaration and require a failure.
+
+    The REAL observation is then judged against the weakened declaration. If
+    it still passes, that field was never binding anything, and the obligation
+    would accept a refusal it does not name — which is exactly the state the
+    round-4 review found the profile in.
+    """
+    if RUST_BLOCKER:
+        self.fail("environment blocker: %s" % RUST_BLOCKER)
+    case = _clone(_find(CASES, _DEPTH_CASE))
+    refusal = case["unimplemented"]["rust"]["observed"]["unrepresentable"]
+    assert drop in refusal, "this control needs the declaration to carry %r" % drop
+    del refusal[drop]
+    self.assertTrue(
+        bounded_obligation_errors(case, RUST_OBSERVATIONS[_DEPTH_CASE], PROFILE),
+        "a declaration missing %r was still accepted as a bound on which refusal "
+        "may satisfy it" % drop)
+    # ...and the untouched declaration still passes, or this proves nothing.
+    _expect_empty(bounded_obligation_errors(
+        _find(CASES, _DEPTH_CASE), RUST_OBSERVATIONS[_DEPTH_CASE], PROFILE))
+
+
+def _declaration_without_a_reason_control(self):
+    _declaration_control(self, "reason")
+
+
+def _declaration_without_fields_control(self):
+    _declaration_control(self, "fields")
+
 
 def _guard_control(self):
     with self.assertRaises(GuardViolation):
@@ -1509,6 +1572,64 @@ def _obligation_silent_skip(observation, profile):
 def _obligation_refusal_on_the_wrong_line(observation, profile):
     broken = _clone(observation)
     broken["unrepresentable"] = {**(broken.get("unrepresentable") or {}), "line_index": 7}
+    return broken
+
+
+@_obligation_control("a declared refusal satisfied by an unrelated reason",
+                     "obligation.nesting-past-the-stated-bound")
+def _obligation_refusal_for_an_unrelated_reason(observation, profile):
+    """The reviewer's round-4 mutation, kept as a standing control.
+
+    The reviewer changed only the native `Unrepresentable` arm to answer
+    `"authentication rejected by unrelated transport policy"` and the whole
+    suite stayed green at 337/337, because the obligation bound nothing but
+    the LINE the refusal happened on and the presence of some prose. A
+    refusal that is not the declared one is not the declared gap, however
+    honestly it announces itself.
+    """
+    broken = _clone(observation)
+    broken["unrepresentable"] = {
+        **(broken.get("unrepresentable") or {}),
+        "reason": "authentication-rejected-by-transport-policy",
+        "fields": {},
+        "detail": "authentication rejected by unrelated transport policy",
+    }
+    return broken
+
+
+@_obligation_control("one declared refusal answered with another obligation's reason",
+                     "obligation.nesting-past-the-stated-bound")
+def _obligation_refusal_borrowed_from_another_gap(observation, profile):
+    """The same hole, with a reason that is genuinely one of ours.
+
+    An unrelated-sounding string is the easy case. This one swaps in the
+    reason belonging to a DIFFERENT declared obligation on this same crate,
+    which is exactly what a real defect would look like: plausible, internal,
+    and still not the gap this case is exercising.
+    """
+    broken = _clone(observation)
+    broken["unrepresentable"] = {
+        **(broken.get("unrepresentable") or {}),
+        "reason": "non-string-dict-key",
+        "fields": {"key_type": "int"},
+    }
+    return broken
+
+
+@_obligation_control("the right refusal reason reporting the wrong bound",
+                     "obligation.nesting-past-the-stated-bound")
+def _obligation_refusal_with_the_wrong_bound(observation, profile):
+    """`fields` is part of the contract, not decoration.
+
+    The reason is correct here and only the stated bound is wrong — 128, which
+    is serde_json's own default, is precisely the number this obligation exists
+    to say the crate does NOT answer to. Nothing else in the observation
+    changes.
+    """
+    broken = _clone(observation)
+    refusal = dict(broken.get("unrepresentable") or {})
+    refusal["fields"] = {**(refusal.get("fields") or {}), "limit": 128}
+    broken["unrepresentable"] = refusal
     return broken
 
 

@@ -45,7 +45,6 @@
 //! dependency at all. [`PyDict`] then applies CPython's duplicate-key rule:
 //! the FIRST occurrence keeps its position and the LAST assignment wins.
 
-use std::borrow::Cow;
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -274,24 +273,113 @@ impl PyValue {
 
 // ───────────────────────────────────────────────────────────────── decoding
 
+/// Why this module declined to model an input.
+///
+/// `reason` is a STABLE machine-readable name and `detail` is prose. The
+/// separation is the point: prose can be reworded, translated or made more
+/// helpful without anything noticing, so an expectation that binds only to
+/// "something was refused" is satisfied by any refusal whatsoever — including
+/// one belonging to a completely different obligation. `reason` is what an
+/// expectation binds to, and `fields` carries the few values that make the
+/// refusal specific (the bound that was exceeded, the type that could not be
+/// a key) so the expectation can be exact rather than approximate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refusal {
+    /// One of the `Refusal::` constants below. Never free text.
+    pub reason: &'static str,
+    /// The values that make this refusal specific, in a stable order.
+    pub fields: PyDict,
+    /// Human prose. Never load-bearing for an expectation.
+    pub detail: String,
+}
+
+impl Refusal {
+    /// The input nests deeper than [`MAX_NESTING_DEPTH`]. Field: `limit`.
+    pub const NESTING_DEPTH_EXCEEDED: &'static str = "nesting-depth-exceeded";
+    /// `repr()` of a non-ASCII string, whose escaping follows CPython's
+    /// printability table. Field: `text`.
+    pub const REPR_OF_NON_ASCII_STRING: &'static str = "repr-of-non-ascii-string";
+    /// A Python mapping key that a JSON object cannot carry. Field:
+    /// `key_type`.
+    pub const NON_STRING_DICT_KEY: &'static str = "non-string-dict-key";
+    /// A defect guard, not a modelling boundary: the integer `-0` rewrite
+    /// turned a line that parsed into one that does not. No field.
+    pub const REWRITE_BROKE_A_VALID_LINE: &'static str = "rewrite-broke-a-valid-line";
+
+    fn new(reason: &'static str, fields: PyDict, detail: String) -> Self {
+        Refusal {
+            reason,
+            fields,
+            detail,
+        }
+    }
+}
+
+/// One-entry [`PyDict`], for a refusal that has a single relevant value.
+fn one_field(key: &str, value: PyValue) -> PyDict {
+    let mut fields = PyDict::new();
+    fields.insert(key.to_string(), value);
+    fields
+}
+
 /// Why a line did not decode.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DecodeError {
-    /// CPython's `json` would also have raised `ValueError` here, so the
-    /// source's `except ValueError: continue` covers it and the line is
-    /// skipped in silence.
+    /// The parser rejected the input, and this module treats that as the
+    /// source's own `except ValueError: continue`, so the line is skipped in
+    /// silence.
+    ///
+    /// Read this arm precisely. It is NOT a proof that CPython's `json` would
+    /// have rejected the same text: it carries every parser failure other
+    /// than the depth bound below, and serde_json rejects some input CPython
+    /// accepts. The four known ones — the bare tokens `NaN`/`Infinity`, a
+    /// lone surrogate escape, an integer wider than 64 bits, and a literal
+    /// whose exponent overflows such as `1e999` — are recorded as NAMED
+    /// obligations in the shared profile and exercised from both sides, so
+    /// they are visible rather than hidden. What this arm cannot do is
+    /// promise that no FURTHER such input exists; only the ones written down
+    /// are accounted for.
     Malformed(String),
     /// CPython's `json` would have SUCCEEDED and this module declines to
     /// model the result. It must never reach the skip arm, because that would
     /// dress a divergence up as the source's own behaviour.
-    Unrepresentable(String),
+    Unrepresentable(Refusal),
 }
 
 /// `json.loads(text)` over the subset this module reproduces exactly.
+///
+/// Syntactic validity is decided by the ORIGINAL text, before the `-0`
+/// rewrite below is even considered. That ordering is a guarantee rather than
+/// an implementation detail: a line CPython's decoder would have rejected
+/// cannot become a line this module decodes and acts on, whatever the
+/// rewriting scanner does or gets wrong. The scanner carries its own guards
+/// as well, and the two are deliberately independent of each other.
 pub fn decode_line(text: &str) -> Result<PyValue, DecodeError> {
-    let normalised = normalise_negative_zero_integers(text);
+    let value = parse_json(text)?;
+    let rewritten = match negative_zero_integer_rewrite(text) {
+        None => return Ok(value),
+        Some(rewritten) => rewritten,
+    };
+    // The rewrite exchanges one complete JSON number token for another inside
+    // a document that has just parsed, so this parse cannot fail. If it ever
+    // does, the scanner is wrong, and the answer has to be a NAMED refusal —
+    // never the silent skip a `Malformed` would turn into.
+    parse_json(&rewritten).map_err(|_| {
+        DecodeError::Unrepresentable(Refusal::new(
+            Refusal::REWRITE_BROKE_A_VALID_LINE,
+            PyDict::new(),
+            "the integer `-0` rewrite turned a line that parsed into one that does not; \
+             that is a defect in this module, and it is refused by name rather than \
+             skipped in silence"
+                .to_string(),
+        ))
+    })
+}
+
+/// One parse of one exact string. No rewriting and no fallback.
+fn parse_json(text: &str) -> Result<PyValue, DecodeError> {
     let too_deep = std::cell::Cell::new(false);
-    let mut de = serde_json::Deserializer::from_str(normalised.as_ref());
+    let mut de = serde_json::Deserializer::from_str(text);
     // serde_json's own bound is 128 nested containers, which ordinary input
     // can cross; the bound this module answers for is MAX_NESTING_DEPTH, and
     // `PyValueSeed` enforces it, so the parser never recurses past it either.
@@ -305,33 +393,60 @@ pub fn decode_line(text: &str) -> Result<PyValue, DecodeError> {
         .and_then(|value| de.end().map(|()| value));
     match decoded {
         Ok(value) => Ok(value),
-        Err(error) if too_deep.get() => Err(DecodeError::Unrepresentable(format!(
-            "the input nests more than {MAX_NESTING_DEPTH} containers deep; CPython's \
-             decoder accepts it and this module states a shallower bound rather than \
-             letting the difference pass as a parse failure ({error})"
+        Err(error) if too_deep.get() => Err(DecodeError::Unrepresentable(Refusal::new(
+            Refusal::NESTING_DEPTH_EXCEEDED,
+            one_field("limit", PyValue::Int(MAX_NESTING_DEPTH as i128)),
+            format!(
+                "the input nests more than {MAX_NESTING_DEPTH} containers deep; CPython's \
+                 decoder accepts it and this module states a shallower bound rather than \
+                 letting the difference pass as a parse failure ({error})"
+            ),
         ))),
         Err(error) => Err(DecodeError::Malformed(error.to_string())),
     }
 }
 
-/// Rewrite the integer token `-0` to `0` outside string literals.
+/// Exchange the complete JSON number token `-0` for `0`, outside strings.
 ///
 /// CPython decodes `-0` with `int`, giving the `int` 0 — the very same object
 /// `0` decodes to. serde_json special-cases the token and yields the `f64`
-/// -0.0 instead, whose `str()` is `-0.0`, which would change a dispatched tool
-/// name. The two tokens denote one CPython object, so rewriting one to the
-/// other is exact rather than a coercion. `-0.0`, `-0e0` and every other
-/// float spelling are left alone and still decode to -0.0, which is what
-/// CPython gives them too.
-fn normalise_negative_zero_integers(text: &str) -> Cow<'_, str> {
+/// -0.0, whose `str()` is `-0.0`, which would change a dispatched tool name.
+/// The two tokens denote one CPython object, so exchanging them is exact
+/// rather than a coercion. `-0.0`, `-0e0` and every other float spelling are
+/// left alone and still decode to -0.0, which is what CPython gives them too.
+///
+/// TWO GUARDS, and both are load-bearing.
+///
+/// * The `-` must sit where a JSON VALUE may begin: at the start of the
+///   document, or after `[`, `,` or `:`, ignoring whitespace. Anywhere else a
+///   `-` belongs to something already in progress — the exponent sign in
+///   `1e-0`, or simply malformed text like `1-0` — and editing there strips a
+///   byte out of the middle of a token.
+/// * `-0` must also END the token: end of input, whitespace, `,`, `]` or `}`.
+///   A digit, a `.`, an `e` or anything else after the zero means this was
+///   never the token `-0` in the first place.
+///
+/// Without them, `{"x":1-0}` — which CPython's decoder REJECTS, so the source
+/// skips the line in silence — became the perfectly valid `{"x":10}` and was
+/// dispatched to a handler as real work. With them, the only thing ever
+/// exchanged is one complete number token for another, which cannot change
+/// whether the document parses at all.
+///
+/// `None` means there is nothing to do and the caller keeps the original text.
+fn negative_zero_integer_rewrite(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     if !bytes.windows(2).any(|w| w == b"-0") {
-        return Cow::Borrowed(text);
+        return None;
     }
+    let is_space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut index = 0usize;
     let mut in_string = false;
     let mut escaped = false;
+    // The last non-whitespace byte seen OUTSIDE a string. `None` is the start
+    // of the document.
+    let mut previous: Option<u8> = None;
+    let mut rewrote = false;
     while index < bytes.len() {
         let byte = bytes[index];
         if in_string {
@@ -343,6 +458,7 @@ fn normalise_negative_zero_integers(text: &str) -> Cow<'_, str> {
                 escaped = true;
             } else if byte == b'"' {
                 in_string = false;
+                previous = Some(b'"');
             }
             continue;
         }
@@ -352,22 +468,30 @@ fn normalise_negative_zero_integers(text: &str) -> Cow<'_, str> {
             index += 1;
             continue;
         }
-        let is_integer_negative_zero = byte == b'-'
-            && bytes.get(index + 1) == Some(&b'0')
-            && !matches!(bytes.get(index + 2), Some(b'.') | Some(b'e') | Some(b'E'))
-            && !matches!(bytes.get(index + 2), Some(b'0'..=b'9'));
-        if is_integer_negative_zero {
+        let starts_a_value = matches!(previous, None | Some(b'[') | Some(b',') | Some(b':'));
+        let ends_the_token = match bytes.get(index + 2) {
+            None => true,
+            Some(&next) => is_space(next) || matches!(next, b',' | b']' | b'}'),
+        };
+        if byte == b'-' && bytes.get(index + 1) == Some(&b'0') && starts_a_value && ends_the_token {
             out.push(b'0');
             index += 2;
+            previous = Some(b'0');
+            rewrote = true;
             continue;
         }
         out.push(byte);
         index += 1;
+        if !is_space(byte) {
+            previous = Some(byte);
+        }
+    }
+    if !rewrote {
+        return None;
     }
     // Only an ASCII `-` was ever removed, so the result is still valid UTF-8.
-    Cow::Owned(String::from_utf8(out).expect("only an ASCII byte was dropped"))
+    Some(String::from_utf8(out).expect("only an ASCII byte was dropped"))
 }
-
 struct PyValueSeed<'a> {
     depth: usize,
     too_deep: &'a std::cell::Cell<bool>,
@@ -579,7 +703,7 @@ pub enum LineOutcome {
 }
 
 /// How a whole run ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RunOutcome {
     /// Every line was consumed and `serve()` returned normally.
     Completed,
@@ -587,7 +711,11 @@ pub enum RunOutcome {
     Terminated { kind: String, message: String },
     /// This implementation cannot model the pinned source for that input, and
     /// says so instead of guessing. A declared obligation, never a pass.
-    Unrepresentable { line_index: usize, detail: String },
+    ///
+    /// The whole [`Refusal`] travels, not just its prose, so an expectation
+    /// can bind to WHICH refusal happened rather than to the bare fact that
+    /// one did.
+    Unrepresentable { line_index: usize, refusal: Refusal },
 }
 
 /// The full record of one run.
@@ -811,7 +939,7 @@ fn python_float_repr(x: f64) -> String {
 /// `Err` means this crate will not guess: the source would produce a CPython
 /// `repr` this implementation does not reproduce, and the caller must surface
 /// that as an unimplemented obligation instead of inventing an answer.
-pub fn python_str(value: &PyValue) -> Result<String, String> {
+pub fn python_str(value: &PyValue) -> Result<String, Refusal> {
     match value {
         PyValue::Str(s) => Ok(s.clone()),
         other => python_repr(other),
@@ -820,7 +948,7 @@ pub fn python_str(value: &PyValue) -> Result<String, String> {
 
 /// `repr(value)` for a value that came out of `json.loads`, over the subset
 /// this crate reproduces exactly.
-pub fn python_repr(value: &PyValue) -> Result<String, String> {
+pub fn python_repr(value: &PyValue) -> Result<String, Refusal> {
     match value {
         PyValue::None => Ok("None".to_string()),
         PyValue::Bool(true) => Ok("True".to_string()),
@@ -859,11 +987,15 @@ pub fn python_repr(value: &PyValue) -> Result<String, String> {
 /// not carry a category table. A non-ASCII string is still fully supported
 /// wherever `str()` is what the source calls — only `repr()`, reached solely
 /// through a container, is bounded here.
-fn python_string_repr(s: &str) -> Result<String, String> {
+fn python_string_repr(s: &str) -> Result<String, Refusal> {
     if !s.is_ascii() {
-        return Err(format!(
-            "repr() of the non-ASCII string {s:?} depends on CPython's \
-             printability table, which this crate does not reproduce"
+        return Err(Refusal::new(
+            Refusal::REPR_OF_NON_ASCII_STRING,
+            one_field("text", PyValue::Str(s.to_string())),
+            format!(
+                "repr() of the non-ASCII string {s:?} depends on CPython's \
+                 printability table, which this crate does not reproduce"
+            ),
         ));
     }
     let quote = if s.contains('\'') && !s.contains('"') {
@@ -894,13 +1026,13 @@ fn python_string_repr(s: &str) -> Result<String, String> {
 }
 
 /// Why `dict(...)` did not produce a mapping.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum DictFailure {
     /// A CPython exception the source's `except Exception` arm catches. The
     /// field is `str(e)`, which is the whole of what reaches the wire.
     Caught(String),
     /// An input this crate declines to model rather than guess at.
-    Unrepresentable(String),
+    Unrepresentable(Refusal),
 }
 
 /// Python truthiness for a value that came out of `json.loads`.
@@ -979,11 +1111,15 @@ fn python_dict(value: &PyValue) -> Result<PyDict, DictFailure> {
                         )));
                     }
                     other => {
-                        return Err(DictFailure::Unrepresentable(format!(
-                            "a {} dictionary key is legal in Python but cannot be carried \
-                             by a JSON object, so this crate refuses it rather than \
-                             coercing it",
-                            py_type_name(other)
+                        return Err(DictFailure::Unrepresentable(Refusal::new(
+                            Refusal::NON_STRING_DICT_KEY,
+                            one_field("key_type", PyValue::Str(py_type_name(other).to_string())),
+                            format!(
+                                "a {} dictionary key is legal in Python but cannot be \
+                                 carried by a JSON object, so this crate refuses it \
+                                 rather than coercing it",
+                                py_type_name(other)
+                            ),
                         )))
                     }
                 }
@@ -1048,7 +1184,7 @@ fn content_result(text: String) -> PyValue {
 pub fn process_line<D: Dispatcher + ?Sized>(
     line: &str,
     dispatcher: &mut D,
-) -> Result<LineOutcome, String> {
+) -> Result<LineOutcome, Refusal> {
     let stripped = python_strip(line);
     if stripped.is_empty() {
         return Ok(LineOutcome::Skipped);
@@ -1064,7 +1200,7 @@ pub fn process_line<D: Dispatcher + ?Sized>(
         // A document CPython WOULD have decoded. Refusing it out loud is the
         // whole point of the distinction: routing it to the skip arm would
         // make a divergence look like the source's own silence.
-        Err(DecodeError::Unrepresentable(detail)) => return Err(detail),
+        Err(DecodeError::Unrepresentable(refusal)) => return Err(refusal),
     };
     let object = match &message {
         PyValue::Dict(map) => map,
@@ -1118,7 +1254,7 @@ pub fn process_line<D: Dispatcher + ?Sized>(
 fn call_text<D: Dispatcher + ?Sized>(
     params: &PyValue,
     dispatcher: &mut D,
-) -> Result<String, String> {
+) -> Result<String, Refusal> {
     // `p.get("name")` — an AttributeError here IS inside the try, so it
     // becomes an error string rather than ending the loop.
     let params = match params {
@@ -1137,7 +1273,7 @@ fn call_text<D: Dispatcher + ?Sized>(
         match python_dict(&raw_arguments) {
             Ok(map) => map,
             Err(DictFailure::Caught(message)) => return Ok(py_dumps_error(&message)),
-            Err(DictFailure::Unrepresentable(why)) => return Err(why),
+            Err(DictFailure::Unrepresentable(refusal)) => return Err(refusal),
         }
     } else {
         PyDict::new()
@@ -1174,10 +1310,10 @@ pub fn run<D: Dispatcher + ?Sized>(input: &str, dispatcher: &mut D) -> RunReport
                 outcome = RunOutcome::Terminated { kind, message };
                 break;
             }
-            Err(detail) => {
+            Err(refusal) => {
                 outcome = RunOutcome::Unrepresentable {
                     line_index: index,
-                    detail,
+                    refusal,
                 };
                 break;
             }
@@ -1205,4 +1341,85 @@ pub fn run_scripted(
     let mut report = run(input, &mut dispatcher);
     report.calls = dispatcher.calls.clone();
     (report, dispatcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `-0` scanner, tested DIRECTLY rather than through the decoder.
+    ///
+    /// Going through `decode_line` cannot isolate this: the decoder parses the
+    /// original text first, so a scanner that fires where it should not is
+    /// masked by that earlier guard and the two would test as one. They are
+    /// meant to be independent, and this is where each of the scanner's own
+    /// two conditions is held to account on its own.
+    #[test]
+    fn the_rewrite_fires_only_on_a_complete_negative_zero_token() {
+        // Fires: a whole `-0` token, in every position a value may begin.
+        for (text, rewritten) in [
+            ("-0", "0"),
+            ("  -0  ", "  0  "),
+            ("[-0]", "[0]"),
+            ("[-0,1]", "[0,1]"),
+            ("[1,-0]", "[1,0]"),
+            ("{\"a\":-0}", "{\"a\":0}"),
+            ("[ -0 ]", "[ 0 ]"),
+            ("[-0,-0]", "[0,0]"),
+        ] {
+            assert_eq!(
+                negative_zero_integer_rewrite(text).as_deref(),
+                Some(rewritten),
+                "{text}"
+            );
+        }
+
+        // Does not fire because the `-` does not begin a value. Every one of
+        // these is MALFORMED, and rewriting would hand the parser a valid
+        // document the source's own decoder would have thrown away —
+        // `{"x":1-0}` became `{"x":10}` and was dispatched to a handler.
+        for text in [
+            "{\"x\":1-0}",
+            "{\"x\":1.2-0}",
+            "{\"x\":1e2-0}",
+            "[1]-0",
+            "{\"a\":1 -0}",
+            "[1,2-0]",
+            "-0-0",
+            "[--0]",
+            "{}-0",
+            "true-0",
+        ] {
+            assert_eq!(negative_zero_integer_rewrite(text), None, "{text}");
+        }
+
+        // Does not fire because `-0` is not where the token ENDS. These are
+        // valid documents whose value would change: `-0.0` is the negative
+        // float and `0.0` is not.
+        for text in ["-0.0", "-0e0", "-0E0", "[-0.5]", "-00", "-0123"] {
+            assert_eq!(negative_zero_integer_rewrite(text), None, "{text}");
+        }
+
+        // A `-0` inside a string is data, and an exponent sign is not a value
+        // position, so neither is touched.
+        for text in ["\"x-0y\"", "{\"a-0\":1}", "1e-0", "[1e-0]", "\"[-0]\""] {
+            assert_eq!(negative_zero_integer_rewrite(text), None, "{text}");
+        }
+    }
+
+    /// The decoder's own guard, independent of the scanner above.
+    #[test]
+    fn syntactic_validity_is_decided_by_the_original_text() {
+        // Whatever the scanner does, a document that does not parse as it
+        // stands never reaches the rewritten parse at all.
+        for text in ["{\"x\":1-0}", "[1]-0", "{\"a\":}", "{"] {
+            assert!(
+                matches!(decode_line(text), Err(DecodeError::Malformed(_))),
+                "{text}"
+            );
+        }
+        // And one that does parse keeps the rewrite's result.
+        assert_eq!(decode_line("-0"), Ok(PyValue::Int(0)));
+        assert_eq!(decode_line("-0.0"), Ok(PyValue::Float(-0.0)));
+    }
 }
