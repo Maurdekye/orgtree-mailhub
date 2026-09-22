@@ -193,14 +193,14 @@
     {
       "id": "depth-domain.nesting-past-the-stated-bound",
       "implementation": "rust",
-      "summary": "CPython's decoder accepts nesting far deeper than this crate states a bound for. serde_json's own default bound is 128, which ordinary input can cross, so the crate raises it and enforces its own MAX_NESTING_DEPTH of 256 instead. Past that bound the crate REFUSES the input by name rather than letting a decoder error read as the source's silent skip. The refusal carries the stable reason `nesting-depth-exceeded` and the bound it exceeded, and the profile case binds to both, so another refusal cannot stand in for this one.",
+      "summary": "CPython's decoder accepts nesting far deeper than this crate states a bound for. serde_json's own default bound is 128, which ordinary input can cross, so the crate raises it and enforces its own MAX_NESTING_DEPTH of 256 instead. Past that bound the crate REFUSES the input by name rather than letting a decoder error read as the source's silent skip. The refusal carries the stable reason `nesting-depth-exceeded` and the bound it exceeded, and the profile case binds to both, so another refusal cannot stand in for this one. The bound is enforced the same way whatever an object's keys spell: a chain of objects keyed with serde_json's private number marker is an object chain, and is refused at exactly the depth an ordinary one is. Before that was true it recursed without a bound and overflowed the stack, which is why the marker-keyed twin of this case exists.",
       "exercised_by": "profile case",
       "disposition": "open - the port has to choose a decoder whose depth behaviour is bounded by an explicit policy rather than by a library default. The bound is declared and exercised on both sides here: 140 deep is answered identically by both implementations, 257 deep is refused by name.",
       "status": "open"
     }
   ],
   "case_manifest": {
-    "count": 168,
+    "count": 169,
     "ids": [
       "arguments.booleans-and-numbers-stay-distinct",
       "arguments.empty-list",
@@ -307,6 +307,7 @@
       "obligation.bare-nan-token-ends-the-loop",
       "obligation.id-integer-wider-than-64-bits",
       "obligation.lone-surrogate-escape-ends-the-loop",
+      "obligation.nesting-past-the-bound-under-a-parser-marker-key",
       "obligation.nesting-past-the-stated-bound",
       "obligation.non-ascii-name-inside-a-list",
       "obligation.overflowing-float-literal-ends-the-loop",
@@ -371,7 +372,7 @@
       "unknown-method.null-id-is-silent",
       "unknown-method.null-method-with-id"
     ],
-    "obligation_count": 6
+    "obligation_count": 7
   },
   "cases": [
     {
@@ -5372,6 +5373,57 @@
             "lines_unprocessed": 1,
             "lines_total": 1,
             "dispatch_unused": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "obligation.nesting-past-the-bound-under-a-parser-marker-key",
+      "title": "300 nested objects are ordinary input to CPython even when every key spells the decoder's private number marker",
+      "input": "{\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": {\"$serde_json::private::Number\": \"x\"}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}\n{\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 2,
+        "number_tokens": [
+          "1"
+        ]
+      },
+      "unimplemented": {
+        "rust": {
+          "obligation": "depth-domain.nesting-past-the-stated-bound",
+          "difference": "the crate REFUSES the line by name at line 0 because it nests past MAX_NESTING_DEPTH, exactly as it does for the same shape under an ordinary key; CPython accepts it and answers nothing, then answers the next request",
+          "observed": {
+            "frames": [],
+            "calls": [],
+            "outcome": "unrepresentable",
+            "unrepresentable": {
+              "line_index": 0,
+              "reason": "nesting-depth-exceeded",
+              "fields": {
+                "limit": 256
+              }
+            },
+            "lines_unprocessed": 2,
+            "lines_total": 2
           }
         }
       }

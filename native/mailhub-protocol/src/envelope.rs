@@ -904,6 +904,29 @@ impl<'de> Visitor<'de> for PyValueSeed<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<PyValue, A::Error> {
+        // THE HARD STOP, and it is not the stated bound.
+        //
+        // The marker short-circuit below reads a key and descends into its
+        // value BEFORE the ordinary depth test, so that a genuine wide integer
+        // sitting at the bound is not charged a nesting level it never used.
+        // That short-circuit must not become a way to recurse without any
+        // bound at all: a document of nested marker-keyed OBJECTS takes it at
+        // every level, and before this guard existed 400 of them overflowed
+        // the stack instead of being refused — a crash where the same input
+        // under an ordinary key answered `nesting-depth-exceeded`.
+        //
+        // One level beyond MAX_NESTING_DEPTH is exactly the deepest a genuine
+        // number can legitimately sit: the deepest accepted container is at
+        // depth MAX_NESTING_DEPTH - 1, so its scalar children are at
+        // MAX_NESTING_DEPTH. Anything past that is a container whatever its
+        // key spells, and is refused BY NAME here rather than being allowed to
+        // run the stack out. The stated bound itself is still enforced below,
+        // so a marker-keyed object chain is refused at the same depth an
+        // ordinary one is.
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(self.too_deep());
+        }
+
         // The FIRST key is read BEFORE the depth test, and the ordering is
         // load-bearing. With serde_json's `arbitrary_precision` a NUMBER
         // arrives as a one-entry map (see [`SERDE_JSON_NUMBER_TOKEN`]), and a
@@ -2002,5 +2025,58 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    /// Nested marker-keyed OBJECTS are objects, and are bounded exactly as
+    /// objects are.
+    ///
+    /// This is a REGRESSION TEST for a real defect, found by review: the
+    /// marker short-circuit descended into its value before the depth test, so
+    /// a chain of these took the short-circuit at every level and recursed
+    /// with no bound at all. 400 of them overflowed the driver's stack, where
+    /// the identical shape under an ordinary key answered
+    /// `nesting-depth-exceeded`. The two must agree.
+    #[test]
+    fn nested_marker_keyed_objects_are_bounded_like_any_other_object() {
+        fn chain(depth: usize, key: &str) -> String {
+            let mut text = String::from("\"x\"");
+            for _ in 0..depth {
+                text = format!("{{{key:?}: {text}}}");
+            }
+            text
+        }
+        for key in [SERDE_JSON_NUMBER_TOKEN, "a"] {
+            // The deepest accepted nesting is MAX_NESTING_DEPTH containers.
+            assert!(
+                matches!(
+                    decode_line(&chain(MAX_NESTING_DEPTH, key)),
+                    Ok(PyValue::Dict(_))
+                ),
+                "{MAX_NESTING_DEPTH} deep under {key:?} must be accepted"
+            );
+            // One deeper is refused BY NAME, never by a crash and never by a
+            // silent skip.
+            for depth in [MAX_NESTING_DEPTH + 1, MAX_NESTING_DEPTH * 2, 4000] {
+                assert!(
+                    matches!(
+                        decode_line(&chain(depth, key)),
+                        Err(DecodeError::Unrepresentable(Refusal {
+                            reason: Refusal::NESTING_DEPTH_EXCEEDED,
+                            ..
+                        }))
+                    ),
+                    "{depth} deep under {key:?} must be refused by name"
+                );
+            }
+        }
+        // And the value under the marker key is still ordinary data at every
+        // accepted depth, not a number.
+        let PyValue::Dict(fields) = decode_line(&chain(1, SERDE_JSON_NUMBER_TOKEN)).unwrap() else {
+            panic!("a JSON object decodes to a dict")
+        };
+        assert_eq!(
+            fields.get(SERDE_JSON_NUMBER_TOKEN),
+            Some(&PyValue::Str("x".to_string()))
+        );
     }
 }
