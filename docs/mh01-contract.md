@@ -268,14 +268,20 @@ Four of these carry consequences worth stating outright:
 2. **Listener custody is decided by a bare pid.** `_pid_alive` has no start-time
    or identity check, so a reused pid reads as the live holder and refuses the
    real listener. **This blocks conversion** — it is recorded, not solved.
-   The lock itself *is* released: `listen()` removes it in a `finally`
-   (`hubtool.py:866`), so a normal return and an unwinding exception both clear
-   it, and only a death that does not unwind — `SIGKILL`, power loss,
-   `os._exit` — leaves the stale lock the next start takes over. The refusal
-   path for a live holder returns *before* that `try`, so a refused second
-   listener correctly leaves the real holder's lock alone. Both the acquisition
-   and the release are anchored in the register, so this claim cannot drift
-   from the source again.
+   The lock *is* released, but only as a **best-effort attempt**. `listen()`
+   unlinks it in a `finally` (`hubtool.py:866`) that belongs to the main loop's
+   `try`, and the unlink is wrapped in `except OSError: pass`. So the lock
+   survives three ways, not one: a death that does not unwind (`SIGKILL`, power
+   loss, `os._exit`); an unlink that *fails*, whose `OSError` is swallowed; and
+   any exit between taking the lock and reaching that `try` — `_hubs(d)`
+   raising, or the `hubs0[0]` index on an empty hub list — because the `finally`
+   is not armed yet. In each case the next start reads the dead pid and takes
+   the lock over. The refusal path for a live holder also returns before the
+   `try`, which is *correct* there: a refused second listener must leave the
+   real holder's lock alone. Both the acquisition and the release are anchored
+   in the register, and a control checks the anchored unlink really is the
+   guarded one, so neither the claim nor its strength can drift from the source
+   again.
 3. **Fetched attachments are sanitized and collision-suffixed.** A port that
    writes the server-supplied `Content-Disposition` name unsanitized introduces
    a path-traversal bug the pinned source does not have. The two fallbacks are
@@ -401,25 +407,28 @@ From the repository root, with an interpreter that has `fastapi` and `httpx`:
 ```
 python tools/mh01_inventory.py          # census vs pinned source; must print errors: []
 python tests/test_mh01_inventory.py     # 32 fail-closed census controls
-python tests/mh01_contract.py           # 77 tests: 62 wire cases + 15 controls
+python tests/mh01_contract.py           # 80 tests: 62 wire cases + 18 controls
 ```
 
 `tests/mh01_contract.py` runs as **standard unittest**, so the shared harness
 (`tools/run-python-verification.py`) reports a real denominator —
-`tests_ran: 77` — instead of filing it as a module with no tests. Add
+`tests_ran: 80` — instead of filing it as a module with no tests. Add
 `--narrative` for the grouped human-readable report; both entry points execute
 the same functions, so there is one source of truth for pass and fail.
 
-The 15 controls are one coverage check plus two different kinds of control, and
+The 18 controls are two registry checks plus two different kinds of control, and
 the distinction is the point:
 
-- **1 coverage check** — every registered route and refusal status in the frozen
-  registry is exercised by some fixture, and the profile carries exactly the
-  cases its manifest declares, or the run fails.
-- **8 against a bad expectation** — a wrong status, wrong response keys, an
-  unresolvable placeholder, a deleted case, a stripped case manifest, a dropped
-  route, a dropped refusal, a profile pinned to the wrong commit. These prove
-  the *checker* discriminates.
+- **2 registry checks** — every registered route and refusal status in the
+  frozen registry is exercised by some fixture, and the profile carries exactly
+  the cases its manifest declares; and, measured on the test class rather than
+  trusted from the install loop, every declared case really is installed as its
+  own test.
+- **10 against a bad expectation** — a wrong status, wrong response keys, an
+  unresolvable placeholder, a deleted case, a stripped case manifest, two case
+  ids that differ only in punctuation, the same case id declared twice, a
+  dropped route, a dropped refusal, a profile pinned to the wrong commit. These
+  prove the *checker* discriminates.
 - **6 against a bad implementation** — the product is broken at the public
   boundary and named cases must go red: an always-empty roster, refusals that
   all carry the wrong detail, a roster row missing `last_seen`, a lost chat/org
@@ -429,8 +438,8 @@ the distinction is the point:
   profile that did not: an empty-roster build and a wrong-refusal build both
   passed the 63/63 suite of the first round.
 
-Three of those controls answer the second review round specifically, and each
-closed a hole that a green run was hiding:
+Four of those controls answer a review round specifically, and each closed a
+hole that a green run was hiding:
 
 - **The operator read cap was asserted against a one-row store.** `limit=99999`
   checked only that the call returned 200, and `limit=0` checked that one
@@ -445,6 +454,16 @@ closed a hole that a green run was hiding:
   neighbouring case on the same route and status, so an omission was invisible.
   `case_manifest` pins the set of case ids, and a profile missing one — or
   missing the manifest — now fails.
+- **A declared case could be silently skipped.** Test methods are installed with
+  `setattr` under a name that collapses every run of non-word characters to `_`,
+  so the distinct ids `malformed.json-null-body-is-a-500` and
+  `malformed.json_null_body_is_a_500` generate one method and the second
+  replaces the first. The manifest could not see it: the raw id sets and the
+  count were both correct. A profile declaring 63 obligations executed 62 and
+  reported the same 77/77 as the 62-case baseline, with a deliberately failing
+  case among the ones that never ran. `registration_errors` now rejects
+  duplicate ids and generated-name collisions before the run, and a second
+  check counts what the class actually carries.
 
 The first command **checks** the frozen register against the pinned source; it
 does not rewrite it. To reproduce the artifact itself, add `--write`:

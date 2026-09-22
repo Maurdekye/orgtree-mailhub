@@ -271,6 +271,19 @@ class StateFamilyControls(unittest.TestCase):
         self.assertTrue(fam["lines"])
         self.assertLess(max(fam["lines"]), min(fam["release_lines"]))
 
+        # Round 3: the register also claimed the cleanup was reliable. It is
+        # not -- the unlink swallows OSError -- so the "best effort" wording is
+        # checked against the SOURCE rather than taken on trust. A port that
+        # reads only the prose must not come away believing the lock is always
+        # released.
+        guard = chr(10).join(l for n in fam["release_lines"] for l in src[n - 1:n + 2])
+        self.assertIn("except OSError", guard,
+                      "the anchored unlink is not the guarded one this claim "
+                      "describes")
+        self.assertIn("attempted", fam["loss"].lower(),
+                      "the register states the cleanup more strongly than the "
+                      "source supports")
+
     def test_the_unexercised_families_block_conversion(self):
         """MH01 may not arm a listener or speak MCP, so these two are frozen
         from source and NOT exercised. That has to be recorded as blocking, or

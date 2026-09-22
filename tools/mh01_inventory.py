@@ -391,12 +391,20 @@ STATE_FAMILIES = [
                   "the holder pid is read and probed: a LIVE holder other than self refuses the "
                   "second listener; an unreadable, zero or dead holder is treated as stale and the "
                   "lock is TAKEN OVER by rewriting the pid.",
-     "loss": "listen() removes the lock in a `finally`, so a normal return and an exception that "
-             "unwinds both clear it. It survives ONLY a death that does not unwind -- SIGKILL, a "
-             "power loss, os._exit -- and that is the single way a stale lock arises; the next "
-             "start reads the dead pid and takes it over. The live-holder refusal path returns "
-             "BEFORE the try/finally is entered, so a refused second listener correctly leaves "
-             "the real holder's lock in place.",
+     # Best-effort, and stated as such. An earlier revision claimed a death that
+     # does not unwind was the ONLY way a stale lock survives; the source has two
+     # more paths, and overstating the cleanup is the same class of error as
+     # denying it.
+     "loss": "Removal is ATTEMPTED, not guaranteed. listen() unlinks the lock in a `finally`, "
+             "but that finally belongs to the main loop's try, and the unlink itself is "
+             "wrapped in `except OSError: pass`. So the lock survives three ways: a death "
+             "that does not unwind (SIGKILL, power loss, os._exit); an unlink that FAILS, "
+             "whose OSError is swallowed; and any exit between taking the lock and entering "
+             "that try -- _hubs(d) raising, or the hubs0[0] index on an empty hub list -- "
+             "because the finally has not been armed yet. In each case the next start reads "
+             "the dead pid and takes the lock over. The live-holder refusal path also "
+             "returns before the try, which is CORRECT there: a refused second listener "
+             "must leave the real holder's lock in place.",
      "disposition": "must-be-ported",
      "obligation": "The port must keep single-writer custody per identity. The stale-takeover path "
                    "is the dangerous one: it decides ownership from a pid alone.",

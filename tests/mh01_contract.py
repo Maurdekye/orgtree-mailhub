@@ -521,9 +521,47 @@ def manifest_errors(profile):
     return errors
 
 
+def registration_errors(cases):
+    """Every declared case must reach the runner as its OWN executable test.
+
+    Round-3 finding. The suite installs each case with
+    `setattr(MH01Contract, _method_name("case", id), fn)`, and `_method_name`
+    collapses every run of non-word characters to `_`. So two DISTINCT, wholly
+    legitimate ids -- `malformed.json-null-body-is-a-500` and
+    `malformed.json_null_body_is_a_500` -- generate one method name, and the
+    second `setattr` silently replaces the first. The manifest did not see it:
+    it compares raw id SETS and a count, both of which are correct. The result
+    was a profile that declared 63 obligations, executed 62, and reported
+    77/77 green while a case with a deliberately wrong expectation never ran.
+
+    A missing assertion that reports as a pass is worse than a failing one, so
+    this is checked before the run rather than inferred from the count after
+    it.
+    """
+    errors, by_id, by_name = [], {}, {}
+    for i, case in enumerate(cases):
+        cid = case["id"]
+        if cid in by_id:
+            errors.append("case id %r is declared twice, at positions %d and %d"
+                          % (cid, by_id[cid], i))
+        else:
+            by_id[cid] = i
+        name = _method_name("case", cid)
+        owner = by_name.get(name)
+        if owner is not None and owner != cid:
+            errors.append(
+                "cases %r and %r both install as %r, so the later silently "
+                "replaces the earlier and its assertions never run"
+                % (owner, cid, name))
+        else:
+            by_name.setdefault(name, cid)
+    return errors
+
+
 def profile_errors(profile, inventory):
     errors = list(coverage_errors(profile, inventory))
     errors.extend(manifest_errors(profile))
+    errors.extend(registration_errors(profile["cases"]))
     if profile.get("source_commit") != inventory.get("source_commit"):
         errors.append("wire profile pins %r but the inventory pins %r"
                       % (profile.get("source_commit"), inventory.get("source_commit")))
@@ -802,6 +840,35 @@ def _mutate_placeholder(case):
     return bad
 
 
+def _collide_case(profile):
+    """The reviewer's exact round-3 mutation: a distinct, legitimately declared
+    id that normalizes onto an existing case's test method name."""
+    wide = _clone(profile)
+    twin = _clone(next(c for c in wide["cases"]
+                       if c["id"] == "malformed.json-null-body-is-a-500"))
+    twin["id"] = "malformed.json_null_body_is_a_500"
+    wide["cases"].insert(0, twin)
+    return _redeclare(wide)
+
+
+def _duplicate_case(profile):
+    """The same id twice. The manifest cannot see this one either: comparing
+    id SETS makes a repeat invisible, and the count still matches."""
+    wide = _clone(profile)
+    wide["cases"].insert(0, _clone(wide["cases"][0]))
+    return _redeclare(wide)
+
+
+def _redeclare(profile):
+    """Re-derive the manifest, so the mutation is a profile a well-behaved
+    author could have written rather than one with a stale manifest. The point
+    is that the manifest agrees and the defect survives anyway."""
+    profile["case_manifest"] = {**profile["case_manifest"],
+                                "count": len(profile["cases"]),
+                                "ids": sorted(c["id"] for c in profile["cases"])}
+    return profile
+
+
 def _drop_case(profile):
     """Remove one case and nothing else -- the reviewer's exact mutation."""
     thin = _clone(profile)
@@ -871,6 +938,17 @@ def _install_tests():
         add("case", case["id"],
             lambda self, c=case: run_case(c))
 
+    # Count what the class ACTUALLY carries, not what we meant to install.
+    # registration_errors rejects the known collision before the run; this is
+    # the independent check that no declared obligation went missing by some
+    # other route, and it measures the class rather than trusting the loop.
+    installed = sum(1 for n in vars(MH01Contract) if n.startswith("test_case_"))
+    add("registry", "every declared case is installed as its own test",
+        lambda self, want=len(cases), got=installed: self.assertEqual(
+            want, got,
+            "%d cases are declared but %d are installed, so a declared "
+            "obligation is not being executed" % (want, got)))
+
     # Controls against a bad EXPECTATION: the checker must reject each one.
     first = cases[0]
     for label, thunk in [
@@ -880,6 +958,10 @@ def _install_tests():
          lambda: run_case(_mutate_keys(first))),
         ("an unresolvable principal placeholder must fail",
          lambda: run_case(_mutate_placeholder(first))),
+        ("two case ids that differ only in punctuation must be caught",
+         lambda: _expect_empty(profile_errors(_collide_case(profile), inventory))),
+        ("the same case id declared twice must be caught",
+         lambda: _expect_empty(profile_errors(_duplicate_case(profile), inventory))),
         ("deleting a single case from the profile must be caught",
          lambda: _expect_empty(profile_errors(_drop_case(profile), inventory))),
         ("a profile whose manifest is stripped must be caught",
