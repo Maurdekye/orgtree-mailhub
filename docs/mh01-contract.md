@@ -298,6 +298,24 @@ python tests/test_mh01_inventory.py     # 19 fail-closed census controls
 python tests/mh01_contract.py           # 56 wire cases + 6 bad controls
 ```
 
+The first command **checks** the frozen register against the pinned source; it
+does not rewrite it. To reproduce the artifact itself, add `--write`:
+
+```
+python tools/mh01_inventory.py --write  # regenerate docs/mh01-source-inventory.json
+```
+
+On this machine that regeneration is byte-identical to the committed file.
+`--repo-root` and `--inventory` make the probe portable to a checkout elsewhere.
+
+One reproducibility limit: the register is written in text mode, so its line
+endings follow the platform — CRLF on Windows, LF elsewhere. The committed blob
+is LF and `core.autocrlf` reconciles the two, so a regeneration matches the
+commit on either platform, but the raw bytes are not platform-independent.
+Compare the register ignoring carriage returns if you verify it across
+platforms. The census itself is immune: it normalizes CRLF when reading source
+and reads pinned Git objects rather than the working tree.
+
 Nothing binds a socket, spawns a process, registers an identity, arms a
 listener, or opens live hub data. `HUB_DATA` is a throwaway temporary directory
 created per run.
