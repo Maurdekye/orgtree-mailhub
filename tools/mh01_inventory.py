@@ -46,6 +46,45 @@ MH02_ADDITIONS = {
 
 ADDITIONS = MH01_ADDITIONS | MH02_ADDITIONS
 
+# Files that existed at BASE and have been changed since, ON PURPOSE, each
+# pinned to the EXACT bytes its change was reviewed with. MH01 and MH02 only
+# ever ADDED files; this is the register for the other case, and until f2
+# there was none, so a deliberate one-line fix to a censused file was
+# indistinguishable from drift.
+#
+# Same spelled-out discipline as ADDITIONS, one turn stricter: a path here
+# does not become free to drift, it becomes free to hold ONE NAMED CONTENT.
+# An extra line, a different pattern, a reordering -- anything the register
+# does not name hashes to something else and is refused exactly as before,
+# and a file nobody registered is refused whatever it now contains.
+#
+# The substitution replaces a file's hash and size and NOTHING else.
+# Everything build() reads OUT of a file -- routes, refusals, schemas, SQL,
+# environment reads -- is still extracted from the bytes in hand and still
+# has to match the freeze, so registering a path cannot wave through a
+# change in product behaviour. This is for files the census weighs but
+# reads nothing out of.
+MODIFICATIONS = {
+    # f2. compose.yaml builds with `build: .`, so the whole worktree is the
+    # Docker build context. The MH02 crate's .gitignore keeps its target/
+    # out of Git, but .dockerignore is a separate file with separate
+    # effect and named no part of native/, so a checkout where the crate
+    # had been built sent that directory to the daemon: 204.08 MB against
+    # 160.25 kB with the pattern in place, by BuildKit's own figure.
+    # `native/**/target/` excludes generated output at any depth beneath
+    # native/ and no committed source. Image contents are unchanged -- the
+    # Dockerfile copies only requirements.txt and mailhub/, and both
+    # context variants export a byte-identical tree for those paths.
+    # Known and accepted: Docker cleans the trailing slash, so the pattern
+    # would also exclude a FILE named exactly `target` beneath native/.
+    # `.dockerignore` has no directory-only syntax and no product path is
+    # named that.
+    ".dockerignore": {
+        "sha256": "236948072ffe36cd558b04e8761a429e395db6eced6bef1be79b19b8030f2577",
+        "bytes": 149,
+    },
+}
+
 def git(*args):
     return subprocess.check_output(["git", "-C", str(ROOT), *args])
 
@@ -594,12 +633,42 @@ def build(files):
             "state_families": state_families(files),
             "python_dependencies": python_dependencies(files)}
 
+def authorized(snapshot, current):
+    """The freeze, with registered modifications substituted into it.
+
+    A path is substituted only when the file in hand hashes to EXACTLY the
+    bytes MODIFICATIONS names for it, so any other content leaves the
+    frozen record standing and the rebuild disagrees with it. The original
+    bytes leave it standing too, which is deliberate: censusing pinned BASE
+    blobs has to stay green without the register knowing which of the two
+    contents it is being handed.
+    """
+    if not MODIFICATIONS: return snapshot
+    out = dict(snapshot)
+    out["files"] = [dict(record) for record in snapshot["files"]]
+    for record in out["files"]:
+        named, raw = MODIFICATIONS.get(record["path"]), current.get(record["path"])
+        if named is None or raw is None: continue
+        if hashlib.sha256(raw).hexdigest() == named["sha256"] and len(raw) == named["bytes"]:
+            record["sha256"], record["bytes"] = named["sha256"], named["bytes"]
+    return out
+
 def check(snapshot, current, names):
     errors = []
     expected = {r["path"] for r in snapshot["files"]}
     if set(current) != expected: errors.append("source file denominator differs")
     if set(names) - expected - ADDITIONS: errors.append("unclassified source additions: " + ", ".join(sorted(set(names) - expected - ADDITIONS)))
-    if build(current) != snapshot: errors.append("source hash or extracted contract differs from frozen inventory")
+    stray = sorted(set(MODIFICATIONS) - expected)
+    if stray: errors.append("authorized modifications naming paths outside the freeze: " + ", ".join(stray))
+    # Neither the frozen content nor the authorized one: say so specifically,
+    # because "differs from frozen inventory" reads as drift in a file nobody
+    # was allowed to touch, and this one somebody was.
+    frozen_hashes = {r["path"]: r["sha256"] for r in snapshot["files"]}
+    unnamed = sorted(path for path, named in MODIFICATIONS.items()
+                     if path in current
+                     and hashlib.sha256(current[path]).hexdigest() not in {named["sha256"], frozen_hashes.get(path)})
+    if unnamed: errors.append("registered files holding neither the frozen nor the authorized bytes: " + ", ".join(unnamed))
+    if build(current) != authorized(snapshot, current): errors.append("source hash or extracted contract differs from frozen inventory")
     fams = snapshot.get("state_families")
     if fams is None:
         errors.append("frozen inventory predates the operation/state/protocol family register")

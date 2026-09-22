@@ -11,3 +11,4 @@ expose-hub.ps1
 install-hook.py
 session-start.sh
 hubtool.py
+native/**/target/

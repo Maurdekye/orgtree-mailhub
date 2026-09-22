@@ -11,6 +11,7 @@ frozen JSON it is compared against, so the same controls can run from outside
 the product tree.
 """
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -99,6 +100,162 @@ class InventoryControls(unittest.TestCase):
         self.assertEqual(set(), censused & inventory.MH02_ADDITIONS)
         self.assertEqual(26, len(censused))
         self.assertEqual(inventory.BASE, self.frozen["source_commit"])
+
+    # ── the authorized-modification register ────────────────────────────────
+    # Every file that existed at BASE is pinned by content, and until f2 there
+    # was no way to say that a change to one was MEANT to be there: the
+    # one-line Docker build-context fix was indistinguishable from drift. The
+    # register names one exact content per path. These controls prove it is a
+    # named-content exception and not a hole -- the acceptance below is worth
+    # nothing unless the refusals still fire.
+
+    def _holding(self, path, raw):
+        """The pinned BASE sources with one file's bytes replaced."""
+        current = dict(self.files)
+        current[path] = raw
+        return current
+
+    @property
+    def _authorized_dockerignore(self):
+        """Spelled out here rather than read back from the register, so this
+        file states independently what the one authorized content IS."""
+        return self.files[".dockerignore"] + b"native/**/target/\n"
+
+    def test_the_modification_register_is_exactly_spelled_out(self):
+        """One entry, an exact path, and a content named by hash AND size."""
+        self.assertEqual(1, len(inventory.MODIFICATIONS))
+        for path, named in inventory.MODIFICATIONS.items():
+            self.assertFalse(path.endswith("/") or "*" in path,
+                             "%r is a wildcard, not an exact path" % path)
+            self.assertEqual({"sha256", "bytes"}, set(named))
+            self.assertEqual(64, len(named["sha256"]))
+            self.assertEqual(named["sha256"], named["sha256"].lower().strip())
+
+    def test_the_authorized_dockerignore_is_accepted(self):
+        """The registered content passes, and the register names that exact
+        content rather than merely some longer file."""
+        named = inventory.MODIFICATIONS[".dockerignore"]
+        self.assertEqual(named["sha256"], hashlib.sha256(self._authorized_dockerignore).hexdigest())
+        self.assertEqual(named["bytes"], len(self._authorized_dockerignore))
+        self.assertEqual([], inventory.check(
+            self.frozen, self._holding(".dockerignore", self._authorized_dockerignore),
+            list(self.files)))
+
+    def test_the_substitution_itself_only_accepts_the_named_content(self):
+        """The guard asserted directly rather than through a refusal.
+
+        check() refuses unauthorized content twice over -- once because the
+        rebuild disagrees with the freeze and once by naming the registered
+        file specifically -- so no outcome-level test can tell whether
+        authorized() is guarding anything at all. This one looks at what it
+        actually substitutes."""
+        third = self.files[".dockerignore"] + b"native/**/target\n"
+        self.assertEqual(self.frozen,
+                         inventory.authorized(self.frozen, self._holding(".dockerignore", third)),
+                         "unauthorized bytes were substituted into the freeze")
+        substituted = inventory.authorized(
+            self.frozen, self._holding(".dockerignore", self._authorized_dockerignore))
+        named = inventory.MODIFICATIONS[".dockerignore"]
+        record = {r["path"]: r for r in substituted["files"]}[".dockerignore"]
+        self.assertEqual((named["sha256"], named["bytes"]), (record["sha256"], record["bytes"]))
+        self.assertEqual([r for r in self.frozen["files"] if r["path"] != ".dockerignore"],
+                         [r for r in substituted["files"] if r["path"] != ".dockerignore"],
+                         "substituting one record disturbed another")
+        self.assertEqual({k: v for k, v in self.frozen.items() if k != "files"},
+                         {k: v for k, v in substituted.items() if k != "files"},
+                         "the substitution reached beyond the file records")
+
+    def test_the_frozen_dockerignore_is_still_accepted(self):
+        """Registering a modification must not make the ORIGINAL bytes fail:
+        censusing pinned BASE blobs is how every replay of this census works,
+        and the register must leave the freeze alone when it sees them."""
+        self.assertEqual(self.frozen, inventory.authorized(self.frozen, self.files))
+        self.assertEqual([], inventory.check(self.frozen, self.files, list(self.files)))
+
+    def test_any_other_dockerignore_content_is_rejected(self):
+        """One named content, not a licence to edit the file. A near miss is
+        still a miss -- these differ from the authorization by one character,
+        one line, or one repetition."""
+        base = self.files[".dockerignore"]
+        for label, raw in (
+                ("the pattern without its trailing slash", base + b"native/**/target\n"),
+                ("a shallower pattern", base + b"native/*/target/\n"),
+                ("the pattern plus one more line", base + b"native/**/target/\nmailhub/\n"),
+                ("the pattern with an existing line dropped",
+                 base.replace(b"hubtool.py\n", b"") + b"native/**/target/\n"),
+                ("the pattern twice", base + b"native/**/target/\nnative/**/target/\n"),
+                ("the whole file replaced by the pattern", b"native/**/target/\n")):
+            self.assertTrue(
+                inventory.check(self.frozen, self._holding(".dockerignore", raw), list(self.files)),
+                "%s was admitted" % label)
+
+    def test_a_registered_file_holding_a_third_content_is_named_in_the_error(self):
+        """Drift in a file somebody WAS allowed to change reads differently
+        from drift in one nobody could touch, so the census has to SAY which
+        of the two it found rather than reporting both the same way."""
+        errors = inventory.check(
+            self.frozen,
+            self._holding(".dockerignore", self.files[".dockerignore"] + b"native/**/target\n"),
+            list(self.files))
+        self.assertTrue(
+            any(e.startswith("registered files holding neither the frozen nor the authorized bytes")
+                and ".dockerignore" in e for e in errors), errors)
+
+    def test_an_unregistered_base_file_modification_is_rejected(self):
+        """Per path, not per family and not per kind. .gitignore and
+        .gitattributes sit in the same repository-metadata family as
+        .dockerignore and are still refused; so is every packaging file."""
+        for path in (".gitignore", ".gitattributes", "LICENSE", "Dockerfile",
+                     "compose.yaml", "requirements.txt", ".env.example"):
+            self.assertNotIn(path, inventory.MODIFICATIONS)
+            self.assertTrue(
+                inventory.check(self.frozen,
+                                self._holding(path, self.files[path] + b"\n# appended by nobody\n"),
+                                list(self.files)),
+                "%r drifted without being registered" % path)
+
+    def test_the_register_may_only_name_frozen_paths(self):
+        """A typo, or a path that never existed at BASE, has to be a failure
+        rather than an inert line nobody notices."""
+        for stray in ("dockerignore", ".dockerignore ", "native/mailhub-protocol/Cargo.toml"):
+            with unittest.mock.patch.object(
+                    inventory, "MODIFICATIONS", {stray: {"sha256": "0" * 64, "bytes": 0}}):
+                self.assertTrue(inventory.check(self.frozen, self.files, list(self.files)),
+                                "%r was accepted as a registered modification" % stray)
+
+    def test_the_register_cannot_wave_through_a_contract_change(self):
+        """It substitutes a file's hash and size and nothing else. Authorize a
+        modified mailhub/app.py, hand over exactly those bytes, and the census
+        must STILL refuse -- the routes and refusals are rebuilt from the bytes
+        in hand, so a registration can never buy a behaviour change."""
+        smuggled = self.files["mailhub/app.py"] + (
+            b'\n\n@app.get("/smuggled")\ndef smuggled():\n    return None\n')
+        with unittest.mock.patch.object(
+                inventory, "MODIFICATIONS",
+                {"mailhub/app.py": {"sha256": hashlib.sha256(smuggled).hexdigest(),
+                                    "bytes": len(smuggled)}}):
+            self.assertTrue(inventory.check(self.frozen,
+                                            self._holding("mailhub/app.py", smuggled),
+                                            list(self.files)))
+
+    def test_each_registered_modification_is_load_bearing(self):
+        """Empty the register and the authorized content fails again, so the
+        acceptance above comes from the register rather than from the check
+        having quietly stopped looking at that file."""
+        with unittest.mock.patch.object(inventory, "MODIFICATIONS", {}):
+            self.assertTrue(inventory.check(
+                self.frozen, self._holding(".dockerignore", self._authorized_dockerignore),
+                list(self.files)))
+
+    def test_the_checkout_holds_one_of_the_two_named_contents(self):
+        """Asserted against the real checkout rather than against fixtures:
+        .dockerignore on disk is either the frozen bytes or the authorized
+        bytes, never a third thing. Line endings are normalized the way the
+        census itself normalizes them."""
+        on_disk = (ROOT / ".dockerignore").read_bytes().replace(b"\r\n", b"\n")
+        frozen = {r["path"]: r["sha256"] for r in self.frozen["files"]}[".dockerignore"]
+        self.assertIn(hashlib.sha256(on_disk).hexdigest(),
+                      {frozen, inventory.MODIFICATIONS[".dockerignore"]["sha256"]})
 
     def test_changed_contract_rejected(self):
         changed = dict(self.files)
