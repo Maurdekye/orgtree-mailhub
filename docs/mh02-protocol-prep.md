@@ -64,7 +64,7 @@ reading of MCP or JSON-RPC, and the profile asserts the source, not the reading.
 | Path | What it is |
 |---|---|
 | `native/mailhub-protocol/Cargo.toml` | Standalone library crate with an empty `[workspace]`, so it cannot be absorbed into a parent workspace. No binary target. |
-| `native/mailhub-protocol/Cargo.lock` | The exact reviewed dependency closure, 11 packages. |
+| `native/mailhub-protocol/Cargo.lock` | The exact reviewed dependency closure, 12 packages. |
 | `native/mailhub-protocol/.gitignore` | Ignores only this crate's `/target/`. |
 | `native/mailhub-protocol/src/lib.rs` | Public surface and the declared boundaries. |
 | `native/mailhub-protocol/src/envelope.rs` | Parsing, the envelope, the CPython coercion helpers and the injected dispatcher boundary. |
@@ -258,10 +258,13 @@ no new `[[package]]` entry. It is named directly for the one custom
 `DeserializeSeed` that keeps object entries in document order. The `serde`
 facade and its derive macros are not used; this crate derives nothing.
 
-The closure is unchanged at eleven packages including the crate itself: `itoa
-1.0.18`, `memchr 2.8.3`, `serde 1.0.228`, `serde_core 1.0.228`, `serde_derive
-1.0.228`, `zmij 1.0.21`, `proc-macro2 1.0.106`, `quote 1.0.46`, `syn 2.0.118`
-and `unicode-ident 1.0.24`. There is no SQL, HTTP, async or process dependency,
+The closure is unchanged at twelve packages, which is the whole of
+`Cargo.lock`: `mailhub-protocol` itself, `serde_json 1.0.150`, `itoa 1.0.18`,
+`memchr 2.8.3`, `serde 1.0.228`, `serde_core 1.0.228`, `serde_derive 1.0.228`,
+`zmij 1.0.21`, `proc-macro2 1.0.106`, `quote 1.0.46`, `syn 2.0.118` and
+`unicode-ident 1.0.24`. (The round-3 revision of this file said eleven and
+listed ten; the lock has always held twelve, and the count is corrected here
+rather than left to be rediscovered.) There is no SQL, HTTP, async or process dependency,
 and none is needed. The lock was generated and every check runs with
 `--offline --locked`.
 
