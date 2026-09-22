@@ -30,10 +30,26 @@
 //! Handler failures never become JSON-RPC errors either. They are turned into
 //! a JSON string INSIDE `result.content[0].text`, so the envelope still reads
 //! as success.
+//!
+//! # Why this module does not decode into `serde_json::Value`
+//!
+//! `serde_json::Value` stores an object in a sorted map, and CPython's
+//! `json.loads` builds a `dict`, which preserves INSERTION order. That is not
+//! a formatting difference: the source calls `str()` on a tool name and
+//! `dict()` on an argument list, and both of those read the mapping in order,
+//! so sorting changes the tool that is dispatched and the key/value pair that
+//! is forwarded. Enabling serde_json's `preserve_order` feature would fix it
+//! but pulls in a dependency this slice is not permitted to add, so the module
+//! decodes into its own [`PyValue`] instead — still through serde_json's
+//! parser, which yields object entries in document order, with no new
+//! dependency at all. [`PyDict`] then applies CPython's duplicate-key rule:
+//! the FIRST occurrence keeps its position and the LAST assignment wins.
 
+use std::borrow::Cow;
+use std::fmt;
 use std::sync::OnceLock;
 
-use serde_json::{Map, Value};
+use serde_core::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 /// Product commit whose `serve()` and `TOOLS` this module reproduces.
 pub const SOURCE_COMMIT: &str = "6477321f89d2d2e1b9313e71e940c76c35b892fb";
@@ -44,6 +60,17 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "mailhub";
 /// `serverInfo.version`, verbatim from the pinned source.
 pub const SERVER_VERSION: &str = "1.0";
+
+/// How many nested containers this module decodes.
+///
+/// CPython's decoder is bounded by its own recursion limit and reaches far
+/// deeper than anything an MCP frame plausibly carries; serde_json's default
+/// bound is 128, which is shallow enough that ordinary input crosses it. This
+/// module raises serde_json's bound and imposes its own, stated one instead,
+/// and input beyond it is REFUSED by name — never silently dropped, which is
+/// what a decoder error would otherwise become under the source's
+/// `except ValueError: continue`.
+pub const MAX_NESTING_DEPTH: usize = 256;
 
 /// The eight tool cards, in the source's declaration order, byte-derived from
 /// the pinned `TOOLS` literal by `ast.literal_eval` and re-serialised as JSON.
@@ -152,25 +179,311 @@ pub const TOOLS_JSON: &str = r##"[
   }
 ]"##;
 
-fn tools_value() -> &'static Value {
-    static TOOLS: OnceLock<Value> = OnceLock::new();
-    TOOLS.get_or_init(|| {
-        serde_json::from_str(TOOLS_JSON).expect("embedded tool cards must be valid JSON")
-    })
+// ──────────────────────────────────────────────────── CPython's object model
+
+/// One decoded JSON document, with CPython's object model where it differs
+/// from serde_json's.
+///
+/// Two differences are load-bearing and neither is cosmetic:
+///
+/// * a mapping keeps INSERTION order, because the source reads mappings in
+///   order (`str(dict)` and `dict(iterable)`), so order decides which tool is
+///   dispatched and which key/value pair is forwarded;
+/// * `int` and `float` are distinct, because `str()` of them differs and the
+///   source's tool name is `str(p.get("name"))`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PyValue {
+    /// JSON `null`, CPython `None`.
+    None,
+    /// JSON `true`/`false`, CPython `bool`.
+    Bool(bool),
+    /// A JSON integer literal, CPython `int`. Held as `i128` so the whole of
+    /// serde_json's `i64`/`u64` range is exact; integers wider than that are
+    /// still a declared obligation, because the decoder hands them over as
+    /// floats before this type ever sees them.
+    Int(i128),
+    /// A JSON number written with a fraction or an exponent, CPython `float`.
+    Float(f64),
+    /// CPython `str`.
+    Str(String),
+    /// CPython `list`.
+    List(Vec<PyValue>),
+    /// CPython `dict`, in insertion order.
+    Dict(PyDict),
 }
 
-/// The eight tool cards as a JSON array value.
-pub fn tools() -> &'static Value {
+/// An insertion-ordered string-keyed mapping with CPython's duplicate-key
+/// rule: assigning to an existing key REPLACES its value and LEAVES its
+/// position, so `{"b":1,"a":2,"b":3}` decodes as `{'b': 3, 'a': 2}` — not as
+/// `{'a': 2, 'b': 3}`, which is what a sorted map would give.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PyDict {
+    entries: Vec<(String, PyValue)>,
+}
+
+impl PyDict {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// `d[key] = value`, with CPython's first-position/last-value rule.
+    pub fn insert(&mut self, key: String, value: PyValue) {
+        match self.entries.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => self.entries.push((key, value)),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&PyValue> {
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The entries in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &PyValue)> {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    /// The keys in insertion order — what CPython iterates a dict as.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries.iter().map(|(k, _)| k)
+    }
+}
+
+impl PyValue {
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            PyValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        matches!(self, PyValue::None)
+    }
+}
+
+// ───────────────────────────────────────────────────────────────── decoding
+
+/// Why a line did not decode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeError {
+    /// CPython's `json` would also have raised `ValueError` here, so the
+    /// source's `except ValueError: continue` covers it and the line is
+    /// skipped in silence.
+    Malformed(String),
+    /// CPython's `json` would have SUCCEEDED and this module declines to
+    /// model the result. It must never reach the skip arm, because that would
+    /// dress a divergence up as the source's own behaviour.
+    Unrepresentable(String),
+}
+
+/// `json.loads(text)` over the subset this module reproduces exactly.
+pub fn decode_line(text: &str) -> Result<PyValue, DecodeError> {
+    let normalised = normalise_negative_zero_integers(text);
+    let too_deep = std::cell::Cell::new(false);
+    let mut de = serde_json::Deserializer::from_str(normalised.as_ref());
+    // serde_json's own bound is 128 nested containers, which ordinary input
+    // can cross; the bound this module answers for is MAX_NESTING_DEPTH, and
+    // `PyValueSeed` enforces it, so the parser never recurses past it either.
+    de.disable_recursion_limit();
+    let seed = PyValueSeed {
+        depth: 0,
+        too_deep: &too_deep,
+    };
+    let decoded = seed
+        .deserialize(&mut de)
+        .and_then(|value| de.end().map(|()| value));
+    match decoded {
+        Ok(value) => Ok(value),
+        Err(error) if too_deep.get() => Err(DecodeError::Unrepresentable(format!(
+            "the input nests more than {MAX_NESTING_DEPTH} containers deep; CPython's \
+             decoder accepts it and this module states a shallower bound rather than \
+             letting the difference pass as a parse failure ({error})"
+        ))),
+        Err(error) => Err(DecodeError::Malformed(error.to_string())),
+    }
+}
+
+/// Rewrite the integer token `-0` to `0` outside string literals.
+///
+/// CPython decodes `-0` with `int`, giving the `int` 0 — the very same object
+/// `0` decodes to. serde_json special-cases the token and yields the `f64`
+/// -0.0 instead, whose `str()` is `-0.0`, which would change a dispatched tool
+/// name. The two tokens denote one CPython object, so rewriting one to the
+/// other is exact rather than a coercion. `-0.0`, `-0e0` and every other
+/// float spelling are left alone and still decode to -0.0, which is what
+/// CPython gives them too.
+fn normalise_negative_zero_integers(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    if !bytes.windows(2).any(|w| w == b"-0") {
+        return Cow::Borrowed(text);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte);
+            index += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            out.push(byte);
+            index += 1;
+            continue;
+        }
+        let is_integer_negative_zero = byte == b'-'
+            && bytes.get(index + 1) == Some(&b'0')
+            && !matches!(bytes.get(index + 2), Some(b'.') | Some(b'e') | Some(b'E'))
+            && !matches!(bytes.get(index + 2), Some(b'0'..=b'9'));
+        if is_integer_negative_zero {
+            out.push(b'0');
+            index += 2;
+            continue;
+        }
+        out.push(byte);
+        index += 1;
+    }
+    // Only an ASCII `-` was ever removed, so the result is still valid UTF-8.
+    Cow::Owned(String::from_utf8(out).expect("only an ASCII byte was dropped"))
+}
+
+struct PyValueSeed<'a> {
+    depth: usize,
+    too_deep: &'a std::cell::Cell<bool>,
+}
+
+impl<'a> PyValueSeed<'a> {
+    fn inner(&self) -> PyValueSeed<'a> {
+        PyValueSeed {
+            depth: self.depth + 1,
+            too_deep: self.too_deep,
+        }
+    }
+
+    fn too_deep<E: serde_core::de::Error>(&self) -> E {
+        self.too_deep.set(true);
+        E::custom(format!("more than {MAX_NESTING_DEPTH} nested containers"))
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for PyValueSeed<'_> {
+    type Value = PyValue;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<PyValue, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for PyValueSeed<'_> {
+    type Value = PyValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a JSON document")
+    }
+
+    fn visit_unit<E>(self) -> Result<PyValue, E> {
+        Ok(PyValue::None)
+    }
+
+    fn visit_none<E>(self) -> Result<PyValue, E> {
+        Ok(PyValue::None)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<PyValue, E> {
+        Ok(PyValue::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<PyValue, E> {
+        Ok(PyValue::Int(i128::from(value)))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<PyValue, E> {
+        Ok(PyValue::Int(i128::from(value)))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<PyValue, E> {
+        Ok(PyValue::Float(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<PyValue, E> {
+        Ok(PyValue::Str(value.to_string()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<PyValue, E> {
+        Ok(PyValue::Str(value))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<PyValue, A::Error> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.too_deep());
+        }
+        let mut items = Vec::new();
+        while let Some(item) = access.next_element_seed(self.inner())? {
+            items.push(item);
+        }
+        Ok(PyValue::List(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<PyValue, A::Error> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.too_deep());
+        }
+        let mut dict = PyDict::new();
+        while let Some(key) = access.next_key::<String>()? {
+            let value = access.next_value_seed(self.inner())?;
+            dict.insert(key, value);
+        }
+        Ok(PyValue::Dict(dict))
+    }
+}
+
+// ───────────────────────────────────────────────────────────────── the cards
+
+fn tools_value() -> &'static PyValue {
+    static TOOLS: OnceLock<PyValue> = OnceLock::new();
+    TOOLS.get_or_init(|| decode_line(TOOLS_JSON).expect("embedded tool cards must be valid JSON"))
+}
+
+/// The eight tool cards as a decoded list, in the source's declaration order.
+pub fn tools() -> &'static PyValue {
     tools_value()
 }
 
 /// The tool names in declaration order.
 pub fn tool_names() -> Vec<&'static str> {
-    tools_value()
-        .as_array()
-        .expect("tool cards are an array")
+    let PyValue::List(cards) = tools_value() else {
+        unreachable!("the embedded tool cards are a JSON array")
+    };
+    cards
         .iter()
-        .map(|card| card["name"].as_str().expect("every card names a tool"))
+        .map(|card| match card {
+            PyValue::Dict(fields) => fields
+                .get("name")
+                .and_then(PyValue::as_str)
+                .expect("every card names a tool"),
+            _ => unreachable!("every tool card is a JSON object"),
+        })
         .collect()
 }
 
@@ -190,18 +503,19 @@ pub enum DispatchOutcome {
 }
 
 /// One recorded call into the injected dispatcher.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     /// The forwarded tool name, after the source's `str(...)` coercion.
     pub tool: String,
-    /// The forwarded arguments, after the source's `dict(... or {})` coercion.
-    pub arguments: Map<String, Value>,
+    /// The forwarded arguments, after the source's `dict(... or {})`
+    /// coercion, in the order CPython would have built them.
+    pub arguments: PyDict,
 }
 
 /// The synthetic handler boundary. No real handler is ever reachable from this
 /// crate: the only way a tool call produces anything is through this trait.
 pub trait Dispatcher {
-    fn dispatch(&mut self, tool: &str, arguments: &Map<String, Value>) -> DispatchOutcome;
+    fn dispatch(&mut self, tool: &str, arguments: &PyDict) -> DispatchOutcome;
 }
 
 /// A dispatcher that replays a queue of prepared outcomes and records what it
@@ -232,7 +546,7 @@ impl ScriptedDispatcher {
 }
 
 impl Dispatcher for ScriptedDispatcher {
-    fn dispatch(&mut self, tool: &str, arguments: &Map<String, Value>) -> DispatchOutcome {
+    fn dispatch(&mut self, tool: &str, arguments: &PyDict) -> DispatchOutcome {
         self.calls.push(Call {
             tool: tool.to_string(),
             arguments: arguments.clone(),
@@ -277,7 +591,7 @@ pub enum RunOutcome {
 }
 
 /// The full record of one run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunReport {
     /// Reply frames in emission order, each without its newline.
     pub frames: Vec<String>,
@@ -349,6 +663,60 @@ pub fn universal_lines(input: &str) -> Vec<&str> {
     out
 }
 
+/// `json.dumps(value)`, with CPython's defaults: `", "`/`": "` separators,
+/// `ensure_ascii=True`, and mappings written in their own order rather than
+/// re-sorted.
+pub fn py_dumps(value: &PyValue) -> String {
+    let mut out = String::new();
+    py_dumps_into(value, &mut out);
+    out
+}
+
+fn py_dumps_into(value: &PyValue, out: &mut String) {
+    match value {
+        PyValue::None => out.push_str("null"),
+        PyValue::Bool(true) => out.push_str("true"),
+        PyValue::Bool(false) => out.push_str("false"),
+        PyValue::Int(i) => out.push_str(&i.to_string()),
+        PyValue::Float(f) => out.push_str(&py_dumps_float(*f)),
+        PyValue::Str(s) => py_json_string(s, out),
+        PyValue::List(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                py_dumps_into(item, out);
+            }
+            out.push(']');
+        }
+        PyValue::Dict(map) => {
+            out.push('{');
+            for (index, (key, item)) in map.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                py_json_string(key, out);
+                out.push_str(": ");
+                py_dumps_into(item, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// `json.dumps` of a float: `repr()`, except that the three non-finite values
+/// are written as the bare tokens CPython emits by default.
+fn py_dumps_float(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".to_string();
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    python_float_repr(x)
+}
+
 /// `json.dumps(value)` for a one-key error object, matching CPython's
 /// defaults: `", "`/`": "` separators and `ensure_ascii=True`.
 fn py_dumps_error(message: &str) -> String {
@@ -386,7 +754,7 @@ fn py_json_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
-/// CPython's `repr()` of a float, which is also its `str()`.
+/// CPython's `repr()` of a finite float, which is also its `str()`.
 fn python_float_repr(x: f64) -> String {
     if x.is_nan() {
         return "nan".to_string();
@@ -438,50 +806,41 @@ fn python_float_repr(x: f64) -> String {
     }
 }
 
-fn python_number(n: &serde_json::Number) -> String {
-    if let Some(i) = n.as_i64() {
-        return i.to_string();
-    }
-    if let Some(u) = n.as_u64() {
-        return u.to_string();
-    }
-    python_float_repr(n.as_f64().expect("a serde_json number is i64, u64 or f64"))
-}
-
 /// `str(value)` for a value that came out of `json.loads`.
 ///
 /// `Err` means this crate will not guess: the source would produce a CPython
 /// `repr` this implementation does not reproduce, and the caller must surface
 /// that as an unimplemented obligation instead of inventing an answer.
-pub fn python_str(value: &Value) -> Result<String, String> {
+pub fn python_str(value: &PyValue) -> Result<String, String> {
     match value {
-        Value::String(s) => Ok(s.clone()),
+        PyValue::Str(s) => Ok(s.clone()),
         other => python_repr(other),
     }
 }
 
 /// `repr(value)` for a value that came out of `json.loads`, over the subset
 /// this crate reproduces exactly.
-pub fn python_repr(value: &Value) -> Result<String, String> {
+pub fn python_repr(value: &PyValue) -> Result<String, String> {
     match value {
-        Value::Null => Ok("None".to_string()),
-        Value::Bool(true) => Ok("True".to_string()),
-        Value::Bool(false) => Ok("False".to_string()),
-        Value::Number(n) => Ok(python_number(n)),
-        Value::String(s) => python_string_repr(s),
-        Value::Array(items) => {
+        PyValue::None => Ok("None".to_string()),
+        PyValue::Bool(true) => Ok("True".to_string()),
+        PyValue::Bool(false) => Ok("False".to_string()),
+        PyValue::Int(i) => Ok(i.to_string()),
+        PyValue::Float(f) => Ok(python_float_repr(*f)),
+        PyValue::Str(s) => python_string_repr(s),
+        PyValue::List(items) => {
             let mut parts = Vec::with_capacity(items.len());
             for item in items {
                 parts.push(python_repr(item)?);
             }
             Ok(format!("[{}]", parts.join(", ")))
         }
-        Value::Object(map) => {
+        PyValue::Dict(map) => {
             if map.is_empty() {
                 return Ok("{}".to_string());
             }
             let mut parts = Vec::with_capacity(map.len());
-            for (key, item) in map {
+            for (key, item) in map.iter() {
                 parts.push(format!(
                     "{}: {}",
                     python_string_repr(key)?,
@@ -545,62 +904,52 @@ enum DictFailure {
 }
 
 /// Python truthiness for a value that came out of `json.loads`.
-fn python_truthy(value: &Value) -> bool {
+fn python_truthy(value: &PyValue) -> bool {
     match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i != 0
-            } else if let Some(u) = n.as_u64() {
-                u != 0
-            } else {
-                let f = n.as_f64().expect("a serde_json number is i64, u64 or f64");
-                // NaN is truthy in Python; only a zero magnitude is false.
-                f.is_nan() || f != 0.0
-            }
-        }
-        Value::String(s) => !s.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
+        PyValue::None => false,
+        PyValue::Bool(b) => *b,
+        PyValue::Int(i) => *i != 0,
+        // NaN is truthy in Python; only a zero magnitude is false, and -0.0
+        // compares equal to 0.0.
+        PyValue::Float(f) => f.is_nan() || *f != 0.0,
+        PyValue::Str(s) => !s.is_empty(),
+        PyValue::List(items) => !items.is_empty(),
+        PyValue::Dict(map) => !map.is_empty(),
     }
 }
 
-fn py_type_name(value: &Value) -> &'static str {
+fn py_type_name(value: &PyValue) -> &'static str {
     match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        Value::Number(n) => {
-            if n.is_f64() {
-                "float"
-            } else {
-                "int"
-            }
-        }
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
+        PyValue::None => "NoneType",
+        PyValue::Bool(_) => "bool",
+        PyValue::Int(_) => "int",
+        PyValue::Float(_) => "float",
+        PyValue::Str(_) => "str",
+        PyValue::List(_) => "list",
+        PyValue::Dict(_) => "dict",
     }
 }
 
 /// `dict(value)` over the subset this crate reproduces exactly.
-fn python_dict(value: &Value) -> Result<Map<String, Value>, DictFailure> {
+fn python_dict(value: &PyValue) -> Result<PyDict, DictFailure> {
     match value {
-        Value::Object(map) => Ok(map.clone()),
-        Value::String(_) | Value::Array(_) => {
-            let elements: Vec<Value> = match value {
-                Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
-                Value::Array(items) => items.clone(),
+        PyValue::Dict(map) => Ok(map.clone()),
+        PyValue::Str(_) | PyValue::List(_) => {
+            let elements: Vec<PyValue> = match value {
+                PyValue::Str(s) => s.chars().map(|c| PyValue::Str(c.to_string())).collect(),
+                PyValue::List(items) => items.clone(),
                 _ => unreachable!(),
             };
-            let mut out = Map::new();
+            let mut out = PyDict::new();
             for (index, element) in elements.iter().enumerate() {
-                let pair: Vec<Value> = match element {
-                    Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
-                    Value::Array(items) => items.clone(),
-                    // A dict iterates over its KEYS, so `dict([{ "a": 1, "b": 2 }])`
-                    // really does yield `{'a': 'b'}`.
-                    Value::Object(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
+                let pair: Vec<PyValue> = match element {
+                    PyValue::Str(s) => s.chars().map(|c| PyValue::Str(c.to_string())).collect(),
+                    PyValue::List(items) => items.clone(),
+                    // A dict iterates over its KEYS, in insertion order, so
+                    // `dict([{"z": 1, "a": 2}])` really does yield
+                    // `{'z': 'a'}` — the FIRST key is the key and the SECOND
+                    // is the value.
+                    PyValue::Dict(map) => map.keys().map(|k| PyValue::Str(k.clone())).collect(),
                     // A number, a bool or None is not a sequence at all.
                     _ => {
                         // TypeError
@@ -619,10 +968,10 @@ fn python_dict(value: &Value) -> Result<Map<String, Value>, DictFailure> {
                     )));
                 }
                 match &pair[0] {
-                    Value::String(key) => {
+                    PyValue::Str(key) => {
                         out.insert(key.clone(), pair[1].clone());
                     }
-                    Value::Array(_) | Value::Object(_) => {
+                    PyValue::List(_) | PyValue::Dict(_) => {
                         // TypeError
                         return Err(DictFailure::Caught(format!(
                             "unhashable type: '{}'",
@@ -651,46 +1000,47 @@ fn python_dict(value: &Value) -> Result<Map<String, Value>, DictFailure> {
 
 // ────────────────────────────────────────────────────────────── the envelope
 
-fn reply_frame(id: &Value, result: Value) -> String {
-    // Emitted with serde_json, then compared by VALUE. The source's exact
-    // spacing and key order are `json.dumps` defaults, not product
-    // requirements, and the profile says so explicitly.
-    let mut envelope = Map::new();
-    envelope.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+fn reply_frame(id: &PyValue, result: PyValue) -> String {
+    // `json.dumps({"jsonrpc": "2.0", "id": id_, "result": result})`, written
+    // by this module's own CPython-faithful encoder rather than by
+    // serde_json, so that an object echoed back inside `id` keeps the key
+    // order the source would have written.
+    let mut envelope = PyDict::new();
+    envelope.insert("jsonrpc".to_string(), PyValue::Str("2.0".to_string()));
     envelope.insert("id".to_string(), id.clone());
     envelope.insert("result".to_string(), result);
-    serde_json::to_string(&Value::Object(envelope)).expect("a JSON value always serialises")
+    py_dumps(&PyValue::Dict(envelope))
 }
 
-fn initialize_result() -> Value {
-    let mut server_info = Map::new();
-    server_info.insert("name".to_string(), Value::String(SERVER_NAME.to_string()));
+fn initialize_result() -> PyValue {
+    let mut server_info = PyDict::new();
+    server_info.insert("name".to_string(), PyValue::Str(SERVER_NAME.to_string()));
     server_info.insert(
         "version".to_string(),
-        Value::String(SERVER_VERSION.to_string()),
+        PyValue::Str(SERVER_VERSION.to_string()),
     );
-    let mut capabilities = Map::new();
-    capabilities.insert("tools".to_string(), Value::Object(Map::new()));
-    let mut result = Map::new();
+    let mut capabilities = PyDict::new();
+    capabilities.insert("tools".to_string(), PyValue::Dict(PyDict::new()));
+    let mut result = PyDict::new();
     result.insert(
         "protocolVersion".to_string(),
-        Value::String(PROTOCOL_VERSION.to_string()),
+        PyValue::Str(PROTOCOL_VERSION.to_string()),
     );
-    result.insert("capabilities".to_string(), Value::Object(capabilities));
-    result.insert("serverInfo".to_string(), Value::Object(server_info));
-    Value::Object(result)
+    result.insert("capabilities".to_string(), PyValue::Dict(capabilities));
+    result.insert("serverInfo".to_string(), PyValue::Dict(server_info));
+    PyValue::Dict(result)
 }
 
-fn content_result(text: String) -> Value {
-    let mut item = Map::new();
-    item.insert("type".to_string(), Value::String("text".to_string()));
-    item.insert("text".to_string(), Value::String(text));
-    let mut result = Map::new();
+fn content_result(text: String) -> PyValue {
+    let mut item = PyDict::new();
+    item.insert("type".to_string(), PyValue::Str("text".to_string()));
+    item.insert("text".to_string(), PyValue::Str(text));
+    let mut result = PyDict::new();
     result.insert(
         "content".to_string(),
-        Value::Array(vec![Value::Object(item)]),
+        PyValue::List(vec![PyValue::Dict(item)]),
     );
-    Value::Object(result)
+    PyValue::Dict(result)
 }
 
 /// Process one already-received line exactly as the pinned `serve()` loop
@@ -703,17 +1053,21 @@ pub fn process_line<D: Dispatcher + ?Sized>(
     if stripped.is_empty() {
         return Ok(LineOutcome::Skipped);
     }
-    let message: Value = match serde_json::from_str(stripped) {
+    let message: PyValue = match decode_line(stripped) {
         Ok(value) => value,
         // `except ValueError: continue`. Note the standing obligation: CPython
         // also accepts the bare tokens NaN/Infinity/-Infinity and integers
         // wider than 64 bits, which serde_json rejects or narrows. The profile
         // carries those as declared unimplemented obligations rather than
         // letting this arm absorb them.
-        Err(_) => return Ok(LineOutcome::Skipped),
+        Err(DecodeError::Malformed(_)) => return Ok(LineOutcome::Skipped),
+        // A document CPython WOULD have decoded. Refusing it out loud is the
+        // whole point of the distinction: routing it to the skip arm would
+        // make a divergence look like the source's own silence.
+        Err(DecodeError::Unrepresentable(detail)) => return Err(detail),
     };
     let object = match &message {
-        Value::Object(map) => map,
+        PyValue::Dict(map) => map,
         other => {
             // `msg.get(...)` on a non-dict raises AttributeError, and nothing
             // in serve() catches it: the loop ends here.
@@ -724,22 +1078,22 @@ pub fn process_line<D: Dispatcher + ?Sized>(
         }
     };
     let method = object.get("method");
-    let id = object.get("id").cloned().unwrap_or(Value::Null);
-    let method_name = method.and_then(|m| m.as_str());
+    let id = object.get("id").cloned().unwrap_or(PyValue::None);
+    let method_name = method.and_then(PyValue::as_str);
 
     match method_name {
         Some("initialize") => Ok(LineOutcome::Reply(reply_frame(&id, initialize_result()))),
         Some("tools/list") => {
-            let mut result = Map::new();
+            let mut result = PyDict::new();
             result.insert("tools".to_string(), tools_value().clone());
-            Ok(LineOutcome::Reply(reply_frame(&id, Value::Object(result))))
+            Ok(LineOutcome::Reply(reply_frame(&id, PyValue::Dict(result))))
         }
         Some("tools/call") => {
-            let params = object.get("params").cloned().unwrap_or(Value::Null);
+            let params = object.get("params").cloned().unwrap_or(PyValue::None);
             let params = if python_truthy(&params) {
                 params
             } else {
-                Value::Object(Map::new())
+                PyValue::Dict(PyDict::new())
             };
             let text = call_text(&params, dispatcher)?;
             Ok(LineOutcome::Reply(reply_frame(&id, content_result(text))))
@@ -747,12 +1101,12 @@ pub fn process_line<D: Dispatcher + ?Sized>(
         // Every other method, including a non-string one: answered with an
         // empty result only when the id is neither missing nor null.
         _ => {
-            if id.is_null() {
+            if id.is_none() {
                 Ok(LineOutcome::Silent)
             } else {
                 Ok(LineOutcome::Reply(reply_frame(
                     &id,
-                    Value::Object(Map::new()),
+                    PyValue::Dict(PyDict::new()),
                 )))
             }
         }
@@ -761,11 +1115,14 @@ pub fn process_line<D: Dispatcher + ?Sized>(
 
 /// The body of the source's `try:` around `dispatch`, including the two
 /// `except` arms. `Err` is an input this crate declines to model.
-fn call_text<D: Dispatcher + ?Sized>(params: &Value, dispatcher: &mut D) -> Result<String, String> {
+fn call_text<D: Dispatcher + ?Sized>(
+    params: &PyValue,
+    dispatcher: &mut D,
+) -> Result<String, String> {
     // `p.get("name")` — an AttributeError here IS inside the try, so it
     // becomes an error string rather than ending the loop.
     let params = match params {
-        Value::Object(map) => map,
+        PyValue::Dict(map) => map,
         other => {
             return Ok(py_dumps_error(&format!(
                 "'{}' object has no attribute 'get'",
@@ -773,9 +1130,9 @@ fn call_text<D: Dispatcher + ?Sized>(params: &Value, dispatcher: &mut D) -> Resu
             )))
         }
     };
-    let name = params.get("name").cloned().unwrap_or(Value::Null);
+    let name = params.get("name").cloned().unwrap_or(PyValue::None);
     let tool = python_str(&name)?;
-    let raw_arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let raw_arguments = params.get("arguments").cloned().unwrap_or(PyValue::None);
     let arguments = if python_truthy(&raw_arguments) {
         match python_dict(&raw_arguments) {
             Ok(map) => map,
@@ -783,7 +1140,7 @@ fn call_text<D: Dispatcher + ?Sized>(params: &Value, dispatcher: &mut D) -> Resu
             Err(DictFailure::Unrepresentable(why)) => return Err(why),
         }
     } else {
-        Map::new()
+        PyDict::new()
     };
     Ok(match dispatcher.dispatch(&tool, &arguments) {
         DispatchOutcome::Text(text) => text,

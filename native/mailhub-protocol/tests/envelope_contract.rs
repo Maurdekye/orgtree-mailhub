@@ -8,11 +8,19 @@
 //! deliberately cannot express.
 
 use mailhub_protocol::{
-    process_line, python_repr, python_str, python_strip, run, run_scripted, tool_names, tools,
-    universal_lines, DispatchOutcome, LineOutcome, RunOutcome, ScriptedDispatcher,
-    PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION,
+    decode_line, process_line, py_dumps, python_repr, python_str, python_strip, run, run_scripted,
+    tool_names, tools, universal_lines, DecodeError, DispatchOutcome, LineOutcome, PyValue,
+    RunOutcome, ScriptedDispatcher, MAX_NESTING_DEPTH, PROTOCOL_VERSION, SERVER_NAME,
+    SERVER_VERSION,
 };
 use serde_json::{json, Value};
+
+/// Decode a JSON document from its TEXT, which is how every real input
+/// reaches the crate. Building a value directly would skip the decoder, and
+/// the decoder is where CPython's object model is reproduced.
+fn py(text: &str) -> PyValue {
+    decode_line(text).expect("the test document decodes")
+}
 
 fn only_frame(input: &str, outcomes: Vec<DispatchOutcome>) -> Value {
     let (report, _) = run_scripted(input, outcomes);
@@ -76,7 +84,15 @@ fn every_tool_card_is_listed_in_source_order() {
             "hub_hubs",
         ]
     );
-    assert_eq!(&frame["result"]["tools"], tools());
+    // The embedded cards, compared through the wire text so the check does
+    // not depend on either side's in-memory value type.
+    assert_eq!(
+        serde_json::to_string(&frame["result"]["tools"]).expect("serialises"),
+        serde_json::to_string(
+            &serde_json::from_str::<Value>(&py_dumps(tools())).expect("cards are JSON")
+        )
+        .expect("serialises")
+    );
     for card in listed {
         assert!(card.get("name").is_some());
         assert!(card.get("description").is_some());
@@ -97,8 +113,15 @@ fn a_tool_call_forwards_its_name_and_arguments() {
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(dispatcher.calls.len(), 1);
     assert_eq!(dispatcher.calls[0].tool, "hub_send");
-    assert_eq!(dispatcher.calls[0].arguments["to"], "peer");
-    assert_eq!(dispatcher.calls[0].arguments["body"], "hi");
+    let arguments = &dispatcher.calls[0].arguments;
+    assert_eq!(arguments.get("to"), Some(&PyValue::Str("peer".to_string())));
+    assert_eq!(arguments.get("body"), Some(&PyValue::Str("hi".to_string())));
+    // ...and in the order they arrived, which is the order CPython's dict
+    // would have carried them to the handler.
+    assert_eq!(
+        arguments.keys().cloned().collect::<Vec<_>>(),
+        vec!["to".to_string(), "body".to_string()]
+    );
     assert_eq!(dispatcher.overruns, 0);
 }
 
@@ -328,39 +351,150 @@ fn universal_newlines_split_the_way_stdin_does() {
 
 #[test]
 fn python_str_matches_cpython_for_the_values_json_can_carry() {
-    for (value, expected) in [
-        (json!(null), "None"),
-        (json!(true), "True"),
-        (json!(false), "False"),
-        (json!(0), "0"),
-        (json!(-1), "-1"),
-        (json!(9007199254740993i64), "9007199254740993"),
-        (json!(1.5), "1.5"),
-        (json!(100.0), "100.0"),
-        (json!(1e16), "1e+16"),
-        (json!(1e15), "1000000000000000.0"),
-        (json!(0.0001), "0.0001"),
-        (json!(1e-5), "1e-05"),
-        (json!(1e308), "1e+308"),
-        (json!(-0.0), "-0.0"),
-        (json!("hub_list"), "hub_list"),
-        (json!("caf\u{e9}"), "caf\u{e9}"),
-        (json!([1, "a", null]), "[1, 'a', None]"),
-        (json!({}), "{}"),
-        (json!({"a": 1}), "{'a': 1}"),
+    for (text, expected) in [
+        ("null", "None"),
+        ("true", "True"),
+        ("false", "False"),
+        ("0", "0"),
+        ("-1", "-1"),
+        ("9007199254740993", "9007199254740993"),
+        ("1.5", "1.5"),
+        ("100.0", "100.0"),
+        ("1e16", "1e+16"),
+        ("1e15", "1000000000000000.0"),
+        ("0.0001", "0.0001"),
+        ("1e-5", "1e-05"),
+        ("1e308", "1e+308"),
+        // Two spellings CPython keeps apart, and so must this crate: `-0` is
+        // the INT zero and `-0.0` is the negative float. serde_json decodes
+        // both as -0.0 on its own, which would change a dispatched name.
+        ("-0", "0"),
+        ("-0.0", "-0.0"),
+        ("-0e0", "-0.0"),
+        ("\"hub_list\"", "hub_list"),
+        ("\"caf\\u00e9\"", "caf\u{e9}"),
+        ("[1, \"a\", null]", "[1, 'a', None]"),
+        ("{}", "{}"),
+        ("{\"a\": 1}", "{'a': 1}"),
+        // Insertion order, not sorted order.
+        ("{\"z\": 1, \"a\": 2}", "{'z': 1, 'a': 2}"),
+        ("[{\"z\": 1, \"a\": 2}]", "[{'z': 1, 'a': 2}]"),
+        // CPython's duplicate-key rule: the first occurrence keeps its
+        // position and the last assignment wins.
+        ("{\"b\": 1, \"a\": 2, \"b\": 3}", "{'b': 3, 'a': 2}"),
     ] {
-        assert_eq!(python_str(&value).as_deref(), Ok(expected), "{value}");
+        assert_eq!(python_str(&py(text)).as_deref(), Ok(expected), "{text}");
     }
+}
+
+#[test]
+fn a_decoded_mapping_keeps_cpython_insertion_order_everywhere_it_is_read() {
+    // The three places the source reads a mapping IN ORDER, each of which a
+    // sorted map would silently change.
+
+    // 1. `str(p.get("name"))` when the name is a mapping: the dispatched tool
+    //    string is the repr, and the repr is ordered.
+    let mut dispatcher = ScriptedDispatcher::new(vec![DispatchOutcome::Text("ok".to_string())]);
+    run(
+        "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":{\"z\":1,\"a\":2}}}",
+        &mut dispatcher,
+    );
+    assert_eq!(dispatcher.calls[0].tool, "{'z': 1, 'a': 2}");
+
+    // 2. `dict(p.get("arguments"))` over a list of mappings: a dict iterates
+    //    its KEYS, so the FIRST key becomes the key and the SECOND the value.
+    let mut dispatcher = ScriptedDispatcher::new(vec![DispatchOutcome::Text("ok".to_string())]);
+    run(
+        "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\
+         \"arguments\":[{\"z\":1,\"a\":2}]}}",
+        &mut dispatcher,
+    );
+    let arguments = &dispatcher.calls[0].arguments;
+    assert_eq!(arguments.len(), 1);
+    assert_eq!(
+        arguments.get("z"),
+        Some(&PyValue::Str("a".to_string())),
+        "dict([{{'z': 1, 'a': 2}}]) is {{'z': 'a'}}, not {{'a': 'z'}}"
+    );
+
+    // 3. An echoed `id` is written back out in the order it arrived.
+    let (report, _) = run_scripted("{\"id\":{\"z\":1,\"a\":2},\"method\":\"nope\"}", vec![]);
+    assert_eq!(
+        report.frames[0],
+        "{\"jsonrpc\": \"2.0\", \"id\": {\"z\": 1, \"a\": 2}, \"result\": {}}"
+    );
+}
+
+#[test]
+fn a_reply_frame_is_byte_identical_to_cpython_json_dumps() {
+    // `json.dumps` defaults: ", " and ": " separators, ensure_ascii, and the
+    // mapping's own order. Emitting through serde_json instead would sort the
+    // keys and leave non-ASCII unescaped.
+    let (report, _) = run_scripted("{\"id\":\"caf\\u00e9\",\"method\":\"nope\"}", vec![]);
+    assert_eq!(
+        report.frames[0],
+        "{\"jsonrpc\": \"2.0\", \"id\": \"caf\\u00e9\", \"result\": {}}"
+    );
+    assert_eq!(
+        py_dumps(&py("{\"z\": [1, 2.5, null, true], \"a\": {}}")),
+        "{\"z\": [1, 2.5, null, true], \"a\": {}}"
+    );
+}
+
+#[test]
+fn nesting_past_the_stated_bound_is_refused_by_name_and_never_skipped() {
+    // serde_json's own bound is 128, which ordinary input can cross while
+    // CPython's decoder does not. Anything at or under the crate's stated
+    // bound decodes; anything past it is an explicit refusal, NOT the silent
+    // skip that `except ValueError: continue` would otherwise disguise it as.
+    let deep = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+    assert!(
+        decode_line(&deep(140)).is_ok(),
+        "140 is well within CPython"
+    );
+    assert!(decode_line(&deep(MAX_NESTING_DEPTH)).is_ok());
+    assert!(matches!(
+        decode_line(&deep(MAX_NESTING_DEPTH + 1)),
+        Err(DecodeError::Unrepresentable(_))
+    ));
+    assert!(matches!(
+        decode_line("{\"a\":}"),
+        Err(DecodeError::Malformed(_))
+    ));
+
+    // And the difference is visible at the envelope: a 140-deep argument is
+    // answered like any other, while one past the bound stops the run with a
+    // named refusal instead of pretending the source stayed silent.
+    let call = |argument: &str| {
+        format!(
+            "{{\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"hub_send\",\
+             \"arguments\":[[\"k\",{argument}]]}}}}"
+        )
+    };
+    let (report, _) = run_scripted(&call(&deep(140)), vec![DispatchOutcome::Text("ok".into())]);
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.frames.len(), 1);
+
+    let (report, _) = run_scripted(
+        &call(&deep(MAX_NESTING_DEPTH + 1)),
+        vec![DispatchOutcome::Text("ok".into())],
+    );
+    assert!(
+        matches!(report.outcome, RunOutcome::Unrepresentable { .. }),
+        "observed {:?}",
+        report.outcome
+    );
+    assert!(report.frames.is_empty());
 }
 
 #[test]
 fn repr_of_a_non_ascii_string_is_refused_rather_than_guessed() {
     // Inside a container the source would call repr(), whose escaping depends
     // on CPython's printability table. Refusing is the declared obligation.
-    assert!(python_repr(&json!(["caf\u{e9}"])).is_err());
+    assert!(python_repr(&py("[\"caf\\u00e9\"]")).is_err());
     // But str() of that same string, which is what a tool name actually goes
     // through, is fully supported.
-    assert_eq!(python_str(&json!("caf\u{e9}")).unwrap(), "caf\u{e9}");
+    assert_eq!(python_str(&py("\"caf\\u00e9\"")).unwrap(), "caf\u{e9}");
 }
 
 #[test]

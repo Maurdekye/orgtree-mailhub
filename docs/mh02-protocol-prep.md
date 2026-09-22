@@ -70,7 +70,7 @@ reading of MCP or JSON-RPC, and the profile asserts the source, not the reading.
 | `native/mailhub-protocol/src/envelope.rs` | Parsing, the envelope, the CPython coercion helpers and the injected dispatcher boundary. |
 | `native/mailhub-protocol/tests/envelope_contract.rs` | The crate's own behaviour and framing checks. |
 | `native/mailhub-protocol/examples/envelope_probe.rs` | Test-only pipe driver. Never a service. |
-| `tests/fixtures/mh02-mcp-envelope.json` | The language-neutral profile: 135 cases, a case manifest, the source digests, the eight cards and the declared obligations. |
+| `tests/fixtures/mh02-mcp-envelope.json` | The language-neutral profile: 146 cases, a case manifest, the source digests, the eight cards and the declared obligations with their bounded divergences. |
 | `tests/mh02_mcp_contract.py` | The shared assertions plus the Python and Rust adapters. |
 | `docs/mh02-protocol-prep.md` | This file. |
 
@@ -80,6 +80,54 @@ spelled out; there is no `native/` wildcard, and four new census controls prove
 each entry is individually load-bearing and that an unregistered file under the
 crate is still refused. The census denominator stays at 26 product files and the
 frozen inventory is unchanged.
+
+## How the decoder models CPython, and where it stops
+
+`serde_json::Value` is not used to hold a decoded document, and the reason is
+behavioural rather than stylistic. `Value` stores an object in a **sorted**
+map; CPython's `json.loads` builds a `dict`, which preserves **insertion**
+order. The source reads mappings in order in two places that decide what a
+handler is actually called with —
+
+* `str(p.get("name"))` when the name is a mapping: the dispatched tool string
+  is the `repr`, and the `repr` is ordered, so `{"z":1,"a":2}` dispatches
+  `{'z': 1, 'a': 2}` and never `{'a': 2, 'z': 1}`;
+* `dict(p.get("arguments"))` over a list of mappings: a dict iterates its
+  KEYS, so `[{"z":1,"a":2}]` forwards `{'z': 'a'}` and never `{'a': 'z'}` —
+  a different key AND a different value.
+
+so a sorted map silently changes the call. `serde_json`'s `preserve_order`
+feature would fix it and is deliberately **not** used: it adds `indexmap` and
+`equivalent` to the lock, and this slice may not add packages. The crate
+decodes into its own `PyValue`/`PyDict` through `serde_json`'s streaming
+parser instead, which yields object entries in document order and needs no new
+package at all. `PyDict` applies CPython's duplicate-key rule: the first
+occurrence keeps its position and the last assignment wins, so
+`{"b":1,"a":2,"b":3}` is `{'b': 3, 'a': 2}`.
+
+Three further decoder differences are reproduced rather than declared away:
+
+* **`-0`.** `serde_json` special-cases the integer token `-0` into the float
+  -0.0, whose `str()` is `"-0.0"`; CPython decodes it with `int` and gets the
+  `int` 0, whose `str()` is `"0"`. The two tokens denote one CPython object,
+  so the decoder rewrites integer-syntax `-0` to `0` outside string literals
+  before parsing. `-0.0` and `-0e0` are untouched and stay negative zero.
+* **Nesting depth.** `serde_json`'s default bound is 128 nested containers,
+  which ordinary input can cross while CPython's decoder does not. The crate
+  raises that bound (`unbounded_depth`, a serde_json-only feature that adds no
+  package) and enforces its own stated `MAX_NESTING_DEPTH` of 256, so 140-deep
+  input is answered identically on both sides.
+* **Refusal versus silence.** `DecodeError` separates `Malformed` — input
+  CPython's `json` would also have rejected, which the source's
+  `except ValueError: continue` covers — from `Unrepresentable`, input CPython
+  would have decoded successfully. Only the first is skipped in silence. The
+  second stops the run with a NAMED refusal, because routing it to the skip
+  arm would dress a divergence up as the source's own behaviour.
+
+Reply frames are written by the crate's own `json.dumps`-faithful encoder —
+`", "`/`": "` separators, `ensure_ascii`, mappings in their own order — rather
+than by `serde_json`, so an object echoed back inside `id` is never re-sorted
+on the wire.
 
 ## The oracle
 
@@ -124,6 +172,29 @@ where the source's own sentences live. Framing is asserted separately: one JSON
 document per line, one newline per frame, and the raw stream equal to their
 concatenation.
 
+"By value" means JSON's values, not Python's. `json_equal()` does the
+comparing, and it keeps `bool` apart from `int` at every depth: Python's
+`False == 0` and `True == 1`, so a plain `==` accepted an implementation that
+answered `"id": 0` where the source answers `"id": false`. The source echoes
+`id` verbatim, so that is a change on the wire and reads as one. Two things
+stay deliberately loose and are policy rather than oversight: an int and a
+float of equal value compare equal, because JSON has one number type and the
+source never distinguishes them; and object key order inside a REPLY is not
+compared. Key order inside a decoded INPUT is a different matter and is a hard
+requirement — it decides the dispatched name and the forwarded key/value pair,
+and the `name.*` and `arguments.*` cases assert it through those values.
+
+**How the driver process ends is part of the result.** The runner records the
+child's exit status and gates on it: anything other than the expected status,
+or a process that had to be killed, is a cleanup error, and cleanup errors
+block collection. A driver that answered every job correctly and then died has
+not passed — reading its answers and ignoring its exit status is how a run
+stays green while the implementation under test is aborting. The driver carries
+one test-only job, `{"op":"exit-after-input","code":N}`, so that gate is proven
+against a **real** process: a control arms the failure, checks that the driver
+keeps producing correct observations afterwards, and then requires the non-zero
+exit to surface as a cleanup error.
+
 Coverage: all three methods; the eight tool names, each forwarded to a synthetic
 handler; string, integer, zero, negative, false, null, missing, object, list,
 float and Unicode ids; unknown methods with and without a usable id; blank,
@@ -141,6 +212,18 @@ and the Rust side is required to **disagree**: an obligation that quietly starts
 passing is a stale declaration and fails the run exactly as a regression would.
 None of them is skipped, and none is absorbed by a narrower profile.
 
+Disagreeing is not enough on its own. Every declaration also carries a
+**bounded `observed` outcome** — the same shape as a normative expectation,
+judged by the same `case_errors()` — saying exactly what the Rust side really
+does on that input, plus a one-line `difference`. Both halves are required:
+the normative expectation must still fail, AND the observation must match the
+bounded outcome exactly. Without the second half, "declared unimplemented"
+degenerates into "any failure on this input counts", and an unrelated defect —
+a lost result envelope, an invented JSON-RPC error member, a wrong id, a
+dropped handler call, a request skipped entirely — passes as though it were the
+difference the obligation names. Standing controls break each declaration in a
+way it does not name and require the bound to reject it.
+
 | Obligation | What Rust cannot do |
 |---|---|
 | `numeric-domain.integer-wider-than-64-bits` | CPython integers are unbounded; `serde_json` narrows anything outside i64/u64 to f64, so a 23-digit id loses its exact value. |
@@ -148,6 +231,8 @@ None of them is skipped, and none is absorbed by a narrower profile.
 | `string-domain.lone-surrogate-escape` | CPython decodes a lone `\ud800` into an unpaired surrogate and returns a `str`, ending the loop. `serde_json` rejects it; a Rust `String` cannot hold one. |
 | `repr-domain.non-ascii-inside-a-container` | `repr()` of a non-ASCII string follows CPython's printability table. The crate reports `unrepresentable` instead of guessing. `str()` of a bare string tool name — the reachable case — is exact. |
 | `key-domain.non-string-dictionary-key` | `dict([[1,2]])` is `{1: 2}`. A JSON object key must be a string, so the crate refuses rather than coercing it to `"1"`. Exercised by the crate's own test, because a language-neutral case cannot state the expectation. |
+| `numeric-domain.overflowing-float-literal` | CPython decodes a finite literal whose exponent overflows, such as `1e999`, to the float `inf`, which ends the source's loop. `serde_json` reports it as out of range, so Rust skips the line. |
+| `depth-domain.nesting-past-the-stated-bound` | CPython's decoder accepts nesting far deeper than this crate states a bound for. Past `MAX_NESTING_DEPTH` the crate refuses the line BY NAME rather than letting a decoder error read as the source's silent skip. 140 deep is answered identically by both; 257 deep is the declared refusal. |
 
 `arbitrary_precision` is deliberately **not** enabled on `serde_json`: it would
 change the numeric domain this slice is characterising rather than record it.
@@ -166,19 +251,35 @@ adoption, and nothing here was installed or updated.
 | clippy | `0.1.93 (f520900083 2025-12-10)` |
 | Python | CPython 3.13.15, the bundled engine runtime |
 
-The only declared dependency is `serde_json 1.0.150` (MIT OR Apache-2.0), with
-default features. Its closure is `itoa 1.0.18`, `memchr 2.8.3`, `serde 1.0.228`,
-`serde_core 1.0.228`, `serde_derive 1.0.228`, `zmij 1.0.21`, `proc-macro2
-1.0.106`, `quote 1.0.46`, `syn 2.0.118` and `unicode-ident 1.0.24` — eleven
-packages including the crate itself. There is no SQL, HTTP, async or process
-dependency, and none is needed. The lock was generated and every check runs with
+Two dependencies are declared: `serde_json 1.0.150` and `serde_core 1.0.228`
+(both MIT OR Apache-2.0). Naming `serde_core` **adds no package to the lock** —
+`serde_json` already depends on it, so the lock gains one dependency edge and
+no new `[[package]]` entry. It is named directly for the one custom
+`DeserializeSeed` that keeps object entries in document order. The `serde`
+facade and its derive macros are not used; this crate derives nothing.
+
+The closure is unchanged at eleven packages including the crate itself: `itoa
+1.0.18`, `memchr 2.8.3`, `serde 1.0.228`, `serde_core 1.0.228`, `serde_derive
+1.0.228`, `zmij 1.0.21`, `proc-macro2 1.0.106`, `quote 1.0.46`, `syn 2.0.118`
+and `unicode-ident 1.0.24`. There is no SQL, HTTP, async or process dependency,
+and none is needed. The lock was generated and every check runs with
 `--offline --locked`.
+
+Feature selection, stated rather than defaulted: `unbounded_depth` is ON (a
+serde_json-only feature, no package), because the library's 128-container
+default is shallower than CPython's and the crate enforces its own stated bound
+instead. `arbitrary_precision` is OFF and `preserve_order` is unused — the
+first would change the numeric domain this slice is characterising rather than
+record it, and the second would add `indexmap` and `equivalent` to the lock.
 
 Numeric-domain behaviour of the chosen decoder, recorded: integers inside i64 or
 u64 are exact (including 2⁵³+1, which a naive f64 implementation loses);
 anything wider becomes f64; `NaN`, `Infinity` and `-Infinity` are rejected as
-input; float output differs from CPython only in formatting, which value
-comparison absorbs.
+input, and so is a finite literal whose exponent overflows, such as `1e999`,
+where CPython returns `inf`; the integer token `-0` is normalised to the `int`
+0 the way CPython decodes it, while `-0.0` and `-0e0` stay negative zero; float
+output differs from CPython only in formatting, which value comparison
+absorbs.
 
 ## Commands
 
@@ -195,7 +296,9 @@ python -B tests/mh02_mcp_contract.py --target both --rust-driver <built envelope
 
 A missing Rust driver is an **environment blocker** that fails the run. It is
 never a skip and never a pass: `--target python` alone, an absent driver and a
-driver that does not exist all leave 139 tests red rather than green.
+driver that does not exist all leave the whole Rust half of the profile red
+rather than green. A driver that runs but exits non-zero is blocked the same
+way.
 
 ## Cleanup
 

@@ -27,14 +27,22 @@
 //! # Boundaries this crate declares rather than hides
 //!
 //! Some pinned-source behaviour depends on CPython specifics that a JSON
-//! decoder does not reproduce. Where that happens the crate returns
+//! decoder does not reproduce. Where the crate CAN reproduce them it does,
+//! rather than declaring a gap: object entries keep CPython's insertion order
+//! (see [`PyValue`]) because the source reads mappings in order, and the
+//! integer token `-0` decodes to the `int` 0 exactly as CPython's does. Where that happens the crate returns
 //! [`RunOutcome::Unrepresentable`] with a reason, and the shared profile
 //! carries the input as a NAMED unimplemented obligation. It never guesses an
 //! answer and never lets an unmodelled input read as a pass:
 //!
 //! * CPython's `json` accepts the bare tokens `NaN`, `Infinity` and
 //!   `-Infinity`, and integers of unbounded width. `serde_json` rejects the
-//!   first three and narrows the fourth to `f64`.
+//!   first three and narrows the fourth to `f64`. It also rejects a finite
+//!   literal whose exponent overflows, such as `1e999`, where CPython returns
+//!   `inf`.
+//! * CPython's decoder accepts far deeper nesting than this crate states a
+//!   bound for; input past [`MAX_NESTING_DEPTH`] is refused BY NAME rather
+//!   than being allowed to look like the source's own silent skip.
 //! * CPython dictionary keys may be non-strings; a JSON object's may not.
 //! * `repr()` of a non-ASCII string follows CPython's printability table,
 //!   which this crate does not carry. Only `repr()` is bounded — `str()` of a
@@ -61,7 +69,8 @@
 pub mod envelope;
 
 pub use envelope::{
-    process_line, python_repr, python_str, python_strip, run, run_scripted, tool_names, tools,
-    universal_lines, Call, DispatchOutcome, Dispatcher, LineOutcome, RunOutcome, RunReport,
-    ScriptedDispatcher, PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION, SOURCE_COMMIT, TOOLS_JSON,
+    decode_line, process_line, py_dumps, python_repr, python_str, python_strip, run, run_scripted,
+    tool_names, tools, universal_lines, Call, DecodeError, DispatchOutcome, Dispatcher,
+    LineOutcome, PyDict, PyValue, RunOutcome, RunReport, ScriptedDispatcher, MAX_NESTING_DEPTH,
+    PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION, SOURCE_COMMIT, TOOLS_JSON,
 };

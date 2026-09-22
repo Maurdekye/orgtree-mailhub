@@ -26,7 +26,26 @@ name = "envelope_probe"
 path = "examples/envelope_probe.rs"
 
 [dependencies]
-# A maintained JSON implementation, not a handwritten parser. Default features
-# only: `arbitrary_precision` is deliberately NOT enabled, because it would
-# change the numeric domain this slice is characterising rather than record it.
-serde_json = "1.0.150"
+# A maintained JSON implementation, not a handwritten parser.
+#
+# `arbitrary_precision` is deliberately NOT enabled: it would change the
+# numeric domain this slice is characterising rather than record it.
+#
+# `unbounded_depth` IS enabled, and is a serde_json-only feature that adds no
+# package to the lock. serde_json's default bound is 128 nested containers,
+# which ordinary input can cross while CPython's decoder does not; the crate
+# raises that bound and enforces its own stated `MAX_NESTING_DEPTH` instead,
+# so input past the bound is refused by name rather than silently skipped.
+#
+# `preserve_order` is NOT used, and could not be: it would add `indexmap` and
+# `equivalent` to the lock, and this slice may not add packages. The crate
+# decodes into its own insertion-ordered `PyValue` through serde_json's
+# parser instead, which needs no new package either.
+serde_json = { version = "1.0.150", features = ["unbounded_depth"] }
+
+# The serde trait definitions, for the one custom `DeserializeSeed` that keeps
+# object entries in document order. This is NOT a new package in the lock:
+# serde_json already depends on `serde_core`, and naming it here only makes an
+# existing graph edge direct. The `serde` facade and its derive macros are
+# deliberately not used — this crate derives nothing.
+serde_core = "1.0.228"

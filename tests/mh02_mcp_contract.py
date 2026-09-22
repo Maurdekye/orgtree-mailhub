@@ -456,13 +456,27 @@ class DriverSession:
     Every run is bounded in time and in output, both pipes are closed, and the
     process is proven gone on the way out — on success, on an assertion failure
     and on a timeout alike, because the teardown lives in `__exit__`.
+
+    HOW THE PROCESS ENDED IS PART OF THE RESULT. A driver that answered every
+    job perfectly and then died is not a driver that succeeded, and its
+    observations must not be collected as though it had: reading the answers
+    and ignoring the exit status is how a run stays green while the
+    implementation under test is aborting. So `close()` GATES on the status:
+    anything other than `expected_exit` is a cleanup error, and a process that
+    had to be killed is a cleanup error too. `expected_exit` exists for the one
+    control that deliberately makes the driver exit non-zero — see
+    `_abnormal_exit_control` — and is never moved for an ordinary collection.
     """
 
     OUTPUT_LIMIT = 16 * 1024 * 1024
 
-    def __init__(self, path, timeout=60.0):
+    def __init__(self, path, timeout=60.0, expected_exit=0, expect_clean_exit=True):
         self.path = str(path)
         self.timeout = timeout
+        #: The status an ordinary, healthy run must end with.
+        self.expected_exit = expected_exit
+        #: False only where a forced termination is the point of the test.
+        self.expect_clean_exit = expect_clean_exit
         self.proc = None
         self.pid = None
         self.returncode = None
@@ -562,6 +576,14 @@ class DriverSession:
         self.returncode = self.proc.poll()
         if self.returncode is None:
             errors.append("the driver process is still running after close()")
+        elif self.killed:
+            if self.expect_clean_exit:
+                errors.append("the driver had to be killed; it did not exit on its own when "
+                              "its input closed")
+        elif self.returncode != self.expected_exit:
+            errors.append("the driver exited with status %r, not %r: output it produced before "
+                          "failing must not be collected as a successful run"
+                          % (self.returncode, self.expected_exit))
         if self.stderr.strip():
             errors.append("the driver wrote to stderr: %r" % self.stderr[:400])
         self.cleanup_errors = errors
@@ -569,6 +591,8 @@ class DriverSession:
 
     def receipt(self):
         return {"pid": self.pid, "returncode": self.returncode, "killed": self.killed,
+                "expected_returncode": self.expected_exit,
+                "clean_exit_required": self.expect_clean_exit,
                 "stdout_bytes": self._bytes, "cleanup_errors": list(self.cleanup_errors)}
 
 
@@ -607,16 +631,100 @@ def resolve(value, tools, placeholder):
     return value
 
 
+def json_equal(want, got) -> bool:
+    """Deep equality with JSON's type distinctions rather than Python's.
+
+    Plain `==` is wrong here, and wrong in a way that hides exactly the class
+    of defect this profile exists to catch. In Python `False == 0` and
+    `True == 1`, so an implementation that answered `"id": 0` where the source
+    answers `"id": false` compared EQUAL — recursively, anywhere inside a
+    frame or a forwarded argument. The source echoes `id` verbatim, so a
+    boolean id is a boolean on the wire; turning it into a number is a real
+    protocol change and has to read as one.
+
+    Two comparisons are DELIBERATELY left loose, and both are stated policy
+    rather than oversight:
+
+    * an int and a float of the same value are equal. JSON has one number
+      type, the source never distinguishes them, and CPython's own `==` does
+      not either.
+    * object key ORDER is not compared here. `json.dumps` writes a mapping in
+      its own order, and the profile does not make that order a requirement of
+      a REPLY. Order inside a decoded INPUT is a different matter entirely and
+      is a requirement: it decides the dispatched tool name and the forwarded
+      key/value pair, and the `name.*` and `arguments.*` cases assert it
+      through those values, which this function does compare exactly.
+    """
+    if isinstance(want, bool) or isinstance(got, bool):
+        return isinstance(want, bool) and isinstance(got, bool) and want is got
+    if want is None or got is None:
+        return want is None and got is None
+    if isinstance(want, str) or isinstance(got, str):
+        return isinstance(want, str) and isinstance(got, str) and want == got
+    if isinstance(want, (int, float)) and isinstance(got, (int, float)):
+        return want == got
+    if isinstance(want, list) and isinstance(got, list):
+        return len(want) == len(got) and all(json_equal(a, b) for a, b in zip(want, got))
+    if isinstance(want, dict) and isinstance(got, dict):
+        return want.keys() == got.keys() and all(json_equal(want[k], got[k]) for k in want)
+    return False
+
+
+def bounded_obligation_errors(case: dict, observation: dict, profile: dict) -> list:
+    """Judge the rust side of a case that carries a declared obligation.
+
+    TWO assertions, and a declared gap has to satisfy both:
+
+    1. the NORMATIVE expectation must still fail, or the obligation is stale
+       and should be retired rather than left standing as a free pass;
+    2. the observation must match the obligation's BOUNDED `observed` outcome
+       exactly — judged by the same `case_errors` as every other case, so the
+       framing, the id, the result envelope, the handler calls and the line
+       accounting are all still checked.
+
+    (2) is what stops "declared unimplemented" from meaning "any failure on
+    this input counts". Without it, replacing the reply with an unrelated
+    error envelope, a wrong id or no call at all satisfies the declaration
+    just as well as the difference the obligation actually names.
+    """
+    declaration = obligation_of(case, "rust")
+    errors = []
+    if not case_errors(case, observation, profile):
+        errors.append(
+            "stale-declaration: this case is DECLARED unimplemented on rust under "
+            "obligation %r, and the implementation now satisfies it. That is a stale "
+            "declaration, not a pass: retire the obligation." % declaration["obligation"])
+    errors.extend(
+        "%s [obligation %r bounds this case to one declared divergence: %s]"
+        % (error, declaration["obligation"], declaration["difference"])
+        for error in case_errors({**case, "expect": declaration["observed"]},
+                                 observation, profile))
+    return errors
+
+
 def case_errors(case: dict, observation: dict, profile: dict) -> list:
     expect = resolve(case["expect"], profile["tools"], profile["tools_placeholder"])
     errors = []
 
     outcome = observation.get("outcome")
-    if outcome != expect["outcome"]:
+    if not json_equal(outcome, expect["outcome"]):
         errors.append("outcome: expected %r, observed %r" % (expect["outcome"], outcome))
-    if outcome == "unrepresentable":
+    refusal = observation.get("unrepresentable") or {}
+    if outcome == "unrepresentable" and expect["outcome"] != "unrepresentable":
+        # Declining to model an input is never a pass against the source's own
+        # behaviour: it is a declared gap. Only a case whose BOUNDED `observed`
+        # outcome says the refusal is what this implementation really does may
+        # see one without failing here.
         errors.append("unrepresentable: this implementation declined to model the input (%s)"
-                      % ((observation.get("unrepresentable") or {}).get("detail"),))
+                      % (refusal.get("detail"),))
+    elif expect["outcome"] == "unrepresentable" and outcome == "unrepresentable":
+        want_line = (expect.get("unrepresentable") or {}).get("line_index")
+        if not json_equal(refusal.get("line_index"), want_line):
+            errors.append("unrepresentable: expected the refusal at line %r, observed %r"
+                          % (want_line, refusal.get("line_index")))
+        if not (refusal.get("detail") or "").strip():
+            errors.append("unrepresentable: the refusal names no reason, so it says nothing "
+                          "about which obligation it belongs to")
 
     # Framing first, and defensively: a defect that merges two replies onto one
     # line produces something that is not a JSON document at all, and that has
@@ -641,7 +749,7 @@ def case_errors(case: dict, observation: dict, profile: dict) -> list:
         errors.append("%s: expected %d reply frame(s), observed %d"
                       % (label, len(wanted), len(observed_frames)))
     for index, (want, got) in enumerate(zip(wanted, observed_frames)):
-        if want != got:
+        if not json_equal(want, got):
             errors.append("frame[%d]: expected %s, observed %s"
                           % (index, json.dumps(want, sort_keys=True, ensure_ascii=False),
                              json.dumps(got, sort_keys=True, ensure_ascii=False)))
@@ -652,27 +760,34 @@ def case_errors(case: dict, observation: dict, profile: dict) -> list:
         errors.append("calls: expected %d handler call(s), observed %d"
                       % (len(want_calls), len(got_calls)))
     for index, (want, got) in enumerate(zip(want_calls, got_calls)):
-        if want["tool"] != got["tool"]:
+        if not json_equal(want["tool"], got["tool"]):
             errors.append("call[%d].tool: expected %r, observed %r"
                           % (index, want["tool"], got["tool"]))
-        if want["arguments"] != got["arguments"]:
+        if not json_equal(want["arguments"], got["arguments"]):
             errors.append("call[%d].arguments: expected %r, observed %r"
                           % (index, want["arguments"], got["arguments"]))
 
     want_terminal = expect.get("terminal")
     got_terminal = observation.get("terminal")
-    if want_terminal != got_terminal:
+    if not json_equal(want_terminal, got_terminal):
         errors.append("terminal: expected %r, observed %r" % (want_terminal, got_terminal))
 
-    if "lines_total" in expect and observation.get("lines_total") != expect["lines_total"]:
+    if "lines_total" in expect and not json_equal(observation.get("lines_total"),
+                                                  expect["lines_total"]):
         errors.append("lines-total: expected %r, observed %r"
                       % (expect["lines_total"], observation.get("lines_total")))
-    if observation.get("lines_unprocessed") != expect["lines_unprocessed"]:
+    if not json_equal(observation.get("lines_unprocessed"), expect["lines_unprocessed"]):
         errors.append("lines-unprocessed: expected %r line(s) never processed, observed %r"
                       % (expect["lines_unprocessed"], observation.get("lines_unprocessed")))
-    if observation.get("dispatch_unused"):
-        errors.append("dispatch: %d declared handler outcome(s) were never consumed"
-                      % observation["dispatch_unused"])
+    # Unconsumed handler outcomes are a defect by default and the expectation
+    # has to say so explicitly to allow any: an implementation that skipped a
+    # request entirely leaves its prepared outcome behind, and that is exactly
+    # the signature this catches.
+    want_unused = expect.get("dispatch_unused", 0)
+    got_unused = observation.get("dispatch_unused") or 0
+    if not json_equal(got_unused, want_unused):
+        errors.append("dispatch: expected %r declared handler outcome(s) to go unconsumed, "
+                      "observed %r" % (want_unused, got_unused))
     return errors
 
 
@@ -736,6 +851,31 @@ def manifest_errors(profile: dict) -> list:
     return errors
 
 
+def obligation_of(case: dict, target: str):
+    """The declaration a case carries for `target`, or None.
+
+    A declaration is a mapping, not a bare id:
+
+        "unimplemented": {"rust": {"obligation": "<id>",
+                                   "difference": "<one line>",
+                                   "observed": {...}}}
+
+    `observed` is the BOUNDED expectation — the same shape as `expect`, judged
+    by the same `case_errors` — stating exactly what the unfinished
+    implementation really does. Declaring the gap is not enough on its own:
+    without a bounded outcome, "this case is allowed to differ" degenerates
+    into "any failure at all counts", and an unrelated defect on that input —
+    a lost result envelope, a wrong id, an invented error member, a dropped
+    handler call — would pass as though it were the declared difference.
+    """
+    row = (case.get("unimplemented") or {}).get(target)
+    if row is None:
+        return None
+    if not isinstance(row, dict):
+        return {"obligation": row, "difference": "", "observed": None}
+    return row
+
+
 def obligation_errors(profile: dict) -> list:
     errors = []
     declared = {row["id"]: row for row in profile.get("obligations") or []}
@@ -745,13 +885,34 @@ def obligation_errors(profile: dict) -> list:
                 errors.append("obligation %r records no %s" % (row.get("id"), field))
     used = set()
     for case in profile.get("cases") or []:
-        for target, oid in (case.get("unimplemented") or {}).items():
+        for target in (case.get("unimplemented") or {}):
+            row = obligation_of(case, target)
+            oid = row.get("obligation")
             used.add(oid)
             if oid not in declared:
                 errors.append("case %r names the undeclared obligation %r" % (case["id"], oid))
             elif declared[oid]["implementation"] != target:
                 errors.append("case %r names obligation %r for %r, which is declared for %r"
                               % (case["id"], oid, target, declared[oid]["implementation"]))
+            if not row.get("difference"):
+                errors.append("case %r declares obligation %r for %r without a one-line "
+                              "`difference` saying what actually differs"
+                              % (case["id"], oid, target))
+            observed = row.get("observed")
+            if not isinstance(observed, dict):
+                errors.append(
+                    "case %r declares obligation %r for %r without a bounded `observed` "
+                    "outcome, so ANY failure on that input would satisfy it"
+                    % (case["id"], oid, target))
+                continue
+            for field in ("frames", "calls", "outcome", "lines_unprocessed"):
+                if field not in observed:
+                    errors.append("case %r declares `observed` for %r without %r"
+                                  % (case["id"], target, field))
+            if observed == case.get("expect"):
+                errors.append(
+                    "case %r declares an `observed` outcome identical to its normative "
+                    "expectation, which declares no divergence at all" % case["id"])
     for oid, row in declared.items():
         if row.get("exercised_by") == "profile case" and oid not in used:
             errors.append("obligation %r claims a profile case exercises it, and none does" % oid)
@@ -950,6 +1111,35 @@ def _bad_swallowed_terminal(observation, profile):
     return broken
 
 
+@implementation_control("a boolean id answered as the number zero",
+                        "initialize.false-id", "frame[0]")
+def _bad_boolean_id_as_zero(observation, profile):
+    """The reviewer's round-3 mutation, kept as a standing control.
+
+    Python's `False == 0`, so a judge using plain `==` accepted an
+    implementation that answered `"id": 0` where the source answers
+    `"id": false` — and the whole profile stayed green through a REAL native
+    mutation that did exactly that. The source echoes `id` verbatim, so this
+    is a change on the wire, and `json_equal` is what makes it read as one.
+    """
+    frame = json.loads(observation["frames"][0])
+    assert frame["id"] is False, "this control needs a case whose id really is false"
+    frame["id"] = 0
+    return _reframe(observation, [frame])
+
+
+@implementation_control("a boolean argument value answered as the number one",
+                        "arguments.booleans-and-numbers-stay-distinct", "call[0].arguments")
+def _bad_boolean_argument_as_one(observation, profile):
+    """The same confusion one level down, inside a forwarded argument."""
+    broken = _clone(observation)
+    broken["calls"][0]["arguments"] = {
+        key: (1 if value is True else 0 if value is False else value)
+        for key, value in broken["calls"][0]["arguments"].items()
+    }
+    return broken
+
+
 @implementation_control("two frames merged onto one line",
                         "outcome.two-calls-in-order", "framing")
 def _bad_framing(observation, profile):
@@ -1015,8 +1205,13 @@ def collect_rust():
                                           "dispatch": case.get("dispatch") or []})
                 RUST_OBSERVATIONS[case["id"]] = rust_observation(answer)
         RUST_RECEIPT = session.receipt()
+        # cleanup_errors now carries the exit-status gate, so a driver that
+        # answered every job and then exited non-zero blocks the collection
+        # instead of being counted as a full sweep of green cases.
         if session.cleanup_errors:
             RUST_BLOCKER = "the driver did not clean up: %s" % "; ".join(session.cleanup_errors)
+        elif session.returncode != 0:
+            RUST_BLOCKER = ("the collection driver exited with status %r" % session.returncode)
     except (DriverTimeout, DriverFault, OSError) as error:
         RUST_BLOCKER = "%s: %s" % (type(error).__name__, error)
 
@@ -1074,7 +1269,7 @@ def _install_tests():
 
     # ── one test per case, per target ───────────────────────────────────────
     for case in CASES:
-        unimplemented = (case.get("unimplemented") or {})
+        declaration = obligation_of(case, "rust")
 
         def python_case(self, c=case):
             observation = PYTHON_OBSERVATIONS.get(c["id"])
@@ -1084,16 +1279,12 @@ def _install_tests():
         add("python", case["id"], python_case)
         installed_python.append(case["id"])
 
-        if "rust" in unimplemented:
-            def rust_case(self, c=case, oid=unimplemented["rust"]):
+        if declaration is not None:
+            def rust_case(self, c=case):
                 if RUST_BLOCKER:
                     self.fail("environment blocker: %s" % RUST_BLOCKER)
-                errors = case_errors(c, RUST_OBSERVATIONS[c["id"]], PROFILE)
-                self.assertTrue(
-                    errors,
-                    "this case is DECLARED unimplemented on rust under obligation %r, and the "
-                    "implementation now satisfies it. That is a stale declaration, not a pass: "
-                    "retire the obligation." % oid)
+                _expect_empty(
+                    bounded_obligation_errors(c, RUST_OBSERVATIONS[c["id"]], PROFILE))
         else:
             def rust_case(self, c=case):
                 if RUST_BLOCKER:
@@ -1218,6 +1409,29 @@ def _install_tests():
         lambda self: _cleanup_on_timeout(self))
     add("cleanup", "the run created no temporary root and owns no other process",
         lambda self: _no_temporary_roots(self))
+    add("cleanup", "a driver that answers correctly and then exits non-zero is not a success",
+        lambda self: _abnormal_exit_control(self))
+
+    # ── controls against a PERMISSIVE DECLARED GAP ──────────────────────────
+    # Each takes the REAL rust observation for a case that carries a declared
+    # obligation, breaks it in a way the obligation does not name, and requires
+    # the bounded judge to reject it. Before the bound existed, every one of
+    # these passed: the rust half of a declared case accepted any failure at
+    # all, so an unrelated defect on that input read as the declared one.
+    for label, case_id, break_it in OBLIGATION_CONTROLS:
+        def obligation_control(self, l=label, cid=case_id, b=break_it):
+            if RUST_BLOCKER:
+                self.fail("environment blocker: %s" % RUST_BLOCKER)
+            case = _find(CASES, cid)
+            broken = b(_clone(RUST_OBSERVATIONS[cid]), PROFILE)
+            self.assertTrue(
+                bounded_obligation_errors(case, broken, PROFILE),
+                "%r produced no failure at all, so the declared obligation on %r is still "
+                "accepting an unrelated defect" % (l, cid))
+            # ...and the UNBROKEN observation must still pass, or the control
+            # would be proving nothing but that the case is failing anyway.
+            _expect_empty(bounded_obligation_errors(case, RUST_OBSERVATIONS[cid], PROFILE))
+        add("obligation", label, obligation_control)
 
 
 def _guard_control(self):
@@ -1242,6 +1456,92 @@ def _namespace_control(self):
     self.assertFalse(hasattr(namespace["urllib"], "request"),
                      "the oracle's urllib namespace must carry no URL opener")
     self.assertEqual(sorted(vars(namespace["urllib"])), ["error"])
+
+
+OBLIGATION_CONTROLS = []
+
+
+def _obligation_control(label, case_id):
+    def register(fn):
+        OBLIGATION_CONTROLS.append((label, case_id, fn))
+        return fn
+    return register
+
+
+@_obligation_control("the declared f64 difference replaced by an unrelated error envelope",
+                     "obligation.id-integer-wider-than-64-bits")
+def _obligation_unrelated_error_envelope(observation, profile):
+    """The reviewer's round-3 mutation, kept as a standing control.
+
+    The obligation names ONE difference: the echoed id loses precision. This
+    frame loses the result envelope entirely, invents a JSON-RPC error member
+    the source never emits, and answers a string id the request never sent —
+    none of which the obligation excuses.
+    """
+    return _reframe(observation, [{"jsonrpc": "2.0", "id": "WRONG-ID", "error": {"code": -1}}])
+
+
+@_obligation_control("the declared f64 difference turned into a dropped reply",
+                     "obligation.id-integer-wider-than-64-bits")
+def _obligation_dropped_reply(observation, profile):
+    return _reframe(observation, [])
+
+
+@_obligation_control("a named refusal quietly downgraded to the source's silent skip",
+                     "obligation.nesting-past-the-stated-bound")
+def _obligation_silent_skip(observation, profile):
+    """The exact regression the depth obligation exists to forbid.
+
+    Refusing deep input BY NAME and skipping it in silence look identical in a
+    frame count: both write nothing. They are not the same thing — the source
+    skips only what CPython could not parse — so the obligation bounds the
+    outcome to `unrepresentable`, and this control proves the bound bites.
+    """
+    broken = _clone(observation)
+    broken["outcome"] = "completed"
+    broken.pop("unrepresentable", None)
+    broken["lines_unprocessed"] = 0
+    return broken
+
+
+@_obligation_control("a refusal moved to the wrong line",
+                     "obligation.non-ascii-name-inside-a-list")
+def _obligation_refusal_on_the_wrong_line(observation, profile):
+    broken = _clone(observation)
+    broken["unrepresentable"] = {**(broken.get("unrepresentable") or {}), "line_index": 7}
+    return broken
+
+
+def _abnormal_exit_control(self):
+    """A REAL process that answers every job correctly and then exits 42.
+
+    Not a hand-written receipt and not a patched return code: the driver
+    carries a test-only `exit-after-input` job for this one control, so the
+    process really does end with status 42 after emitting valid observations.
+    Reading the answers and ignoring how the process ended is how a suite
+    stays green while the implementation under test is aborting.
+    """
+    driver = _require_driver(self)
+    case = _find(CASES, "tools-call.forwards-hub-send")
+    session = DriverSession(driver, timeout=30.0)
+    with session:
+        self.assertIn("source_commit", session.request({"op": "identify"}))
+        armed = session.request({"op": "exit-after-input", "code": 42})
+        self.assertEqual(42, armed.get("code"), "the driver did not arm the failure")
+        # Good output AFTER the failure is armed — the whole shape of the
+        # defect this gates: an observation that is correct in every way, from
+        # a process that is about to fail.
+        answer = session.request({"op": "run", "id": case["id"], "input": case["input"],
+                                  "dispatch": case.get("dispatch") or []})
+        self.assertEqual([], case_errors(case, rust_observation(answer), PROFILE),
+                         "the control needs the driver to be answering correctly")
+    self.assertEqual(42, session.returncode, "the driver did not exit 42")
+    self.assertFalse(session.killed, "the driver exited on its own; it was never killed")
+    self.assertTrue(
+        any("exited with status 42" in error for error in session.cleanup_errors),
+        "a non-zero exit must be a cleanup error, and cleanup errors are what block the "
+        "collection; observed %r" % (session.cleanup_errors,))
+    self.assertEqual(42, session.receipt()["returncode"])
 
 
 def _require_driver(self):
@@ -1274,7 +1574,9 @@ def _cleanup_on_failure(self):
 
 def _cleanup_on_timeout(self):
     driver = _require_driver(self)
-    session = DriverSession(driver, timeout=30.0)
+    # The one session whose process is EXPECTED to be killed rather than to
+    # exit on its own, so the clean-exit gate is stood down for it by name.
+    session = DriverSession(driver, timeout=30.0, expect_clean_exit=False)
     with self.assertRaises(DriverTimeout):
         with session:
             # A budget no answer can meet, so the read really does time out.
@@ -1299,6 +1601,9 @@ def _no_temporary_roots(self):
     if RUST_RECEIPT:
         self.assertIsNotNone(RUST_RECEIPT["returncode"],
                              "the collection driver is still running")
+        self.assertEqual(0, RUST_RECEIPT["returncode"],
+                         "the collection driver did not exit cleanly")
+        self.assertFalse(RUST_RECEIPT["killed"], "the collection driver had to be killed")
         self.assertEqual([], RUST_RECEIPT["cleanup_errors"])
 
 
@@ -1318,8 +1623,8 @@ def summary():
         "source_sha256": PROFILE["source"]["sha256"],
         "cases": len(CASES),
         "targets": ["python", "rust"],
-        "declared_obligations": sorted({case["unimplemented"]["rust"] for case in CASES
-                                        if "unimplemented" in case}),
+        "declared_obligations": sorted({obligation_of(case, "rust")["obligation"]
+                                        for case in CASES if "unimplemented" in case}),
         "obligation_cases": obligations,
         "implementation_controls": len(IMPLEMENTATION_CONTROLS),
         "rust_driver": RUST_DRIVER or None,

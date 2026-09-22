@@ -16,159 +16,147 @@
 //! ```text
 //! {"op":"identify"}
 //! {"op":"run","id":"<case>","input":"<text>","dispatch":[{"kind":"text","text":"…"}]}
+//! {"op":"exit-after-input","code":42}
 //! {"op":"quit"}
 //! ```
 //!
 //! Dispatch outcome kinds are `text`, `url_error` (field `reason`) and
 //! `exception` (field `message`), replayed in call order.
+//!
+//! `exit-after-input` exists for ONE test: the runner's own gate on how this
+//! process ends. It acknowledges the job, keeps answering normally, and then
+//! returns the requested status from `main` once stdin closes — so the suite
+//! can prove, against a real process rather than a hand-written receipt, that
+//! a driver which emits perfectly good observations and THEN fails cannot be
+//! collected as a success. It is reachable only from a job on the driver's own
+//! stdin, changes no envelope behaviour, and calls nothing in `std::process`.
 
 use std::io::{self, BufRead, Write};
+use std::process::ExitCode;
 
-use mailhub_protocol::envelope::{self, DispatchOutcome, RunOutcome};
-use serde_json::{Map, Value};
+use mailhub_protocol::envelope::{self, DecodeError, DispatchOutcome, PyDict, PyValue, RunOutcome};
 
-fn outcome_from(value: &Value) -> Result<DispatchOutcome, String> {
-    let kind = value
-        .get("kind")
-        .and_then(Value::as_str)
+fn string_field(job: &PyDict, field: &str) -> Option<String> {
+    match job.get(field) {
+        Some(PyValue::Str(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn outcome_from(value: &PyValue) -> Result<DispatchOutcome, String> {
+    let PyValue::Dict(fields) = value else {
+        return Err("a dispatch outcome must be a JSON object".to_string());
+    };
+    let kind = string_field(fields, "kind")
         .ok_or_else(|| "a dispatch outcome needs a string `kind`".to_string())?;
-    match kind {
+    match kind.as_str() {
         "text" => Ok(DispatchOutcome::Text(
-            value
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "`text` outcome needs a string `text`".to_string())?
-                .to_string(),
+            string_field(fields, "text")
+                .ok_or_else(|| "`text` outcome needs a string `text`".to_string())?,
         )),
         "url_error" => Ok(DispatchOutcome::UrlError {
-            reason: value
-                .get("reason")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "`url_error` outcome needs a string `reason`".to_string())?
-                .to_string(),
+            reason: string_field(fields, "reason")
+                .ok_or_else(|| "`url_error` outcome needs a string `reason`".to_string())?,
         }),
         "exception" => Ok(DispatchOutcome::Exception {
-            message: value
-                .get("message")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "`exception` outcome needs a string `message`".to_string())?
-                .to_string(),
+            message: string_field(fields, "message")
+                .ok_or_else(|| "`exception` outcome needs a string `message`".to_string())?,
         }),
         other => Err(format!("unknown dispatch outcome kind {other:?}")),
     }
 }
 
-fn identify() -> Map<String, Value> {
-    let mut server = Map::new();
-    server.insert(
-        "name".to_string(),
-        Value::String(envelope::SERVER_NAME.to_string()),
-    );
-    server.insert(
-        "version".to_string(),
-        Value::String(envelope::SERVER_VERSION.to_string()),
-    );
-    let mut out = Map::new();
-    out.insert("op".to_string(), Value::String("identify".to_string()));
-    out.insert(
-        "implementation".to_string(),
-        Value::String("rust/mailhub-protocol".to_string()),
-    );
-    out.insert(
-        "source_commit".to_string(),
-        Value::String(envelope::SOURCE_COMMIT.to_string()),
-    );
+fn text(value: &str) -> PyValue {
+    PyValue::Str(value.to_string())
+}
+
+fn count(value: usize) -> PyValue {
+    PyValue::Int(value as i128)
+}
+
+fn identify() -> PyDict {
+    let mut server = PyDict::new();
+    server.insert("name".to_string(), text(envelope::SERVER_NAME));
+    server.insert("version".to_string(), text(envelope::SERVER_VERSION));
+    let mut out = PyDict::new();
+    out.insert("op".to_string(), text("identify"));
+    out.insert("implementation".to_string(), text("rust/mailhub-protocol"));
+    out.insert("source_commit".to_string(), text(envelope::SOURCE_COMMIT));
     out.insert(
         "protocol_version".to_string(),
-        Value::String(envelope::PROTOCOL_VERSION.to_string()),
+        text(envelope::PROTOCOL_VERSION),
     );
-    out.insert("server_info".to_string(), Value::Object(server));
+    out.insert("server_info".to_string(), PyValue::Dict(server));
+    out.insert(
+        "max_nesting_depth".to_string(),
+        count(envelope::MAX_NESTING_DEPTH),
+    );
     // The embedded card text verbatim, so the caller can hash it against the
     // cards it re-derived from the pinned AST instead of trusting this crate.
-    out.insert(
-        "tools_json".to_string(),
-        Value::String(envelope::TOOLS_JSON.to_string()),
-    );
+    out.insert("tools_json".to_string(), text(envelope::TOOLS_JSON));
     out
 }
 
-fn run_job(job: &Value) -> Result<Map<String, Value>, String> {
-    let input = job
-        .get("input")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "a run job needs a string `input`".to_string())?;
+fn run_job(job: &PyDict) -> Result<PyDict, String> {
+    let input =
+        string_field(job, "input").ok_or_else(|| "a run job needs a string `input`".to_string())?;
     let mut outcomes = Vec::new();
-    if let Some(list) = job.get("dispatch") {
-        let list = list
-            .as_array()
-            .ok_or_else(|| "`dispatch` must be an array".to_string())?;
-        for entry in list {
-            outcomes.push(outcome_from(entry)?);
+    match job.get("dispatch") {
+        None | Some(PyValue::None) => {}
+        Some(PyValue::List(list)) => {
+            for entry in list {
+                outcomes.push(outcome_from(entry)?);
+            }
         }
+        Some(_) => return Err("`dispatch` must be an array".to_string()),
     }
 
-    let (report, dispatcher) = envelope::run_scripted(input, outcomes);
+    let (report, dispatcher) = envelope::run_scripted(&input, outcomes);
 
-    let calls: Vec<Value> = report
+    let calls: Vec<PyValue> = report
         .calls
         .iter()
         .map(|call| {
-            let mut row = Map::new();
-            row.insert("tool".to_string(), Value::String(call.tool.clone()));
+            let mut row = PyDict::new();
+            row.insert("tool".to_string(), text(&call.tool));
+            // Insertion order, not sorted: the order a handler was handed its
+            // arguments in is part of what this driver is reporting.
             row.insert(
                 "arguments".to_string(),
-                Value::Object(call.arguments.clone()),
+                PyValue::Dict(call.arguments.clone()),
             );
-            Value::Object(row)
+            PyValue::Dict(row)
         })
         .collect();
 
-    let mut out = Map::new();
-    out.insert("op".to_string(), Value::String("run".to_string()));
+    let mut out = PyDict::new();
+    out.insert("op".to_string(), text("run"));
     if let Some(id) = job.get("id") {
         out.insert("id".to_string(), id.clone());
     }
     out.insert(
         "frames".to_string(),
-        Value::Array(
-            report
-                .frames
-                .iter()
-                .map(|f| Value::String(f.clone()))
-                .collect(),
-        ),
+        PyValue::List(report.frames.iter().map(|f| text(f)).collect()),
     );
-    out.insert("raw".to_string(), Value::String(report.raw.clone()));
-    out.insert("calls".to_string(), Value::Array(calls));
+    out.insert("raw".to_string(), text(&report.raw));
+    out.insert("calls".to_string(), PyValue::List(calls));
     match &report.outcome {
         RunOutcome::Completed => {
-            out.insert(
-                "outcome".to_string(),
-                Value::String("completed".to_string()),
-            );
+            out.insert("outcome".to_string(), text("completed"));
         }
         RunOutcome::Terminated { kind, message } => {
-            out.insert(
-                "outcome".to_string(),
-                Value::String("terminated".to_string()),
-            );
-            let mut terminal = Map::new();
-            terminal.insert("kind".to_string(), Value::String(kind.clone()));
-            terminal.insert("message".to_string(), Value::String(message.clone()));
-            out.insert("terminal".to_string(), Value::Object(terminal));
+            out.insert("outcome".to_string(), text("terminated"));
+            let mut terminal = PyDict::new();
+            terminal.insert("kind".to_string(), text(kind));
+            terminal.insert("message".to_string(), text(message));
+            out.insert("terminal".to_string(), PyValue::Dict(terminal));
         }
         RunOutcome::Unrepresentable { line_index, detail } => {
-            out.insert(
-                "outcome".to_string(),
-                Value::String("unrepresentable".to_string()),
-            );
-            let mut refusal = Map::new();
-            refusal.insert(
-                "line_index".to_string(),
-                Value::Number((*line_index as u64).into()),
-            );
-            refusal.insert("detail".to_string(), Value::String(detail.clone()));
-            out.insert("unrepresentable".to_string(), Value::Object(refusal));
+            out.insert("outcome".to_string(), text("unrepresentable"));
+            let mut refusal = PyDict::new();
+            refusal.insert("line_index".to_string(), count(*line_index));
+            refusal.insert("detail".to_string(), text(detail));
+            out.insert("unrepresentable".to_string(), PyValue::Dict(refusal));
         }
     }
     for (key, value) in [
@@ -178,68 +166,90 @@ fn run_job(job: &Value) -> Result<Map<String, Value>, String> {
         ("dispatch_unused", dispatcher.unused()),
         ("dispatch_overruns", dispatcher.overruns),
     ] {
-        out.insert(key.to_string(), Value::Number((value as u64).into()));
+        out.insert(key.to_string(), count(value));
     }
     Ok(out)
 }
 
-fn main() {
+/// Arm the deliberate abnormal exit. See the module note: this is the runner's
+/// own negative control and touches nothing the envelope does.
+fn exit_after_input(job: &PyDict) -> Result<(PyDict, u8), String> {
+    let code = match job.get("code") {
+        Some(PyValue::Int(value)) if (0..=255).contains(value) => *value as u8,
+        _ => return Err("`exit-after-input` needs an integer `code` in 0..=255".to_string()),
+    };
+    let mut out = PyDict::new();
+    out.insert("op".to_string(), text("exit-after-input"));
+    out.insert("code".to_string(), count(usize::from(code)));
+    Ok((out, code))
+}
+
+fn emit<W: Write>(out: &mut W, payload: &PyValue) {
+    let _ = writeln!(out, "{}", envelope::py_dumps(payload));
+    let _ = out.flush();
+}
+
+fn main() -> ExitCode {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    let mut exit_code: u8 = 0;
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                let _ = writeln!(out, "{{\"error\":\"stdin: {error}\"}}");
+                let mut row = PyDict::new();
+                row.insert("error".to_string(), text(&format!("stdin: {error}")));
+                emit(&mut out, &PyValue::Dict(row));
                 break;
             }
         };
         if line.trim().is_empty() {
             continue;
         }
-        let job: Value = match serde_json::from_str(&line) {
-            Ok(job) => job,
-            Err(error) => {
-                let mut row = Map::new();
+        let job = match envelope::decode_line(&line) {
+            Ok(PyValue::Dict(job)) => job,
+            Ok(_) => {
+                let mut row = PyDict::new();
+                row.insert("error".to_string(), text("a job must be a JSON object"));
+                emit(&mut out, &PyValue::Dict(row));
+                continue;
+            }
+            Err(DecodeError::Malformed(error) | DecodeError::Unrepresentable(error)) => {
+                let mut row = PyDict::new();
                 row.insert(
                     "error".to_string(),
-                    Value::String(format!("unreadable job: {error}")),
+                    text(&format!("unreadable job: {error}")),
                 );
-                let _ = writeln!(
-                    out,
-                    "{}",
-                    serde_json::to_string(&Value::Object(row)).expect("serialises")
-                );
-                let _ = out.flush();
+                emit(&mut out, &PyValue::Dict(row));
                 continue;
             }
         };
-        let op = job.get("op").and_then(Value::as_str).unwrap_or("run");
+        let op = string_field(&job, "op").unwrap_or_else(|| "run".to_string());
         if op == "quit" {
             break;
         }
-        let result = match op {
+        let result = match op.as_str() {
             "identify" => Ok(identify()),
             "run" => run_job(&job),
+            "exit-after-input" => exit_after_input(&job).map(|(row, code)| {
+                exit_code = code;
+                row
+            }),
             other => Err(format!("unknown op {other:?}")),
         };
         let payload = match result {
-            Ok(row) => Value::Object(row),
+            Ok(row) => row,
             Err(message) => {
-                let mut row = Map::new();
+                let mut row = PyDict::new();
                 if let Some(id) = job.get("id") {
                     row.insert("id".to_string(), id.clone());
                 }
-                row.insert("error".to_string(), Value::String(message));
-                Value::Object(row)
+                row.insert("error".to_string(), text(&message));
+                row
             }
         };
-        let _ = writeln!(
-            out,
-            "{}",
-            serde_json::to_string(&payload).expect("serialises")
-        );
-        let _ = out.flush();
+        emit(&mut out, &PyValue::Dict(payload));
     }
+    ExitCode::from(exit_code)
 }
