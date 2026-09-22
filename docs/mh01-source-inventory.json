@@ -2992,6 +2992,7 @@
       "line": 517,
       "credential_check": "none",
       "refusal_statuses": [],
+      "refusals": [],
       "response_keys": [],
       "query_params": []
     },
@@ -3003,6 +3004,19 @@
       "credential_check": "auth-helper",
       "refusal_statuses": [
         401
+      ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 318,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials",
+            "parts": [
+              "no valid org credentials"
+            ]
+          }
+        }
       ],
       "response_keys": [
         "acked"
@@ -3018,6 +3032,31 @@
       "refusal_statuses": [
         401,
         413
+      ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 434,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials",
+            "parts": [
+              "no valid org credentials"
+            ]
+          }
+        },
+        {
+          "status": 413,
+          "line": 438,
+          "detail": {
+            "kind": "template",
+            "text": "attachment exceeds {} MB",
+            "parts": [
+              "attachment exceeds ",
+              " MB"
+            ]
+          }
+        }
       ],
       "response_keys": [
         "bytes",
@@ -3042,6 +3081,52 @@
         404,
         410
       ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 461,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials",
+            "parts": [
+              "no valid org credentials"
+            ]
+          }
+        },
+        {
+          "status": 403,
+          "line": 473,
+          "detail": {
+            "kind": "literal",
+            "text": "not yours",
+            "parts": [
+              "not yours"
+            ]
+          }
+        },
+        {
+          "status": 404,
+          "line": 466,
+          "detail": {
+            "kind": "literal",
+            "text": "no such attachment",
+            "parts": [
+              "no such attachment"
+            ]
+          }
+        },
+        {
+          "status": 410,
+          "line": 476,
+          "detail": {
+            "kind": "literal",
+            "text": "blob expired",
+            "parts": [
+              "blob expired"
+            ]
+          }
+        }
+      ],
       "response_keys": [],
       "query_params": [
         {
@@ -3058,6 +3143,19 @@
       "credential_check": "auth-helper",
       "refusal_statuses": [
         401
+      ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 247,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials in X-Org-Auth",
+            "parts": [
+              "no valid org credentials in X-Org-Auth"
+            ]
+          }
+        }
       ],
       "response_keys": [
         "messages",
@@ -3081,6 +3179,19 @@
       "refusal_statuses": [
         401
       ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 403,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials",
+            "parts": [
+              "no valid org credentials"
+            ]
+          }
+        }
+      ],
       "response_keys": [
         "recorded"
       ],
@@ -3096,6 +3207,41 @@
         401,
         403,
         422
+      ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 176,
+          "detail": {
+            "kind": "literal",
+            "text": "registration requires X-Org-Auth: <slug>:<secret> for the slug being registered",
+            "parts": [
+              "registration requires X-Org-Auth: <slug>:<secret> for the slug being registered"
+            ]
+          }
+        },
+        {
+          "status": 403,
+          "line": 195,
+          "detail": {
+            "kind": "literal",
+            "text": "slug is owned by another identity",
+            "parts": [
+              "slug is owned by another identity"
+            ]
+          }
+        },
+        {
+          "status": 422,
+          "line": 168,
+          "detail": {
+            "kind": "literal",
+            "text": "malformed slug",
+            "parts": [
+              "malformed slug"
+            ]
+          }
+        }
       ],
       "response_keys": [
         "name",
@@ -3114,6 +3260,19 @@
       "refusal_statuses": [
         401
       ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 491,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials",
+            "parts": [
+              "no valid org credentials"
+            ]
+          }
+        }
+      ],
       "response_keys": [
         "name",
         "roster"
@@ -3129,6 +3288,65 @@
       "refusal_statuses": [
         401,
         422
+      ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 347,
+          "detail": {
+            "kind": "literal",
+            "text": "sender credentials required",
+            "parts": [
+              "sender credentials required"
+            ]
+          }
+        },
+        {
+          "status": 422,
+          "line": 349,
+          "detail": {
+            "kind": "template",
+            "text": "no org registered as {}",
+            "parts": [
+              "no org registered as "
+            ]
+          }
+        },
+        {
+          "status": 422,
+          "line": 354,
+          "detail": {
+            "kind": "template",
+            "text": "at most {} attachments",
+            "parts": [
+              "at most ",
+              " attachments"
+            ]
+          }
+        },
+        {
+          "status": 422,
+          "line": 362,
+          "detail": {
+            "kind": "template",
+            "text": "unknown attachment {}",
+            "parts": [
+              "unknown attachment "
+            ]
+          }
+        },
+        {
+          "status": 422,
+          "line": 364,
+          "detail": {
+            "kind": "template",
+            "text": "attachment {} already bound",
+            "parts": [
+              "attachment ",
+              " already bound"
+            ]
+          }
+        }
       ],
       "response_keys": [
         "duplicate",
@@ -3146,6 +3364,19 @@
       "refusal_statuses": [
         401
       ],
+      "refusals": [
+        {
+          "status": 401,
+          "line": 225,
+          "detail": {
+            "kind": "literal",
+            "text": "no valid org credentials in X-Org-Auth",
+            "parts": [
+              "no valid org credentials in X-Org-Auth"
+            ]
+          }
+        }
+      ],
       "response_keys": [
         "unregistered"
       ],
@@ -3158,6 +3389,7 @@
       "line": 498,
       "credential_check": "none",
       "refusal_statuses": [],
+      "refusals": [],
       "response_keys": [
         "name",
         "ok",
@@ -3174,6 +3406,7 @@
       "line": 524,
       "credential_check": "none",
       "refusal_statuses": [],
+      "refusals": [],
       "response_keys": [
         "name",
         "orgs",
@@ -3188,6 +3421,7 @@
       "line": 539,
       "credential_check": "none",
       "refusal_statuses": [],
+      "refusals": [],
       "response_keys": [
         "messages"
       ],
@@ -3215,6 +3449,144 @@
       ]
     }
   ],
+  "state_families": {
+    "intent": "Durable and protocol families a file/function census does not express. Each is anchored to an exact source substring; an anchor resolving to nothing aborts the build.",
+    "categories": [
+      "configuration-source",
+      "configuration-state",
+      "output-artifact",
+      "process-custody",
+      "protocol-envelope",
+      "queue"
+    ],
+    "families": [
+      {
+        "family": "fetched-attachment-output",
+        "path": "hubtool.py",
+        "marker": "def fetch_attachment(",
+        "category": "output-artifact",
+        "durability": "on-disk, OUTSIDE the hub blob root",
+        "authority": "the calling process, in its own working directory",
+        "semantics": "Writes into outdir or os.getcwd(). The name comes from the hub's Content-Disposition, basename-stripped, then sanitized to [\\w .()+-] with surrounding dots/spaces trimmed, falling back to the attachment id and then to 'file.bin'. Collisions are suffixed -2, -3, ... rather than overwritten. Hubs on the identity's list are tried IN ORDER until one holds the id.",
+        "loss": "None on the hub side; these are client-side copies. But they are durable files the hub's own retention never reclaims.",
+        "disposition": "must-be-ported",
+        "obligation": "Sanitization and collision suffixing are security-relevant and contractual -- a port that writes the server-supplied name unsanitized introduces a path-traversal bug the pinned source does not have.",
+        "unknowns": [
+          "Not exercised: needs a live hub serving a real Content-Disposition.",
+          "The sanitizer is not proven against a name that normalizes to empty on a non-Windows filesystem."
+        ],
+        "lines": [
+          1049
+        ],
+        "missing_source": false
+      },
+      {
+        "family": "listener-process-ownership",
+        "path": "hubtool.py",
+        "marker": ".listening",
+        "category": "process-custody",
+        "durability": "on-disk, beside the identity file",
+        "authority": "exactly one live listener per identity name",
+        "semantics": "O_CREAT|O_EXCL mints the lock and writes the owning pid. If it already exists the holder pid is read and probed: a LIVE holder other than self refuses the second listener; an unreadable, zero or dead holder is treated as stale and the lock is TAKEN OVER by rewriting the pid.",
+        "loss": "The file is never removed on exit in this source, so a crashed listener always leaves a stale lock that the next start takes over.",
+        "disposition": "must-be-ported",
+        "obligation": "The port must keep single-writer custody per identity. The stale-takeover path is the dangerous one: it decides ownership from a pid alone.",
+        "unknowns": [
+          "PID REUSE IS UNCHARACTERIZED AND BLOCKS CONVERSION: _pid_alive trusts an integer with no start-time or identity check, so an unrelated process inheriting the pid reads as the live holder and wrongly refuses the real listener.",
+          "Windows probes via tasklist and POSIX via os.kill(pid, 0); the two disagree for a pid owned by another user, and only Windows is exercised.",
+          "Not exercised: arming a listener is forbidden in MH01."
+        ],
+        "lines": [
+          776
+        ],
+        "missing_source": false
+      },
+      {
+        "family": "mcp-jsonrpc-envelope",
+        "path": "hubtool.py",
+        "marker": "{\"jsonrpc\": \"2.0\", \"id\": id_, \"result\": result}",
+        "category": "protocol-envelope",
+        "durability": "none; stdio request/response",
+        "authority": "one serve() process over stdin/stdout",
+        "semantics": "Line-delimited JSON-RPC over stdio. EVERY reply is {jsonrpc, id, result} -- there is no error member on any path. initialize answers protocolVersion 2024-11-05 with capabilities {tools:{}} and serverInfo {name: mailhub, version: 1.0}. tools/list returns TOOLS verbatim. tools/call wraps the dispatch string as {content: [{type: text, text: ...}]}, and converts a URLError to the TEXT {\"error\": \"hub unreachable: ...\"} and any other exception to {\"error\": str(e)} -- both still inside a SUCCESS result. An unknown method with a non-null id gets an empty result {}; a blank line or unparseable JSON is SKIPPED SILENTLY with no reply at all, and a notification (id null) likewise gets none.",
+        "loss": "A malformed request is dropped without acknowledgement; the caller sees a hang, not an error.",
+        "disposition": "must-be-ported",
+        "obligation": "The absence of a JSON-RPC error member is contractual in this source. A port that 'correctly' emits {error: {code, message}} changes observable behaviour for every existing client and needs a recorded ruling, not a silent fix.",
+        "unknowns": [
+          "Not exercised: driving serve() means speaking MCP to a real hub, forbidden here. The envelope is frozen from source, and the frozen shape BLOCKS CONVERSION until MH02 exercises it against a synthetic adapter.",
+          "Behaviour on a request that is valid JSON but not an object is unverified: msg.get would raise AttributeError and escape the loop."
+        ],
+        "lines": [
+          1172
+        ],
+        "missing_source": false
+      },
+      {
+        "family": "onboarding-settings-mutation",
+        "path": "install-hook.py",
+        "marker": "SETTINGS = os.path.expanduser",
+        "category": "configuration-state",
+        "durability": "on-disk, in the user's home",
+        "authority": "whoever runs the installer; no locking",
+        "semantics": "Rewrites ~/.claude/settings.json to wire a SessionStart hook. Before writing it saves settings.json.bak.<unix-seconds>. It also SWEEPS hook entries whose command mentions .claude/chatq, and is idempotent by detecting an existing session-start.sh hub entry.",
+        "loss": "Backups accumulate forever -- one per run, never reclaimed. Two concurrent installs last-writer-wins with no locking.",
+        "disposition": "out-of-scope-for-the-hub-port",
+        "obligation": "This is operator onboarding, not hub runtime. Recorded so the port does not silently drop it and so R10 knows the file is touched; it is NOT part of the hub service and must not be folded into it.",
+        "unknowns": [
+          "Not exercised: running it would mutate the real user's settings.json, which MH01 is forbidden to touch.",
+          "The one-second backup granularity collides if run twice within a second; unverified."
+        ],
+        "lines": [
+          30
+        ],
+        "missing_source": false
+      },
+      {
+        "family": "receipt-retry-queue",
+        "path": "hubtool.py",
+        "marker": "_RC_RETRY: dict[str, list[dict[str, Any]]] = {}",
+        "category": "queue",
+        "durability": "memory-only",
+        "authority": "one listener process per identity, keyed per hub",
+        "semantics": "A receipt POST that fails re-queues under its hub key and is retried on a later receipt cycle. The queue is bounded at 200 per hub, KEEPING THE NEWEST and discarding the oldest display states first.",
+        "loss": "A listener restart drops the queue entirely. This loses DISPLAY state (a sender's ladder stays at a lower rung) and never loses a message -- the two must not be conflated in an MH03 fault schedule.",
+        "disposition": "must-be-ported",
+        "obligation": "The port needs an equivalent bounded per-hub retry buffer with the same newest-wins truncation and the same best-effort contract. Making it durable would be a behaviour CHANGE and needs its own ruling, not a silent upgrade.",
+        "unknowns": [
+          "Not exercised: driving it needs a live listener and a failing hub, both forbidden in MH01.",
+          "Truncation ordering under concurrent cycles is unverified -- _RC_LOCK is held for the mutation but interleaving with _call is not."
+        ],
+        "lines": [
+          631
+        ],
+        "missing_source": false
+      },
+      {
+        "family": "session-admission-environment",
+        "path": "session-start.sh",
+        "marker": "ORGTREE_NODE",
+        "category": "configuration-source",
+        "durability": "none; per-session decision",
+        "authority": "the shell hook, at session start",
+        "semantics": "Exits 0 WITHOUT onboarding when ORGTREE_NODE is set, or when PWD is under $HOME/orgtree/scratch/. Orgtree agent sessions coordinate through orgtree, not the hub, so this is the gate that keeps them off it.",
+        "loss": "n/a",
+        "disposition": "must-be-ported",
+        "obligation": "Recorded because the interpreter census reads os.environ.get calls in PYTHON only, so a shell-level environment gate is invisible to it. Dropping this in a port would onboard every orgtree agent onto the mail hub -- the precise cross-system contamination the gate exists to prevent.",
+        "unknowns": [
+          "Not exercised: shell-level, and the census extracts Python environment reads."
+        ],
+        "lines": [
+          18
+        ],
+        "missing_source": false
+      }
+    ],
+    "unresolved": [],
+    "blocking_unknowns": [
+      "listener-process-ownership",
+      "mcp-jsonrpc-envelope"
+    ]
+  },
   "python_dependencies": {
     "witness_pattern": "\\bpython[0-9.]*\\b|\\bpip\\b|sys\\.executable|\\buvicorn\\b|\\bfastapi\\b",
     "backend_families": [

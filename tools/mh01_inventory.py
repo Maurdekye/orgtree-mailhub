@@ -66,6 +66,60 @@ def _raised_statuses(fn):
             out.add(n.args[0].value)
     return sorted(out)
 
+def _detail_of(call):
+    """The `detail` a raise site sends, as a frozen shape rather than a string.
+
+    A status code alone does not pin a refusal: reviewer finding F1 showed an
+    implementation that answers every refusal with the same wrong sentence still
+    satisfying a status-only profile. The detail is the rest of the envelope, so
+    it is extracted here from the pinned AST and asserted by the wire profile.
+
+    Three kinds, because the source really does have three. `literal` is one
+    constant. `concatenation` is adjacent constants the parser folded or an
+    explicit `+` of them -- still fully known statically. `template` is an
+    f-string, where the constant runs are contractual and the interpolations are
+    per-request values a profile must not hard-code; those become `{}` holes and
+    the driver matches the surrounding literal text instead of the whole string.
+    """
+    if len(call.args) < 2:
+        return None
+    node = call.args[1]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {"kind": "literal", "text": node.value, "parts": [node.value]}
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        parts, stack = [], [node]
+        while stack:                       # left-to-right flatten of a `+` chain
+            cur = stack.pop()
+            if isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Add):
+                stack.extend([cur.right, cur.left])
+            elif isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+                parts.append(cur.value)
+            else:
+                return {"kind": "dynamic", "text": None, "parts": []}
+        return {"kind": "concatenation", "text": "".join(parts), "parts": ["".join(parts)]}
+    if isinstance(node, ast.JoinedStr):
+        parts, template = [], ""
+        for v in node.values:
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                parts.append(v.value)
+                template += v.value
+            else:
+                template += "{}"
+        return {"kind": "template", "text": template,
+                "parts": [p for p in parts if p.strip()]}
+    return {"kind": "dynamic", "text": None, "parts": []}
+
+def _refusals(fn):
+    """Every explicit refusal in this handler: status AND detail envelope."""
+    out = []
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                and n.func.id == "HTTPException" and n.args \
+                and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, int):
+            out.append({"status": n.args[0].value, "line": n.lineno,
+                        "detail": _detail_of(n)})
+    return sorted(out, key=lambda r: (r["status"], r["line"]))
+
 def _calls_named(fn, name):
     return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
                for n in ast.walk(fn))
@@ -117,6 +171,7 @@ def http_contract(files, registrations):
                                  else "inline-header" if _reads_auth_header(fn)
                                  else "none"),
             "refusal_statuses": _raised_statuses(fn),
+            "refusals": _refusals(fn),
             "response_keys": _returned_keys(fn),
             "query_params": _query_params(fn),
         })
@@ -291,6 +346,149 @@ def python_dependencies(files):
             "external_witnesses": EXTERNAL_WITNESSES,
             "uncovered_backend_witnesses": uncovered}
 
+# ------------------------------------------- operation, state and protocol families
+# Reviewer finding F2: a file/function/SQL census is not the registry MH01 owes.
+# Counting 26 files says nothing about a queue that lives only in memory, a file
+# that carries process ownership, or an artifact written outside the blob root.
+# Those are the families a port silently loses, so each is dispositioned here
+# against an exact source anchor. Same fail-closed rule as the interpreter
+# register: an anchor that resolves to nothing aborts the build, so this table
+# cannot decay into a description of source that has moved on.
+#
+# `unknowns` is load-bearing. MH01 is forbidden from arming a listener or
+# driving live MCP/onboarding paths, so several of these are frozen from source
+# and explicitly NOT exercised. Recording that here is what makes them block
+# conversion instead of surfacing as a surprise in MH02.
+STATE_FAMILIES = [
+    {"family": "receipt-retry-queue", "path": "hubtool.py",
+     "marker": "_RC_RETRY: dict[str, list[dict[str, Any]]] = {}",
+     "category": "queue", "durability": "memory-only",
+     "authority": "one listener process per identity, keyed per hub",
+     "semantics": "A receipt POST that fails re-queues under its hub key and is retried on a later "
+                  "receipt cycle. The queue is bounded at 200 per hub, KEEPING THE NEWEST and "
+                  "discarding the oldest display states first.",
+     "loss": "A listener restart drops the queue entirely. This loses DISPLAY state (a sender's "
+             "ladder stays at a lower rung) and never loses a message -- the two must not be "
+             "conflated in an MH03 fault schedule.",
+     "disposition": "must-be-ported",
+     "obligation": "The port needs an equivalent bounded per-hub retry buffer with the same "
+                   "newest-wins truncation and the same best-effort contract. Making it durable "
+                   "would be a behaviour CHANGE and needs its own ruling, not a silent upgrade.",
+     "unknowns": ["Not exercised: driving it needs a live listener and a failing hub, both "
+                  "forbidden in MH01.",
+                  "Truncation ordering under concurrent cycles is unverified -- _RC_LOCK is held "
+                  "for the mutation but interleaving with _call is not."]},
+    {"family": "listener-process-ownership", "path": "hubtool.py",
+     "marker": '.listening',
+     "category": "process-custody", "durability": "on-disk, beside the identity file",
+     "authority": "exactly one live listener per identity name",
+     "semantics": "O_CREAT|O_EXCL mints the lock and writes the owning pid. If it already exists "
+                  "the holder pid is read and probed: a LIVE holder other than self refuses the "
+                  "second listener; an unreadable, zero or dead holder is treated as stale and the "
+                  "lock is TAKEN OVER by rewriting the pid.",
+     "loss": "The file is never removed on exit in this source, so a crashed listener always leaves "
+             "a stale lock that the next start takes over.",
+     "disposition": "must-be-ported",
+     "obligation": "The port must keep single-writer custody per identity. The stale-takeover path "
+                   "is the dangerous one: it decides ownership from a pid alone.",
+     "unknowns": ["PID REUSE IS UNCHARACTERIZED AND BLOCKS CONVERSION: _pid_alive trusts an integer "
+                  "with no start-time or identity check, so an unrelated process inheriting the pid "
+                  "reads as the live holder and wrongly refuses the real listener.",
+                  "Windows probes via tasklist and POSIX via os.kill(pid, 0); the two disagree for "
+                  "a pid owned by another user, and only Windows is exercised.",
+                  "Not exercised: arming a listener is forbidden in MH01."]},
+    {"family": "fetched-attachment-output", "path": "hubtool.py",
+     "marker": "def fetch_attachment(",
+     "category": "output-artifact", "durability": "on-disk, OUTSIDE the hub blob root",
+     "authority": "the calling process, in its own working directory",
+     "semantics": "Writes into outdir or os.getcwd(). The name comes from the hub's "
+                  "Content-Disposition, basename-stripped, then sanitized to [\\w .()+-] with "
+                  "surrounding dots/spaces trimmed, falling back to the attachment id and then to "
+                  "'file.bin'. Collisions are suffixed -2, -3, ... rather than overwritten. Hubs on "
+                  "the identity's list are tried IN ORDER until one holds the id.",
+     "loss": "None on the hub side; these are client-side copies. But they are durable files the "
+             "hub's own retention never reclaims.",
+     "disposition": "must-be-ported",
+     "obligation": "Sanitization and collision suffixing are security-relevant and contractual -- a "
+                   "port that writes the server-supplied name unsanitized introduces a path-traversal "
+                   "bug the pinned source does not have.",
+     "unknowns": ["Not exercised: needs a live hub serving a real Content-Disposition.",
+                  "The sanitizer is not proven against a name that normalizes to empty on a "
+                  "non-Windows filesystem."]},
+    {"family": "onboarding-settings-mutation", "path": "install-hook.py",
+     "marker": "SETTINGS = os.path.expanduser",
+     "category": "configuration-state", "durability": "on-disk, in the user's home",
+     "authority": "whoever runs the installer; no locking",
+     "semantics": "Rewrites ~/.claude/settings.json to wire a SessionStart hook. Before writing it "
+                  "saves settings.json.bak.<unix-seconds>. It also SWEEPS hook entries whose command "
+                  "mentions .claude/chatq, and is idempotent by detecting an existing "
+                  "session-start.sh hub entry.",
+     "loss": "Backups accumulate forever -- one per run, never reclaimed. Two concurrent installs "
+             "last-writer-wins with no locking.",
+     "disposition": "out-of-scope-for-the-hub-port",
+     "obligation": "This is operator onboarding, not hub runtime. Recorded so the port does not "
+                   "silently drop it and so R10 knows the file is touched; it is NOT part of the "
+                   "hub service and must not be folded into it.",
+     "unknowns": ["Not exercised: running it would mutate the real user's settings.json, which MH01 "
+                  "is forbidden to touch.",
+                  "The one-second backup granularity collides if run twice within a second; "
+                  "unverified."]},
+    {"family": "session-admission-environment", "path": "session-start.sh",
+     "marker": 'ORGTREE_NODE',
+     "category": "configuration-source", "durability": "none; per-session decision",
+     "authority": "the shell hook, at session start",
+     "semantics": "Exits 0 WITHOUT onboarding when ORGTREE_NODE is set, or when PWD is under "
+                  "$HOME/orgtree/scratch/. Orgtree agent sessions coordinate through orgtree, not "
+                  "the hub, so this is the gate that keeps them off it.",
+     "loss": "n/a",
+     "disposition": "must-be-ported",
+     "obligation": "Recorded because the interpreter census reads os.environ.get calls in PYTHON "
+                   "only, so a shell-level environment gate is invisible to it. Dropping this in a "
+                   "port would onboard every orgtree agent onto the mail hub -- the precise "
+                   "cross-system contamination the gate exists to prevent.",
+     "unknowns": ["Not exercised: shell-level, and the census extracts Python environment reads."]},
+    {"family": "mcp-jsonrpc-envelope", "path": "hubtool.py",
+     "marker": '{"jsonrpc": "2.0", "id": id_, "result": result}',
+     "category": "protocol-envelope", "durability": "none; stdio request/response",
+     "authority": "one serve() process over stdin/stdout",
+     "semantics": "Line-delimited JSON-RPC over stdio. EVERY reply is {jsonrpc, id, result} -- there "
+                  "is no error member on any path. initialize answers protocolVersion 2024-11-05 "
+                  "with capabilities {tools:{}} and serverInfo {name: mailhub, version: 1.0}. "
+                  "tools/list returns TOOLS verbatim. tools/call wraps the dispatch string as "
+                  "{content: [{type: text, text: ...}]}, and converts a URLError to the TEXT "
+                  "{\"error\": \"hub unreachable: ...\"} and any other exception to {\"error\": str(e)} "
+                  "-- both still inside a SUCCESS result. An unknown method with a non-null id gets "
+                  "an empty result {}; a blank line or unparseable JSON is SKIPPED SILENTLY with no "
+                  "reply at all, and a notification (id null) likewise gets none.",
+     "loss": "A malformed request is dropped without acknowledgement; the caller sees a hang, not an "
+             "error.",
+     "disposition": "must-be-ported",
+     "obligation": "The absence of a JSON-RPC error member is contractual in this source. A port "
+                   "that 'correctly' emits {error: {code, message}} changes observable behaviour for "
+                   "every existing client and needs a recorded ruling, not a silent fix.",
+     "unknowns": ["Not exercised: driving serve() means speaking MCP to a real hub, forbidden here. "
+                  "The envelope is frozen from source, and the frozen shape BLOCKS CONVERSION until "
+                  "MH02 exercises it against a synthetic adapter.",
+                  "Behaviour on a request that is valid JSON but not an object is unverified: "
+                  "msg.get would raise AttributeError and escape the loop."]},
+]
+
+def state_families(files):
+    """Dispositioned operation/state/protocol families, each anchored in source."""
+    rows = []
+    for spec in STATE_FAMILIES:
+        lines = _resolve(files, spec["path"], spec["marker"])
+        rows.append({**spec, "lines": lines or [], "missing_source": lines is None})
+    return {"intent": "Durable and protocol families a file/function census does not express. "
+                      "Each is anchored to an exact source substring; an anchor resolving to "
+                      "nothing aborts the build.",
+            "categories": sorted({s["category"] for s in STATE_FAMILIES}),
+            "families": sorted(rows, key=lambda r: r["family"]),
+            "unresolved": [r["family"] for r in rows if r["missing_source"]],
+            "blocking_unknowns": sorted(
+                {r["family"] for r in rows
+                 if any("BLOCK" in u.upper() for u in r["unknowns"])})}
+
 def build(files):
     records, routes, sql, environments, schemas, functions = [], [], [], [], [], []
     tools, cli, rpc = [], [], []
@@ -335,6 +533,7 @@ def build(files):
             "mcp_tools": tools, "cli_dispatch": cli, "rpc_dispatch": rpc,
             "literal_schemas": schemas, "sql_sites": sql, "environment_reads": environments,
             "http_contract": http_contract(files, routes),
+            "state_families": state_families(files),
             "python_dependencies": python_dependencies(files)}
 
 def check(snapshot, current, names):
@@ -343,6 +542,16 @@ def check(snapshot, current, names):
     if set(current) != expected: errors.append("source file denominator differs")
     if set(names) - expected - ADDITIONS: errors.append("unclassified source additions: " + ", ".join(sorted(set(names) - expected - ADDITIONS)))
     if build(current) != snapshot: errors.append("source hash or extracted contract differs from frozen inventory")
+    fams = snapshot.get("state_families")
+    if fams is None:
+        errors.append("frozen inventory predates the operation/state/protocol family register")
+    else:
+        if fams.get("unresolved"):
+            errors.append("state families whose source anchor no longer resolves: "
+                          + ", ".join(fams["unresolved"]))
+        missing = {s["family"] for s in STATE_FAMILIES} - {r["family"] for r in fams.get("families", [])}
+        if missing:
+            errors.append("state families dropped from the frozen register: " + ", ".join(sorted(missing)))
     uncovered = snapshot.get("python_dependencies", {}).get("uncovered_backend_witnesses")
     if uncovered is None:
         errors.append("frozen inventory predates the interpreter-dependency register")
@@ -365,7 +574,14 @@ def summary(frozen):
             "interpreter_witnesses": len(py.get("witnesses", [])),
             "interpreter_roles_requiring_replacement":
                 sum(r["disposition"].startswith("must-be") for r in py.get("roles", [])),
-            "external_interpreter_claims": len(py.get("external_witnesses", []))}
+            "external_interpreter_claims": len(py.get("external_witnesses", [])),
+            # Refusals, not just their statuses: a status code alone does not
+            # pin a refusal, so the detail envelope is counted here too.
+            "explicit_refusals": sum(len(r.get("refusals", []))
+                                     for r in frozen.get("http_contract", [])),
+            "state_families": len(frozen.get("state_families", {}).get("families", [])),
+            "families_blocking_conversion":
+                len(frozen.get("state_families", {}).get("blocking_unknowns", []))}
 
 def main(argv=None):
     global ROOT

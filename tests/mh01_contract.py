@@ -32,6 +32,7 @@ credential.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -80,6 +81,14 @@ _SURFACES = {
     # FR-10: the same app behind the public wrapper. Every request made here is
     # one a remote client could make over the tunnel.
     "public": httpx.ASGITransport(app=PublicHub(hubapp.app)),     # type: ignore[arg-type]
+    # Reviewer finding F1: the default transport re-raises an unhandled handler
+    # exception into the CALLER, so a malformed body looked like a Python
+    # traceback rather than a response. That is a test artifact, not the public
+    # boundary -- under uvicorn the same request is answered 500. This surface
+    # turns the re-raise off so the profile can freeze the response a real
+    # client actually receives. Treating the exception itself as the contract
+    # would be exactly the mistake the docket warns about.
+    "full-served": httpx.ASGITransport(app=hubapp.app, raise_app_exceptions=False),
 }
 
 
@@ -207,6 +216,10 @@ def _request(ctx, spec, surface):
         content = ctx.resolve(spec["content"])
         if isinstance(content, str):
             content = content.encode()
+    if spec.get("content_type"):
+        # Needed for the malformed-body cases: the bytes are sent verbatim, so
+        # nothing else declares the media type the handler will try to parse.
+        headers["content-type"] = ctx.resolve(spec["content_type"])
     params = ctx.resolve(spec.get("params")) if spec.get("params") else None
 
     async def go():
@@ -270,7 +283,9 @@ def _assert(ctx, resp, expect, label):
                              % (label, expect["status"], resp.status_code,
                                 resp.text[:300]))
     needs_json = any(k in expect for k in
-                     ("keys_exactly", "json", "length", "equals_at", "sequence"))
+                     ("keys_exactly", "json", "length", "equals_at", "sequence",
+                      "detail", "detail_contains", "detail_type", "row", "no_row",
+                      "keys_exactly_at"))
     payload = None
     if needs_json:
         try:
@@ -303,6 +318,108 @@ def _assert(ctx, resp, expect, label):
         if actual != want:
             raise AssertionError("%s: %s[*].%s == %r, expected %r — ORDER is contractual"
                                  % (label, spec["path"], spec["field"], actual, want))
+    # ---- the refusal envelope, not just its status code -------------------
+    # Reviewer finding F1: an implementation answering every refusal with the
+    # same wrong sentence passed a status-only profile. `detail` is the rest of
+    # the envelope and the frozen strings come from the pinned AST, so what is
+    # asserted here is the source's own text rather than a transcription of it.
+    if "detail" in expect:
+        if not isinstance(payload, dict) or "detail" not in payload:
+            raise AssertionError("%s: refusal body has no `detail` member — got %r"
+                                 % (label, payload))
+        want = ctx.resolve(expect["detail"])
+        if payload["detail"] != want:
+            raise AssertionError("%s: detail == %r, expected %r — the refusal ENVELOPE is "
+                                 "contractual, not only the status"
+                                 % (label, payload["detail"], want))
+    if "detail_contains" in expect:
+        # For the f-string refusals, where the interpolation is a per-request
+        # value: the constant runs around it are contractual, the value is not.
+        if not isinstance(payload, dict) or "detail" not in payload:
+            raise AssertionError("%s: refusal body has no `detail` member — got %r"
+                                 % (label, payload))
+        got = payload["detail"]
+        for needle in expect["detail_contains"]:
+            if ctx.resolve(needle) not in got:
+                raise AssertionError("%s: detail %r does not contain %r"
+                                     % (label, got, ctx.resolve(needle)))
+    if "detail_type" in expect:
+        # Hand-raised refusals in app.py carry a STRING detail. FastAPI's own
+        # query validation carries a LIST of structured pydantic errors under
+        # the same key. Two different surfaces behind one member name, and the
+        # docket requires a port to decide each deliberately rather than
+        # inherit whatever its framework does -- so the shape is frozen here.
+        want = expect["detail_type"]
+        got = payload.get("detail") if isinstance(payload, dict) else None
+        kinds = {"string": str, "list": list, "object": dict}
+        if want not in kinds:
+            raise AssertionError("%s: unknown detail_type %r" % (label, want))
+        if not isinstance(got, kinds[want]):
+            raise AssertionError("%s: detail is %s, expected %s — the SHAPE of the refusal "
+                                 "envelope is contractual"
+                                 % (label, type(got).__name__, want))
+    if "keys_exactly_at" in expect:
+        for dotted, want in expect["keys_exactly_at"].items():
+            got = sorted(_at(payload, dotted))
+            if got != sorted(want):
+                raise AssertionError("%s: keys at %s are %s, expected exactly %s"
+                                     % (label, dotted, got, sorted(want)))
+    # ---- postconditions on actual rows ------------------------------------
+    # The other half of F1: `keys_exactly: ["name","roster"]` is satisfied by an
+    # EMPTY roster, so the named roster/kind/refresh cases proved nothing about
+    # the rows themselves. `row` selects one row and asserts its content.
+    if "row" in expect:
+        for spec in (expect["row"] if isinstance(expect["row"], list) else [expect["row"]]):
+            rows = _at(payload, spec["path"])
+            if not isinstance(rows, list):
+                raise AssertionError("%s: %s is not a list" % (label, spec["path"]))
+            where = ctx.resolve(spec["where"])
+            hits = [r for r in rows
+                    if all(isinstance(r, dict) and r.get(k) == v for k, v in where.items())]
+            if len(hits) != 1:
+                raise AssertionError(
+                    "%s: expected exactly ONE row in %s matching %r, found %d — rows present: %r"
+                    % (label, spec["path"], where, len(hits), rows))
+            hit = hits[0]
+            if "keys_exactly" in spec:
+                got, want = sorted(hit), sorted(spec["keys_exactly"])
+                if got != want:
+                    raise AssertionError("%s: row keys %s, expected exactly %s" % (label, got, want))
+            if "fields" in spec:
+                _subset(ctx.resolve(spec["fields"]), hit, "%s row" % label)
+            for name in spec.get("present", []):
+                if name not in hit:
+                    raise AssertionError("%s: row is missing field %r (present: %s)"
+                                         % (label, name, sorted(hit)))
+            for name in spec.get("non_empty", []):
+                if not hit.get(name):
+                    raise AssertionError("%s: row field %r is empty (%r) but must carry a value"
+                                         % (label, name, hit.get(name)))
+    if "no_row" in expect:
+        for spec in (expect["no_row"] if isinstance(expect["no_row"], list) else [expect["no_row"]]):
+            rows = _at(payload, spec["path"])
+            where = ctx.resolve(spec["where"])
+            hits = [r for r in rows
+                    if all(isinstance(r, dict) and r.get(k) == v for k, v in where.items())]
+            if hits:
+                raise AssertionError("%s: expected NO row in %s matching %r, found %r"
+                                     % (label, spec["path"], where, hits))
+    if "text_equals" in expect:
+        # The FR-10 listener's own 404 is a RAW ASGI body (public.py writes
+        # b"not found"), not a {"detail": ...} envelope like every hand-raised
+        # refusal in app.py. Freezing it as text is the point: a port that
+        # answers this one with JSON has changed the public surface.
+        want = ctx.resolve(expect["text_equals"])
+        if resp.text != want:
+            raise AssertionError("%s: body == %r, expected exactly %r" % (label, resp.text, want))
+    if expect.get("not_json"):
+        try:
+            resp.json()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("%s: body parsed as JSON (%r) but this refusal is contractually "
+                                 "a raw non-JSON body" % (label, resp.text[:200]))
     if "text_contains" in expect:
         for needle in expect["text_contains"]:
             if needle not in resp.text:
@@ -457,6 +574,12 @@ def main():
                lambda: _expect_empty(profile_errors(
                    {**profile, "source_commit": "0" * 40}, inventory)))
 
+    # ── controls against a bad IMPLEMENTATION, not a bad expectation ────────
+    print("\n  implementation controls (a broken product must go RED)")
+    for label, patch, case_ids in IMPLEMENTATION_CONTROLS:
+        check(label, lambda l=label, p=patch, c=case_ids: _expect_empty(
+            implementation_control_errors(l, p, c, profile["cases"])))
+
     print("\n%d passed, %d failed" % (PASS, len(FAIL)))
     if FAIL:
         print("\nfailures:")
@@ -464,6 +587,97 @@ def main():
             print("  - %s: %s" % (label, why))
     shutil.rmtree(_TMP, ignore_errors=True)
     return 1 if FAIL else 0
+
+
+# ── discriminating controls against a BAD IMPLEMENTATION ───────────────────
+# The controls above mutate the PROFILE: they prove the checker rejects a wrong
+# expectation. Reviewer finding F1 showed that is only half a suite. A profile
+# asserting status codes and top-level keys was satisfied by a product whose
+# roster was always empty and whose every refusal carried the same wrong
+# sentence -- both scored 63/63.
+#
+# These controls close that hole permanently. Each breaks the PRODUCT at the
+# public boundary, leaves the profile untouched, and requires the named cases to
+# go red. They are the standing proof that the profile constrains behaviour
+# rather than shape, so a later edit that softens an assertion fails here
+# instead of passing quietly.
+
+@contextlib.contextmanager
+def _patched(module, name, value):
+    missing = object()
+    original = getattr(module, name, missing)
+    setattr(module, name, value)
+    try:
+        yield original
+    finally:
+        if original is missing:
+            delattr(module, name)
+        else:
+            setattr(module, name, original)
+
+
+def _empty_roster():
+    return _patched(hubapp, "_roster", lambda con: [])
+
+
+def _mapped_roster(fn):
+    original = hubapp._roster
+    return _patched(hubapp, "_roster", lambda con: [fn(dict(r)) for r in original(con)])
+
+
+def _wrong_refusal_detail():
+    original = hubapp.HTTPException
+    return _patched(hubapp, "HTTPException",
+                    lambda status_code, detail=None, **kw:
+                    original(status_code, detail="deliberately incompatible refusal", **kw))
+
+
+def _drop_row_field(name):
+    return _mapped_roster(lambda r: {k: v for k, v in r.items() if k != name})
+
+
+def _force_kind_org():
+    return _mapped_roster(lambda r: {**r, "kind": "org"})
+
+
+# (label, patch factory, the case ids that MUST go red while it is applied)
+IMPLEMENTATION_CONTROLS = [
+    ("an implementation whose roster is always empty must be caught",
+     _empty_roster,
+     ["register.first-registration-returns-hub-identity-and-roster",
+      "register.roster-row-carries-display-fields-and-kind",
+      "register.kind-chat-is-recorded",
+      "register.re-registration-refreshes-display-fields"]),
+    ("an implementation whose refusals all carry the wrong detail must be caught",
+     _wrong_refusal_detail,
+     ["register.malformed-slug-is-refused-422",
+      "roster.requires-credentials-401",
+      "send.unauthenticated-is-refused-401",
+      "attachments.download-of-an-unknown-id-is-404"]),
+    ("an implementation that drops last_seen from the roster row must be caught",
+     lambda: _drop_row_field("last_seen"),
+     ["register.roster-row-carries-display-fields-and-kind"]),
+    ("an implementation that loses the chat/org kind distinction must be caught",
+     _force_kind_org,
+     ["register.kind-chat-is-recorded"]),
+]
+
+
+def implementation_control_errors(label, patch, case_ids, cases):
+    """Apply one product mutation; every named case must FAIL while it holds."""
+    survived = []
+    with patch():
+        for cid in case_ids:
+            case = next((c for c in cases if c["id"] == cid), None)
+            if case is None:
+                survived.append("%s: no such case in the profile" % cid)
+                continue
+            try:
+                run_case(case)
+            except AssertionError:
+                continue                       # correct -- the mutation was noticed
+            survived.append("%s: PASSED under a deliberately broken implementation" % cid)
+    return survived
 
 
 def _expect_empty(errors):
@@ -523,5 +737,91 @@ def _drop_refusal(profile):
     return thin
 
 
+# ── the shared runner's result envelope ────────────────────────────────────
+# Reviewer finding F3: the narrative loop above emits prose, so
+# tools/run-python-verification.py recorded `tests_ran: null` and filed this
+# module under `non_failing_modules_without_tests`. The qualification receipt
+# validator needs a positive integer denominator, so the suite could not be
+# consumed as coverage no matter how much it actually checked.
+#
+# Every fixture case, every profile control and every implementation control is
+# published here as a standard unittest test. The runner gets its `Ran N tests`
+# line, and the denominator is the real one -- an omitted case or a dropped
+# control shrinks it rather than silently leaving a green run the same size.
+# Both entry points execute the SAME functions, so there is one source of truth.
+
+import unittest                                                   # noqa: E402
+
+
+def _load():
+    return (json.loads(FIXTURES.read_text(encoding="utf-8")),
+            json.loads(INVENTORY.read_text(encoding="utf-8")))
+
+
+class MH01Contract(unittest.TestCase):
+    """The frozen wire profile, one test per case and per control."""
+
+
+def _method_name(prefix, label):
+    return "test_%s_%s" % (prefix, re.sub(r"\W+", "_", label).strip("_"))
+
+
+def _install_tests():
+    profile, inventory = _load()
+    cases = profile["cases"]
+
+    def add(prefix, label, fn):
+        fn.__name__ = _method_name(prefix, label)
+        fn.__doc__ = label
+        setattr(MH01Contract, fn.__name__, fn)
+
+    add("registry", "every registered route and refusal status is exercised",
+        lambda self: _expect_empty(profile_errors(profile, inventory)))
+
+    for case in cases:
+        add("case", case["id"],
+            lambda self, c=case: run_case(c))
+
+    # Controls against a bad EXPECTATION: the checker must reject each one.
+    first = cases[0]
+    for label, thunk in [
+        ("a case whose expected status is wrong must fail",
+         lambda: run_case(_mutate_status(first))),
+        ("a case whose expected response keys are wrong must fail",
+         lambda: run_case(_mutate_keys(first))),
+        ("an unresolvable principal placeholder must fail",
+         lambda: run_case(_mutate_placeholder(first))),
+        ("dropping a route from the profile must be caught by coverage",
+         lambda: _expect_empty(coverage_errors(_drop_route(profile), inventory))),
+        ("dropping a refusal assertion must be caught by coverage",
+         lambda: _expect_empty(coverage_errors(_drop_refusal(profile), inventory))),
+        ("a profile pinned to a different commit must be caught",
+         lambda: _expect_empty(profile_errors({**profile, "source_commit": "0" * 40}, inventory))),
+    ]:
+        def control(self, t=thunk):
+            with self.assertRaises(AssertionError):
+                t()
+        add("control", label, control)
+
+    # Controls against a bad IMPLEMENTATION: the product is broken at the
+    # public boundary and the named cases must go red.
+    for label, patch, case_ids in IMPLEMENTATION_CONTROLS:
+        def impl(self, l=label, p=patch, ids=case_ids):
+            _expect_empty(implementation_control_errors(l, p, ids, cases))
+        add("implementation", label, impl)
+
+
+_install_tests()
+
+
+def tearDownModule():
+    shutil.rmtree(_TMP, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # `--narrative` keeps the grouped human-readable report; the default is
+    # unittest, because that is what the shared runner can count.
+    if "--narrative" in sys.argv:
+        raise SystemExit(main())
+    unittest.main(argv=[sys.argv[0]] + [a for a in sys.argv[1:] if a != "-v"],
+                  verbosity=2 if VERBOSE else 1)

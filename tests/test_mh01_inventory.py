@@ -182,5 +182,151 @@ class InventoryControls(unittest.TestCase):
         self.assertEqual(9, len({r["value"] for r in self.frozen["cli_dispatch"]}))
 
 
+class StateFamilyControls(unittest.TestCase):
+    """Reviewer finding F2: a file/function/SQL census is not the registry MH01
+    owes. Counting 26 files says nothing about a memory-only queue, a file that
+    carries process ownership, or an artifact written outside the blob root.
+    These controls require each of those to stay dispositioned and anchored."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.frozen = json.loads(_FROZEN.read_text(encoding="utf-8"))
+        cls.files = inventory.source_files()
+        cls.fams = cls.frozen["state_families"]["families"]
+
+    def test_every_named_family_is_present_and_anchored(self):
+        """Each family resolves to a real line in the pinned source."""
+        self.assertEqual([], self.frozen["state_families"]["unresolved"])
+        for f in self.fams:
+            self.assertTrue(f["lines"], "%s resolved to no source line" % f["family"])
+            self.assertFalse(f["missing_source"], f["family"])
+
+    def test_the_families_a_file_census_misses_are_all_recorded(self):
+        """The six the reviewer named, by category rather than by name alone: a
+        queue, process custody, an output artifact outside the blob root, a
+        configuration mutation, a shell-level admission gate and a protocol
+        envelope. Losing any one of these in a port loses durable behaviour a
+        file count cannot see."""
+        got = {f["family"]: f["category"] for f in self.fams}
+        for name, category in {
+            "receipt-retry-queue": "queue",
+            "listener-process-ownership": "process-custody",
+            "fetched-attachment-output": "output-artifact",
+            "onboarding-settings-mutation": "configuration-state",
+            "session-admission-environment": "configuration-source",
+            "mcp-jsonrpc-envelope": "protocol-envelope",
+        }.items():
+            self.assertEqual(category, got.get(name), "missing or miscategorised: %s" % name)
+
+    def test_dropping_a_family_from_the_register_is_rejected(self):
+        changed = copy.deepcopy(self.frozen)
+        changed["state_families"]["families"] = [
+            f for f in changed["state_families"]["families"]
+            if f["family"] != "receipt-retry-queue"]
+        self.assertTrue(inventory.check(changed, self.files, list(self.files)))
+
+    def test_a_dead_family_anchor_aborts(self):
+        """The anchors are RESOLVED, not trusted. If the source moves on, the
+        register must fail rather than keep describing code that is gone.
+
+        `_resolve` aborts the whole build rather than returning empty, which is
+        the stronger of the two fail-closed shapes: a register that quietly
+        listed a family with no lines would still look complete in the JSON."""
+        original = inventory.STATE_FAMILIES
+        try:
+            inventory.STATE_FAMILIES = [
+                {**original[0], "marker": "this marker is not in the pinned source"}]
+            with self.assertRaises(SystemExit):
+                inventory.state_families(self.files)
+        finally:
+            inventory.STATE_FAMILIES = original
+
+    def test_every_family_carries_a_disposition_and_its_unknowns(self):
+        """An unknown that is not written down is an unknown that surfaces in
+        MH02 instead. Every family states what a port owes and what was not
+        exercised."""
+        for f in self.fams:
+            self.assertTrue(f["disposition"], f["family"])
+            self.assertTrue(f["obligation"], f["family"])
+            self.assertIsInstance(f["unknowns"], list)
+            self.assertTrue(f["unknowns"], "%s records no unknowns" % f["family"])
+
+    def test_the_unexercised_families_block_conversion(self):
+        """MH01 may not arm a listener or speak MCP, so these two are frozen
+        from source and NOT exercised. That has to be recorded as blocking, or
+        the freeze reads as verification it is not."""
+        self.assertEqual(["listener-process-ownership", "mcp-jsonrpc-envelope"],
+                         self.frozen["state_families"]["blocking_unknowns"])
+
+    def test_pid_reuse_is_named_as_the_custody_hazard(self):
+        """_pid_alive trusts an integer with no start-time check, so a reused
+        pid reads as the live holder and refuses the real listener. Naming it is
+        what stops a port inheriting it by accident."""
+        fam = next(f for f in self.fams if f["family"] == "listener-process-ownership")
+        self.assertTrue(any("PID REUSE" in u.upper() for u in fam["unknowns"]))
+
+    def test_the_mcp_envelope_records_that_it_has_no_error_member(self):
+        """Every serve() reply is {jsonrpc, id, result}; errors are carried as
+        TEXT inside a success result. A port that fixes this to a real JSON-RPC
+        error changes every client's observable behaviour."""
+        fam = next(f for f in self.fams if f["family"] == "mcp-jsonrpc-envelope")
+        self.assertIn("2024-11-05", fam["semantics"])
+        self.assertIn("there is no error member", fam["semantics"])
+
+
+class RefusalEnvelopeControls(unittest.TestCase):
+    """Reviewer finding F1, census half: a status code alone does not pin a
+    refusal. The detail is extracted from the pinned AST so the wire profile
+    asserts the source's own text rather than a transcription of it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.frozen = json.loads(_FROZEN.read_text(encoding="utf-8"))
+        cls.files = inventory.source_files()
+
+    def test_every_refusal_status_carries_a_detail(self):
+        for route in self.frozen["http_contract"]:
+            statuses = sorted({r["status"] for r in route["refusals"]})
+            self.assertEqual(route["refusal_statuses"], statuses,
+                             "%s %s: refusals and refusal_statuses disagree"
+                             % (route["method"], route["path"]))
+            for r in route["refusals"]:
+                self.assertIsNotNone(r["detail"], "%s %s %s has no detail"
+                                     % (route["method"], route["path"], r["status"]))
+                self.assertIn(r["detail"]["kind"],
+                              {"literal", "concatenation", "template"},
+                              "%s %s: unresolvable detail" % (route["path"], r["status"]))
+
+    def test_the_two_401_variants_stay_distinct(self):
+        """/api/poll and /api/unregister say 'no valid org credentials in
+        X-Org-Auth'; the rest say 'no valid org credentials'. Collapsing them is
+        a silent contract change, and a status-only profile cannot see it."""
+        by = {}
+        for route in self.frozen["http_contract"]:
+            for r in route["refusals"]:
+                if r["status"] == 401:
+                    by.setdefault(r["detail"]["text"], set()).add(route["path"])
+        self.assertEqual({"/api/poll", "/api/unregister"},
+                         by.get("no valid org credentials in X-Org-Auth", set()))
+        self.assertIn("/api/roster", by.get("no valid org credentials", set()))
+
+    def test_changing_a_refusal_detail_is_rejected(self):
+        changed = dict(self.files)
+        changed["mailhub/app.py"] = changed["mailhub/app.py"].replace(
+            b'"malformed slug"', b'"bad slug"')
+        self.assertTrue(inventory.check(self.frozen, changed, list(changed)))
+
+    def test_an_f_string_detail_keeps_its_constant_runs(self):
+        """A template interpolation is a per-request value a profile must not
+        hard-code, but the text around it is contractual."""
+        templates = [r["detail"] for route in self.frozen["http_contract"]
+                     for r in route["refusals"] if r["detail"]["kind"] == "template"]
+        self.assertTrue(templates)
+        for t in templates:
+            self.assertIn("{}", t["text"])
+            self.assertTrue([p for p in t["parts"] if p.strip()],
+                            "template %r froze no literal text" % t["text"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -18,10 +18,21 @@ MH01 enumerates and freezes. It does not port anything.
 | Claim | Status |
 |---|---|
 | Every source file, route, schema, SQL site, config source and launch dependency is enumerated and hash-pinned | **Delivered** |
-| Every public HTTP behaviour is frozen as executable, language-neutral fixtures | **Delivered** |
+| Every explicit HTTP route, refusal status and refusal **envelope** is frozen as executable, language-neutral fixtures | **Delivered** |
+| Durable and protocol families a file census cannot see — queues, process custody, output artifacts, the MCP envelope — are dispositioned against source anchors | **Delivered** |
 | Every place the product requires a Python interpreter is recorded with a disposition, fail-closed | **Delivered** |
+| MCP, CLI and listener behaviour is **executed** | **No** — frozen from source and recorded as blocking unknowns; executing it needs a live listener, which this slice is forbidden |
 | A Rust mail hub exists | **Not in this slice** — that is MH02 |
 | The packaged backend runs with no usable Python | **Not in this slice** — that is R10 |
+
+An earlier revision of this table claimed every public HTTP *behaviour* was
+frozen. Independent review (wire-contract-astra, 2026-09-22, finding F1) showed
+that claim was false: the fixtures asserted status codes and top-level response
+keys, so a product whose roster was always empty and whose every refusal carried
+the same wrong sentence still scored a full green run. The row above is narrowed
+to what is actually asserted, and the gap it names is now closed by row
+postconditions, refusal-envelope assertions and standing controls that break the
+product on purpose (see *How to verify this candidate*).
 
 The kickoff for this slice asked for "proof that package/runtime paths no
 longer require Python for the mailhub service or schema initialization."
@@ -91,6 +102,34 @@ Two readings to avoid:
   hub access *is* read access to everyone's correspondence. It is also the
   entire reason the FR-10 public listener exists, and a port that "fixes" it by
   adding auth changes a decision the operator made.
+
+### The refusal envelope
+
+A status code alone does not pin a refusal. Every explicit refusal detail is
+extracted from the pinned AST — so the profile asserts the *source's own text*
+rather than a transcription of it — and every refusal fixture asserts both the
+status and the body.
+
+The body of a hand-raised refusal is **exactly** `{"detail": <string>}`, nothing
+more. Three distinctions a port must reproduce deliberately:
+
+1. **Two different 401 sentences.** `/api/poll` and `/api/unregister` answer
+   `no valid org credentials in X-Org-Auth`; every other auth-helper route
+   answers `no valid org credentials`. Collapsing them is a silent contract
+   change that a status-only profile cannot see.
+2. **Framework refusals carry a different shape under the same key.** FastAPI's
+   own query validation answers 422 with `detail` as a **list** of structured
+   pydantic errors (`type`, `loc`, `msg`, `input`), not a string. Both shapes are
+   frozen; a port must choose each one on purpose rather than inherit whatever
+   its framework does.
+3. **The public listener's 404 is not JSON at all.** `mailhub/public.py:44`
+   writes the raw bytes `not found` with no envelope. A port that answers it
+   with `{"detail": "not found"}` has changed the public surface.
+
+Five refusals interpolate a per-request value (`no org registered as {}`,
+`at most {} attachments`, `unknown attachment {}`, `attachment {} already
+bound`, `attachment exceeds {} MB`). For those the profile freezes the constant
+runs around the hole, never the whole string.
 
 ### Identity, authority and addressing
 
@@ -202,6 +241,47 @@ Secrets stay in their scoped custody. No secret appears in this document, in
 the inventory, or in any fixture: the fixture profile declares symbolic
 principals and the driver mints credentials at run time.
 
+## Operation, state and protocol families
+
+A file/function/SQL census does not express a queue that lives only in memory, a
+file that carries process ownership, or an artifact written outside the blob
+root. Those are exactly the families a port drops silently, so each is
+dispositioned in `state_families` against an exact source anchor. An anchor that
+stops resolving aborts the build rather than quietly listing a family with no
+lines.
+
+| Family | Category | Durability | Disposition |
+|---|---|---|---|
+| `receipt-retry-queue` (`hubtool.py:631`) | queue | memory-only, bounded 200/hub, newest kept | must-be-ported |
+| `listener-process-ownership` (`hubtool.py:776`) | process custody | on-disk `.listening` lock | must-be-ported |
+| `fetched-attachment-output` (`hubtool.py:1049`) | output artifact | on-disk, **outside** the blob root | must-be-ported |
+| `onboarding-settings-mutation` (`install-hook.py:30`) | configuration state | `~/.claude/settings.json` + timestamped backups | out-of-scope-for-the-hub-port |
+| `session-admission-environment` (`session-start.sh:18`) | configuration source | per-session decision | must-be-ported |
+| `mcp-jsonrpc-envelope` (`hubtool.py:1172`) | protocol envelope | stdio request/response | must-be-ported |
+
+Four of these carry consequences worth stating outright:
+
+1. **The receipt retry queue loses display state, never messages.** A failed
+   receipt re-queues per hub and retries on a later cycle; the queue is bounded
+   at 200 and discards the *oldest* first; a listener restart drops it entirely.
+   Making it durable in the port would be a behaviour change, not an upgrade.
+2. **Listener custody is decided by a bare pid.** `_pid_alive` has no start-time
+   or identity check, so a reused pid reads as the live holder and refuses the
+   real listener. **This blocks conversion** — it is recorded, not solved.
+3. **Fetched attachments are sanitized and collision-suffixed.** A port that
+   writes the server-supplied `Content-Disposition` name unsanitized introduces
+   a path-traversal bug the pinned source does not have.
+4. **The MCP envelope has no error member at all.** Every `serve()` reply is
+   `{jsonrpc, id, result}`; a hub-unreachable or handler error is carried as
+   *text inside a success result*, an unknown method with a non-null id gets
+   `{}`, and unparseable input is dropped with no reply. A port that "correctly"
+   emits `{error: {code, message}}` changes observable behaviour for every
+   existing client. **This blocks conversion** until MH02 exercises it against a
+   synthetic adapter.
+
+Both blocking entries are listed in `state_families.blocking_unknowns` so they
+fail a check rather than depending on someone reading this paragraph.
+
 ## Interpreter dependencies
 
 43 witness lines, 16 dispositioned roles, 2 attributed parent claims, and a
@@ -265,6 +345,21 @@ preserving nor silently fixing them is acceptable.
    uses `422`. Framework-generated refusals and hand-raised ones are different
    surfaces; a port must decide each deliberately rather than inherit whatever
    its framework does.
+6. **Every malformed request body is a 500, not a refusal.** A body that is not
+   JSON, a JSON array, a JSON string, a literal `null` and an empty body all
+   reach `json.loads`/`.get` unguarded, so the handler raises and the server
+   answers **HTTP 500 with the plain-text body `Internal Server Error`**. A
+   well-behaved API would refuse 400 or 422. All five are frozen as executable
+   cases marked `legacy`. Observing this correctly requires a transport that
+   does **not** re-raise handler exceptions into the caller — under the default
+   test transport the exception escapes and looks like a traceback rather than a
+   response, which is a test artifact and not the public boundary. The profile
+   uses the `full-served` surface for exactly these cases.
+7. **`mailhub/app.py:521` leaks a file handle on every operator-UI request.**
+   `HTMLResponse(open(path, encoding="utf-8").read())` never closes the file;
+   under `-W error::ResourceWarning` it surfaces as an unclosed-file warning
+   attributed to the product, not to the harness. Recorded, not fixed — MH01
+   does not edit product source.
 
 ## Unknowns and unexercised surfaces
 
@@ -294,9 +389,31 @@ From the repository root, with an interpreter that has `fastapi` and `httpx`:
 
 ```
 python tools/mh01_inventory.py          # census vs pinned source; must print errors: []
-python tests/test_mh01_inventory.py     # 19 fail-closed census controls
-python tests/mh01_contract.py           # 56 wire cases + 6 bad controls
+python tests/test_mh01_inventory.py     # 31 fail-closed census controls
+python tests/mh01_contract.py           # 73 tests: 62 wire cases + 11 controls
 ```
+
+`tests/mh01_contract.py` runs as **standard unittest**, so the shared harness
+(`tools/run-python-verification.py`) reports a real denominator —
+`tests_ran: 73` — instead of filing it as a module with no tests. Add
+`--narrative` for the grouped human-readable report; both entry points execute
+the same functions, so there is one source of truth for pass and fail.
+
+The 11 controls are one coverage check plus two different kinds of control, and
+the distinction is the point:
+
+- **1 coverage check** — every registered route and refusal status in the frozen
+  registry is exercised by some fixture, or the run fails.
+- **6 against a bad expectation** — a wrong status, wrong response keys, an
+  unresolvable placeholder, a dropped route, a dropped refusal, a profile pinned
+  to the wrong commit. These prove the *checker* discriminates.
+- **4 against a bad implementation** — the product is broken at the public
+  boundary and named cases must go red: an always-empty roster, refusals that
+  all carry the wrong detail, a roster row missing `last_seen`, and a lost
+  chat/org `kind` distinction. These prove the *profile constrains behaviour*
+  rather than shape, and they exist because review found a profile that did not:
+  an empty-roster build and a wrong-refusal build both passed the previous
+  suite 63/63.
 
 The first command **checks** the frozen register against the pinned source; it
 does not rewrite it. To reproduce the artifact itself, add `--write`:
