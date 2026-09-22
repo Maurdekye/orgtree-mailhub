@@ -380,14 +380,23 @@ STATE_FAMILIES = [
                   "for the mutation but interleaving with _call is not."]},
     {"family": "listener-process-ownership", "path": "hubtool.py",
      "marker": '.listening',
+     # The release is anchored too. An earlier revision of this register said the
+     # lock was "never removed on exit", which the source contradicts at the
+     # `finally`. Anchoring the removal means that claim can no longer drift: if
+     # a future source drops the cleanup, this marker dies and the build aborts.
+     "release_marker": "os.remove(lock)",
      "category": "process-custody", "durability": "on-disk, beside the identity file",
      "authority": "exactly one live listener per identity name",
      "semantics": "O_CREAT|O_EXCL mints the lock and writes the owning pid. If it already exists "
                   "the holder pid is read and probed: a LIVE holder other than self refuses the "
                   "second listener; an unreadable, zero or dead holder is treated as stale and the "
                   "lock is TAKEN OVER by rewriting the pid.",
-     "loss": "The file is never removed on exit in this source, so a crashed listener always leaves "
-             "a stale lock that the next start takes over.",
+     "loss": "listen() removes the lock in a `finally`, so a normal return and an exception that "
+             "unwinds both clear it. It survives ONLY a death that does not unwind -- SIGKILL, a "
+             "power loss, os._exit -- and that is the single way a stale lock arises; the next "
+             "start reads the dead pid and takes it over. The live-holder refusal path returns "
+             "BEFORE the try/finally is entered, so a refused second listener correctly leaves "
+             "the real holder's lock in place.",
      "disposition": "must-be-ported",
      "obligation": "The port must keep single-writer custody per identity. The stale-takeover path "
                    "is the dangerous one: it decides ownership from a pid alone.",
@@ -401,11 +410,19 @@ STATE_FAMILIES = [
      "marker": "def fetch_attachment(",
      "category": "output-artifact", "durability": "on-disk, OUTSIDE the hub blob root",
      "authority": "the calling process, in its own working directory",
-     "semantics": "Writes into outdir or os.getcwd(). The name comes from the hub's "
-                  "Content-Disposition, basename-stripped, then sanitized to [\\w .()+-] with "
-                  "surrounding dots/spaces trimmed, falling back to the attachment id and then to "
-                  "'file.bin'. Collisions are suffixed -2, -3, ... rather than overwritten. Hubs on "
-                  "the identity's list are tried IN ORDER until one holds the id.",
+     # The two fallbacks sit at DIFFERENT stages and do not chain. An earlier
+     # revision wrote them as one ladder (name -> aid -> file.bin), which the
+     # source contradicts: a header that sanitizes away yields file.bin, never
+     # the aid.
+     "semantics": "Writes into outdir or os.getcwd(). The name is taken from the hub's "
+                  "Content-Disposition and basename-stripped; if that header carries no "
+                  "parseable filename the ATTACHMENT ID becomes the name instead. Whichever "
+                  "of the two it is, it is then sanitized to [\\w .()+-] with surrounding "
+                  "dots and spaces trimmed, and if sanitizing empties it the name becomes "
+                  "'file.bin' DIRECTLY -- not the attachment id, which is a separate, "
+                  "earlier fallback on a different condition. Collisions are suffixed "
+                  "-2, -3, ... rather than overwritten. Hubs on the identity's list are "
+                  "tried IN ORDER until one holds the id.",
      "loss": "None on the hub side; these are client-side copies. But they are durable files the "
              "hub's own retention never reclaims.",
      "disposition": "must-be-ported",
@@ -478,7 +495,14 @@ def state_families(files):
     rows = []
     for spec in STATE_FAMILIES:
         lines = _resolve(files, spec["path"], spec["marker"])
-        rows.append({**spec, "lines": lines or [], "missing_source": lines is None})
+        row = {**spec, "lines": lines or [], "missing_source": lines is None}
+        # A family may anchor the point where it RELEASES its state, not just
+        # where it takes it. Same fail-closed rule: a release marker matching
+        # nothing aborts the build rather than leaving a stale claim standing.
+        if spec.get("release_marker"):
+            released = _resolve(files, spec["path"], spec["release_marker"])
+            row["release_lines"] = released or []
+        rows.append(row)
     return {"intent": "Durable and protocol families a file/function census does not express. "
                       "Each is anchored to an exact source substring; an anchor resolving to "
                       "nothing aborts the build.",

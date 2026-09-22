@@ -251,6 +251,26 @@ class StateFamilyControls(unittest.TestCase):
             self.assertIsInstance(f["unknowns"], list)
             self.assertTrue(f["unknowns"], "%s records no unknowns" % f["family"])
 
+    def test_the_listener_lock_release_is_anchored_not_asserted(self):
+        """Review round 2: the register claimed the lock was "never removed on
+        exit". hubtool.py contradicts that -- listen() removes it in a `finally`
+        -- so the freeze was recording a defect the source does not have. The
+        corrected claim is anchored at the removal itself, and the family must
+        carry BOTH line sets: taking the lock and releasing it."""
+        fam = next(f for f in self.frozen["state_families"]["families"]
+                   if f["family"] == "listener-process-ownership")
+        self.assertNotIn("never removed", fam["loss"].lower(),
+                         "the contradicted claim is back in the register")
+        self.assertTrue(fam.get("release_lines"),
+                        "the release point is unanchored, so the loss claim "
+                        "can drift from the source again")
+        src = self.files["hubtool.py"].decode("utf-8").splitlines()
+        for n in fam["release_lines"]:
+            self.assertIn("os.remove(lock)", src[n - 1])
+        # The acquisition is still anchored, and the two are distinct points.
+        self.assertTrue(fam["lines"])
+        self.assertLess(max(fam["lines"]), min(fam["release_lines"]))
+
     def test_the_unexercised_families_block_conversion(self):
         """MH01 may not arm a listener or speak MCP, so these two are frozen
         from source and NOT exercised. That has to be recorded as blocking, or

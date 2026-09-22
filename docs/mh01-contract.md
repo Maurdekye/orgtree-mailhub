@@ -268,9 +268,20 @@ Four of these carry consequences worth stating outright:
 2. **Listener custody is decided by a bare pid.** `_pid_alive` has no start-time
    or identity check, so a reused pid reads as the live holder and refuses the
    real listener. **This blocks conversion** — it is recorded, not solved.
+   The lock itself *is* released: `listen()` removes it in a `finally`
+   (`hubtool.py:866`), so a normal return and an unwinding exception both clear
+   it, and only a death that does not unwind — `SIGKILL`, power loss,
+   `os._exit` — leaves the stale lock the next start takes over. The refusal
+   path for a live holder returns *before* that `try`, so a refused second
+   listener correctly leaves the real holder's lock alone. Both the acquisition
+   and the release are anchored in the register, so this claim cannot drift
+   from the source again.
 3. **Fetched attachments are sanitized and collision-suffixed.** A port that
    writes the server-supplied `Content-Disposition` name unsanitized introduces
-   a path-traversal bug the pinned source does not have.
+   a path-traversal bug the pinned source does not have. The two fallbacks are
+   at different stages and do **not** chain: the attachment id becomes the name
+   only when the header carries no parseable filename, and a name that
+   sanitizes away becomes `file.bin` *directly* — never the id.
 4. **The MCP envelope has no error member at all.** Every `serve()` reply is
    `{jsonrpc, id, result}`; a hub-unreachable or handler error is carried as
    *text inside a success result*, an unknown method with a non-null id gets
@@ -389,31 +400,51 @@ From the repository root, with an interpreter that has `fastapi` and `httpx`:
 
 ```
 python tools/mh01_inventory.py          # census vs pinned source; must print errors: []
-python tests/test_mh01_inventory.py     # 31 fail-closed census controls
-python tests/mh01_contract.py           # 73 tests: 62 wire cases + 11 controls
+python tests/test_mh01_inventory.py     # 32 fail-closed census controls
+python tests/mh01_contract.py           # 77 tests: 62 wire cases + 15 controls
 ```
 
 `tests/mh01_contract.py` runs as **standard unittest**, so the shared harness
 (`tools/run-python-verification.py`) reports a real denominator —
-`tests_ran: 73` — instead of filing it as a module with no tests. Add
+`tests_ran: 77` — instead of filing it as a module with no tests. Add
 `--narrative` for the grouped human-readable report; both entry points execute
 the same functions, so there is one source of truth for pass and fail.
 
-The 11 controls are one coverage check plus two different kinds of control, and
+The 15 controls are one coverage check plus two different kinds of control, and
 the distinction is the point:
 
 - **1 coverage check** — every registered route and refusal status in the frozen
-  registry is exercised by some fixture, or the run fails.
-- **6 against a bad expectation** — a wrong status, wrong response keys, an
-  unresolvable placeholder, a dropped route, a dropped refusal, a profile pinned
-  to the wrong commit. These prove the *checker* discriminates.
-- **4 against a bad implementation** — the product is broken at the public
+  registry is exercised by some fixture, and the profile carries exactly the
+  cases its manifest declares, or the run fails.
+- **8 against a bad expectation** — a wrong status, wrong response keys, an
+  unresolvable placeholder, a deleted case, a stripped case manifest, a dropped
+  route, a dropped refusal, a profile pinned to the wrong commit. These prove
+  the *checker* discriminates.
+- **6 against a bad implementation** — the product is broken at the public
   boundary and named cases must go red: an always-empty roster, refusals that
-  all carry the wrong detail, a roster row missing `last_seen`, and a lost
-  chat/org `kind` distinction. These prove the *profile constrains behaviour*
-  rather than shape, and they exist because review found a profile that did not:
-  an empty-roster build and a wrong-refusal build both passed the previous
-  suite 63/63.
+  all carry the wrong detail, a roster row missing `last_seen`, a lost chat/org
+  `kind` distinction, an operator read that is not capped at 500, and refusals
+  that carry the wrong cap, size or echoed identifier. These prove the *profile
+  constrains behaviour* rather than shape, and they exist because review found a
+  profile that did not: an empty-roster build and a wrong-refusal build both
+  passed the 63/63 suite of the first round.
+
+Three of those controls answer the second review round specifically, and each
+closed a hole that a green run was hiding:
+
+- **The operator read cap was asserted against a one-row store.** `limit=99999`
+  checked only that the call returned 200, and `limit=0` checked that one
+  message came back — which a hub with *no clamp at all* also satisfies when
+  one message exists. The case now builds 501 messages, so 500 and 1 are
+  observable numbers rather than accidents.
+- **`detail_contains` threw away the contractual values.** Matching `at most`
+  and `attachments` accepts `at most 999 attachments`. The five templated
+  refusals are now asserted in full, including the `!r` quoting that `app.py`
+  puts around an echoed slug or attachment id.
+- **Deleting a case produced a smaller green run.** Coverage is satisfied by a
+  neighbouring case on the same route and status, so an omission was invisible.
+  `case_manifest` pins the set of case ids, and a profile missing one — or
+  missing the manifest — now fails.
 
 The first command **checks** the frozen register against the pinned source; it
 does not rewrite it. To reproduce the artifact itself, add `--write`:

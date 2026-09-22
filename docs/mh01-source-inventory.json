@@ -3467,7 +3467,7 @@
         "category": "output-artifact",
         "durability": "on-disk, OUTSIDE the hub blob root",
         "authority": "the calling process, in its own working directory",
-        "semantics": "Writes into outdir or os.getcwd(). The name comes from the hub's Content-Disposition, basename-stripped, then sanitized to [\\w .()+-] with surrounding dots/spaces trimmed, falling back to the attachment id and then to 'file.bin'. Collisions are suffixed -2, -3, ... rather than overwritten. Hubs on the identity's list are tried IN ORDER until one holds the id.",
+        "semantics": "Writes into outdir or os.getcwd(). The name is taken from the hub's Content-Disposition and basename-stripped; if that header carries no parseable filename the ATTACHMENT ID becomes the name instead. Whichever of the two it is, it is then sanitized to [\\w .()+-] with surrounding dots and spaces trimmed, and if sanitizing empties it the name becomes 'file.bin' DIRECTLY -- not the attachment id, which is a separate, earlier fallback on a different condition. Collisions are suffixed -2, -3, ... rather than overwritten. Hubs on the identity's list are tried IN ORDER until one holds the id.",
         "loss": "None on the hub side; these are client-side copies. But they are durable files the hub's own retention never reclaims.",
         "disposition": "must-be-ported",
         "obligation": "Sanitization and collision suffixing are security-relevant and contractual -- a port that writes the server-supplied name unsanitized introduces a path-traversal bug the pinned source does not have.",
@@ -3484,11 +3484,12 @@
         "family": "listener-process-ownership",
         "path": "hubtool.py",
         "marker": ".listening",
+        "release_marker": "os.remove(lock)",
         "category": "process-custody",
         "durability": "on-disk, beside the identity file",
         "authority": "exactly one live listener per identity name",
         "semantics": "O_CREAT|O_EXCL mints the lock and writes the owning pid. If it already exists the holder pid is read and probed: a LIVE holder other than self refuses the second listener; an unreadable, zero or dead holder is treated as stale and the lock is TAKEN OVER by rewriting the pid.",
-        "loss": "The file is never removed on exit in this source, so a crashed listener always leaves a stale lock that the next start takes over.",
+        "loss": "listen() removes the lock in a `finally`, so a normal return and an exception that unwinds both clear it. It survives ONLY a death that does not unwind -- SIGKILL, a power loss, os._exit -- and that is the single way a stale lock arises; the next start reads the dead pid and takes it over. The live-holder refusal path returns BEFORE the try/finally is entered, so a refused second listener correctly leaves the real holder's lock in place.",
         "disposition": "must-be-ported",
         "obligation": "The port must keep single-writer custody per identity. The stale-takeover path is the dangerous one: it decides ownership from a pid alone.",
         "unknowns": [
@@ -3499,7 +3500,10 @@
         "lines": [
           776
         ],
-        "missing_source": false
+        "missing_source": false,
+        "release_lines": [
+          866
+        ]
       },
       {
         "family": "mcp-jsonrpc-envelope",

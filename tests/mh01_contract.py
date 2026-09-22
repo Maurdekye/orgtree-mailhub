@@ -441,9 +441,18 @@ def run_case(case):
         if "store" in step:
             _store(ctx, step["store"])
             continue
-        resp = _request(ctx, step["request"], step.get("surface", surface))
-        if "expect" in step:
-            _assert(ctx, resp, step["expect"], label)
+        # `times` repeats one request verbatim. It exists so a case can build a
+        # store large enough for a bound to be OBSERVABLE -- an assertion about
+        # a 500-row cap is vacuous against a store holding one row. Every
+        # repetition is asserted, so a hub that fails on the 400th send is
+        # caught rather than averaged away.
+        times = int(step.get("times", 1))
+        for n in range(times):
+            resp = _request(ctx, step["request"], step.get("surface", surface))
+            if "expect" in step:
+                _assert(ctx, resp, step["expect"],
+                        label if times == 1
+                        else "%s repetition %d of %d" % (label, n + 1, times))
         for name, path in (step.get("capture") or {}).items():
             try:
                 ctx.captured[name] = _at(resp.json(), path)
@@ -484,8 +493,37 @@ def coverage_errors(profile, inventory):
     return errors
 
 
+def manifest_errors(profile):
+    """The profile must carry exactly the cases it declares.
+
+    Round-2 finding: coverage alone could not see a DELETED case. Routes and
+    refusal statuses are covered by neighbouring cases, so removing one left
+    the tie satisfied and produced a smaller green run -- and a run that is
+    green with a case missing is not a freeze. The manifest pins the set, not
+    just the number: a count is one integer to edit, whereas dropping a case
+    now also means finding and removing its id.
+    """
+    manifest = profile.get("case_manifest")
+    if not manifest:
+        return ["wire profile carries no case_manifest, so an omitted case "
+                "cannot be detected"]
+    errors = []
+    declared, present = set(manifest.get("ids") or []), {c["id"] for c in profile["cases"]}
+    for missing in sorted(declared - present):
+        errors.append("case %r is declared in the manifest but absent from the "
+                      "profile" % missing)
+    for extra in sorted(present - declared):
+        errors.append("case %r is in the profile but not declared in the "
+                      "manifest" % extra)
+    if manifest.get("count") != len(profile["cases"]):
+        errors.append("case_manifest declares %r cases but the profile carries %d"
+                      % (manifest.get("count"), len(profile["cases"])))
+    return errors
+
+
 def profile_errors(profile, inventory):
     errors = list(coverage_errors(profile, inventory))
+    errors.extend(manifest_errors(profile))
     if profile.get("source_commit") != inventory.get("source_commit"):
         errors.append("wire profile pins %r but the inventory pins %r"
                       % (profile.get("source_commit"), inventory.get("source_commit")))
@@ -640,6 +678,39 @@ def _force_kind_org():
     return _mapped_roster(lambda r: {**r, "kind": "org"})
 
 
+def _wrong_refusal_values():
+    """Keep every status and every code path; corrupt only the VALUES carried
+    inside the refusal sentence.
+
+    This is the round-2 finding in executable form. `detail_contains` matched
+    the fixed words of a template and threw away the part a port actually gets
+    wrong -- the cap, the size, the echoed identifier, and the !r quoting
+    around it. A hub answering "at most 999 attachments" is not compatible,
+    and the suite said it was.
+    """
+    original = hubapp.HTTPException
+
+    def rewrite(status_code, detail=None, **kw):
+        if isinstance(detail, str):
+            detail = re.sub(r"\d+", "999", detail)
+            detail = re.sub(r"'[^']*'", "'substituted'", detail)
+        return original(status_code, detail=detail, **kw)
+
+    return _patched(hubapp, "HTTPException", rewrite)
+
+
+def _no_upper_limit_clamp():
+    """Serve exactly the `limit` the caller asked for.
+
+    app.py:544 is `limit = min(max(int(limit), 1), 500)`. A module-global `min`
+    shadows the builtin for every lookup inside that module, so returning the
+    first argument removes the 500-row CEILING while leaving `max(...)` -- the
+    floor -- intact. That is the realistic port defect: an implementation that
+    honours "at least one" and forgets "at most five hundred".
+    """
+    return _patched(hubapp, "min", lambda a, b: a)
+
+
 # (label, patch factory, the case ids that MUST go red while it is applied)
 IMPLEMENTATION_CONTROLS = [
     ("an implementation whose roster is always empty must be caught",
@@ -660,6 +731,16 @@ IMPLEMENTATION_CONTROLS = [
     ("an implementation that loses the chat/org kind distinction must be caught",
      _force_kind_org,
      ["register.kind-chat-is-recorded"]),
+    ("an implementation that does not cap the operator read at 500 must be caught",
+     _no_upper_limit_clamp,
+     ["operator-ui.limit-is-clamped-between-1-and-500"]),
+    ("an implementation whose refusals carry the wrong cap, size or identifier "
+     "must be caught",
+     _wrong_refusal_values,
+     ["send.unknown-recipient-is-refused-422",
+      "send.more-than-ten-attachments-is-refused-422",
+      "send.unknown-or-foreign-attachment-is-refused-422",
+      "attachments.oversize-upload-is-refused-413"]),
 ]
 
 
@@ -719,6 +800,14 @@ def _mutate_placeholder(case):
     bad["principals"] = []
     bad["id"] = case["id"] + " [principals dropped]"
     return bad
+
+
+def _drop_case(profile):
+    """Remove one case and nothing else -- the reviewer's exact mutation."""
+    thin = _clone(profile)
+    thin["cases"] = [c for c in thin["cases"]
+                     if c["id"] != "malformed.json-null-body-is-a-500"]
+    return thin
 
 
 def _drop_route(profile):
@@ -791,6 +880,11 @@ def _install_tests():
          lambda: run_case(_mutate_keys(first))),
         ("an unresolvable principal placeholder must fail",
          lambda: run_case(_mutate_placeholder(first))),
+        ("deleting a single case from the profile must be caught",
+         lambda: _expect_empty(profile_errors(_drop_case(profile), inventory))),
+        ("a profile whose manifest is stripped must be caught",
+         lambda: _expect_empty(profile_errors(
+             {k: v for k, v in profile.items() if k != "case_manifest"}, inventory))),
         ("dropping a route from the profile must be caught by coverage",
          lambda: _expect_empty(coverage_errors(_drop_route(profile), inventory))),
         ("dropping a refusal assertion must be caught by coverage",

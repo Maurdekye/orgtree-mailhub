@@ -1050,9 +1050,7 @@
             "keys_exactly": [
               "detail"
             ],
-            "detail_contains": [
-              "no org registered as"
-            ]
+            "detail": "no org registered as 'nobody-holds-this-address'"
           }
         }
       ]
@@ -1319,10 +1317,7 @@
             "keys_exactly": [
               "detail"
             ],
-            "detail_contains": [
-              "at most",
-              "attachments"
-            ]
+            "detail": "at most 10 attachments"
           }
         }
       ]
@@ -1386,9 +1381,7 @@
             "keys_exactly": [
               "detail"
             ],
-            "detail_contains": [
-              "unknown attachment"
-            ]
+            "detail": "unknown attachment 'no-such-attachment-id'"
           }
         },
         {
@@ -1430,9 +1423,7 @@
             "keys_exactly": [
               "detail"
             ],
-            "detail_contains": [
-              "unknown attachment"
-            ]
+            "detail": "unknown attachment '@cap.betas_aid'"
           }
         }
       ]
@@ -2735,10 +2726,7 @@
             "keys_exactly": [
               "detail"
             ],
-            "detail_contains": [
-              "attachment exceeds",
-              "MB"
-            ]
+            "detail": "attachment exceeds 25 MB"
           }
         }
       ]
@@ -3606,7 +3594,7 @@
     {
       "id": "operator-ui.limit-is-clamped-between-1-and-500",
       "family": "operator-ui",
-      "intent": "A caller cannot ask the operator page for an unbounded read, and cannot ask for nothing either.",
+      "intent": "app.py:544 clamps the operator read with min(max(int(limit), 1), 500). Both bounds are asserted against a store that can actually show them: 501 messages exist, so an uncapped read would return 501 and a floorless read of limit=0 would return 0. Against a one-row store both assertions would hold for a hub with no clamp at all.",
       "principals": [
         "alpha",
         "beta"
@@ -3654,6 +3642,7 @@
               "body": "clamp"
             }
           },
+          "times": 501,
           "expect": {
             "status": 200
           }
@@ -3668,7 +3657,10 @@
             }
           },
           "expect": {
-            "status": 200
+            "status": 200,
+            "length": {
+              "messages": 500
+            }
           }
         },
         {
@@ -4517,5 +4509,73 @@
         }
       ]
     }
-  ]
+  ],
+  "case_manifest": {
+    "intent": "The exact set of cases this profile must carry. Coverage ties coverage -- routes and refusal statuses -- and a deleted case leaves those satisfied by its neighbours, so removing one used to produce a smaller GREEN run. Pinning the ids makes an omission fail. A count alone would not: it is one number to edit.",
+    "count": 62,
+    "ids": [
+      "ack.only-the-recipient-may-take-custody",
+      "ack.repeating-an-ack-counts-zero",
+      "ack.requires-credentials-401",
+      "attachments.a-row-whose-blob-is-gone-is-410",
+      "attachments.download-of-an-unknown-id-is-404",
+      "attachments.download-requires-credentials-401",
+      "attachments.metadata-rides-the-envelope",
+      "attachments.oversize-upload-is-refused-413",
+      "attachments.owner-may-download-its-own-blob",
+      "attachments.recipient-may-download-once-a-send-binds-it",
+      "attachments.upload-requires-credentials-401",
+      "attachments.upload-returns-an-id-and-the-stored-length",
+      "auth.malformed-header-yields-no-principals",
+      "auth.multiplexed-header-proceeds-for-the-valid-principals",
+      "auth.unknown-slug-is-refused",
+      "auth.wrong-secret-is-not-a-principal",
+      "health.reports-identity-counts-and-policy",
+      "malformed.body-that-is-not-json-is-a-500",
+      "malformed.empty-body-is-a-500",
+      "malformed.json-array-body-is-a-500",
+      "malformed.json-null-body-is-a-500",
+      "operator-ui.client-filter-folds-case-and-underscores",
+      "operator-ui.data-lists-every-org-with-its-queue-depth",
+      "operator-ui.index-is-served-unauthenticated",
+      "operator-ui.keyset-cursor-pages-strictly-older-rows",
+      "operator-ui.limit-is-clamped-between-1-and-500",
+      "operator-ui.message-rows-carry-state-and-the-receipt-stamps",
+      "operator-ui.messages-are-newest-first",
+      "poll.one-call-multiplexes-every-identity-it-presents",
+      "poll.redelivers-until-the-recipient-acks",
+      "poll.requires-credentials-401",
+      "poll.returns-queued-mail-in-received-order",
+      "public-split.api-and-health-pass-through",
+      "public-split.operator-surface-is-404-on-the-public-listener",
+      "receipts.a-rung-is-written-once-and-only-by-the-recipient",
+      "receipts.are-pushed-to-the-sender-once",
+      "receipts.delivered-then-read-climb-the-ladder",
+      "receipts.requires-credentials-401",
+      "receipts.unknown-states-are-ignored-not-refused",
+      "register.address-ownership-first-write-wins-403",
+      "register.first-registration-returns-hub-identity-and-roster",
+      "register.kind-chat-is-recorded",
+      "register.malformed-slug-is-refused-422",
+      "register.re-registration-refreshes-display-fields",
+      "register.roster-row-carries-display-fields-and-kind",
+      "register.without-a-secret-for-that-slug-is-refused-401",
+      "retention.a-silent-client-with-queued-mail-is-never-pruned",
+      "retention.sweep-takes-the-aged-message-metadata-and-blob-together",
+      "roster.requires-credentials-401",
+      "send.accepted-message-returns-hub-custody",
+      "send.body-is-truncated-at-20000-characters",
+      "send.envelope-shape-on-delivery",
+      "send.more-than-ten-attachments-is-refused-422",
+      "send.replay-of-the-same-id-is-a-duplicate-and-the-first-payload-wins",
+      "send.spoofed-from-is-refused-401",
+      "send.unauthenticated-is-refused-401",
+      "send.unknown-or-foreign-attachment-is-refused-422",
+      "send.unknown-recipient-is-refused-422",
+      "unregister.authenticated-client-removes-its-own-rows",
+      "unregister.without-credentials-is-refused-401",
+      "validation.query-float-parse-failure-is-422-with-a-structured-detail",
+      "validation.query-int-parse-failure-is-422-with-a-structured-detail"
+    ]
+  }
 }
