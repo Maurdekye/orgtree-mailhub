@@ -550,7 +550,21 @@ class DriverSession:
             raise DriverFault("the driver closed its output before answering")
         if isinstance(item, Exception):
             raise item
-        answer = json.loads(item)
+        try:
+            answer = json.loads(item)
+        except ValueError as error:
+            # This side decodes the driver's answer on the SAME interpreter the
+            # oracle runs on, so it inherits the same integer digit limit. A
+            # driver that answered with a literal past that limit produces a
+            # line this process cannot read at all — which is a real finding
+            # about the driver, not a crash in the harness, and it has to say
+            # so by name rather than escaping as an unhandled ValueError with
+            # no failing test attached to it.
+            raise DriverFault(
+                "the driver's answer could not be decoded on this interpreter (%s); the "
+                "most likely cause is a number outside what sys.get_int_max_str_digits() "
+                "allows, which the driver must not emit because the pinned source cannot "
+                "produce one either" % error) from None
         if "error" in answer:
             raise DriverFault("the driver refused the job: %s" % answer["error"])
         return answer
