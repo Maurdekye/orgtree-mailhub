@@ -1,0 +1,4031 @@
+{
+  "schema": "orgtree.mailhub-mcp-envelope/v1",
+  "purpose": "The MCP stdio request/reply envelope of hubtool.py's serve(), as a language-neutral profile. Implementation selection sits outside these assertions: tests/mh02_mcp_contract.py carries one adapter for the pinned Python source and one for the Rust mailhub-protocol crate, and both run the same cases. This profile covers the ENVELOPE only. It says nothing about the eight tools' real behaviour -- every handler here is synthetic -- so the MH01 source registry's MCP conversion blocker stays open.",
+  "source_commit": "6477321f89d2d2e1b9313e71e940c76c35b892fb",
+  "source": {
+    "path": "hubtool.py",
+    "sha256": "91eadcaadc9f4d80ea72612188bc58f60377f85352a7d11562ed4bda5192c831",
+    "bytes": 60079,
+    "serve": {
+      "lineno": 1168,
+      "end_lineno": 1202,
+      "segment_sha256": "3182b5a64299afdbd44fc7c4be29bdc1f81c564e08781e004f60c35665fee3f8",
+      "unparsed_sha256": "d43727ab04c5681255939f0a7ef3b6585a6ff438557df6ee01a41cc3536a514d"
+    },
+    "tools": {
+      "lineno": 975,
+      "end_lineno": 1046,
+      "segment_sha256": "f95af192c8df0b51e321d3cff09c4172c598031099c4628ce33bd5f2af9e7a8c",
+      "unparsed_sha256": "592c2bcfa27b44802b8638ed648233fb2630d4a7e33e65223274c33ed7186459"
+    }
+  },
+  "server": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "mailhub",
+      "version": "1.0"
+    }
+  },
+  "tools_placeholder": "@tools",
+  "tools": [
+    {
+      "name": "hub_register",
+      "description": "Join the mail hub as THIS SESSION. Choose a UNIQUE, semantically appropriate `name` that reflects this session's own context / directive / purpose (e.g. 'orgtree-redteam', 'terrain-pipeline') — every session has its own identity, and the name is the key. REMEMBER the name you chose: registering with it again later resumes the SAME address (<name>.<user>.<fingerprint>); a different name is a different identity. Immutable once minted. Returns your address and the roster — ⚠ if the result carries `resumed` and YOU did not register this name earlier, another session owns it: pick a different name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "this session's self-chosen identity name — unique, purpose-describing, reused on every later register"
+          }
+        }
+      }
+    },
+    {
+      "name": "hub_list",
+      "description": "Everyone on your hubs — orgs and chats — with kind, presence and last_seen. On a multi-hub identity the rosters are MERGED, one row per slug, each row's `hubs` naming where it lives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hub_send",
+      "description": "Send mail to any hub client (org or chat) by its slug from hub_list. On a multi-hub identity the hub is resolved by roster (several hold the target → the local one wins; none → refused naming the hubs searched — never guessed).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "body"
+        ]
+      }
+    },
+    {
+      "name": "hub_fetch",
+      "description": "Download a mail attachment by its id (the listener and hub_read surface ids beside filenames). Saves into `dir` (default: the current directory) and returns the written path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "hub_unregister",
+      "description": "The polite exit: remove this identity's row from every hub on its list (queued mail for you ages out on the hub's retention). Your local identity is KEPT — registering again later resumes the identical address.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hub_read",
+      "description": "Fetch (and consume) any mail waiting for you right now — across ALL your hubs; each message carries `hub` so you know where to reply (acks go back to the hub each message came from automatically).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hub_wait",
+      "description": "Wait up to `timeout` seconds (max 55) for new mail — polls every hub on your list (the window is split across them); each message carries `hub`; empty result on timeout.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "hub_hubs",
+      "description": "This identity's mailserver list. No args = show it. `add` joins another hub (registers there immediately; same address everywhere — the fingerprint derives from your uid, not the hub). `remove` drops one (its polling stops; the others' cursors are untouched). Addresses accept bare host / host:port (http + :7370 assumed).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "add": {
+            "type": "string"
+          },
+          "remove": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "obligations": [
+    {
+      "id": "numeric-domain.integer-wider-than-64-bits",
+      "implementation": "rust",
+      "summary": "CPython integers are unbounded; serde_json narrows anything outside i64/u64 to f64, so the echoed id loses its exact value.",
+      "exercised_by": "profile case",
+      "disposition": "open - resolving it means an arbitrary-precision number representation, which is a decision for the port rather than for this preparation slice."
+    },
+    {
+      "id": "numeric-domain.bare-non-standard-tokens",
+      "implementation": "rust",
+      "summary": "CPython's json accepts the bare tokens NaN, Infinity and -Infinity and returns a float. A float is not an object, so the source's loop ends on it. serde_json rejects the tokens, so the Rust side SKIPS the line and keeps going where the source stops.",
+      "exercised_by": "profile case",
+      "disposition": "open - needs a decoder that accepts CPython's non-standard number tokens."
+    },
+    {
+      "id": "string-domain.lone-surrogate-escape",
+      "implementation": "rust",
+      "summary": "CPython's json decodes a lone \\ud800 escape into an unpaired surrogate and returns a str, which ends the source's loop. serde_json rejects the escape, so the Rust side skips the line instead.",
+      "exercised_by": "profile case",
+      "disposition": "open - a Rust String cannot hold an unpaired surrogate, so this needs an explicit representation decision in the port."
+    },
+    {
+      "id": "repr-domain.non-ascii-inside-a-container",
+      "implementation": "rust",
+      "summary": "repr() of a non-ASCII string follows CPython's printability table, which the crate does not carry. It reports `unrepresentable` rather than guessing an answer. str() of a bare string tool name, which is the case an MCP client can actually reach, is already exact.",
+      "exercised_by": "profile case",
+      "disposition": "open - needs a Unicode category table."
+    },
+    {
+      "id": "key-domain.non-string-dictionary-key",
+      "implementation": "rust",
+      "summary": "dict([[1,2]]) is {1: 2} in Python, with an integer key. The crate reports `unrepresentable` rather than coercing the key to \"1\".",
+      "exercised_by": "the crate's own test `an_unmodellable_input_is_refused_and_never_answered`, because a JSON object cannot express a non-string key and therefore a language-neutral case cannot state the expectation",
+      "disposition": "open - needs a mapping type with non-string keys in the port."
+    }
+  ],
+  "case_manifest": {
+    "count": 135,
+    "ids": [
+      "arguments.empty-list",
+      "arguments.empty-object",
+      "arguments.empty-string",
+      "arguments.false",
+      "arguments.missing",
+      "arguments.null",
+      "arguments.pair-list",
+      "arguments.several-pairs",
+      "arguments.two-char-string-element",
+      "arguments.two-key-object-element",
+      "arguments.zero",
+      "framing.blank-lines-skipped",
+      "framing.crlf-separated",
+      "framing.duplicate-keys-last-wins",
+      "framing.empty-input",
+      "framing.escaped-newline-inside-a-string",
+      "framing.ideographic-space-padding",
+      "framing.invalid-json-skipped",
+      "framing.leading-and-trailing-spaces",
+      "framing.lone-cr-separated",
+      "framing.mixed-valid-and-invalid",
+      "framing.nbsp-padding",
+      "framing.no-trailing-newline",
+      "framing.raw-unicode-payload",
+      "framing.separator-padding",
+      "framing.tab-padding",
+      "framing.three-replies-keep-request-order",
+      "framing.trailing-comma-skipped",
+      "framing.trailing-data-skipped",
+      "framing.truncated-json-skipped",
+      "framing.unicode-payload",
+      "framing.whitespace-only-skipped",
+      "framing.zero-width-space-is-not-whitespace",
+      "id.float",
+      "id.large-integer-within-64-bits",
+      "id.list",
+      "id.object",
+      "id.unicode-string",
+      "initialize.extra-members-ignored",
+      "initialize.false-id",
+      "initialize.integer-id",
+      "initialize.missing-id",
+      "initialize.negative-id",
+      "initialize.null-id",
+      "initialize.params-ignored",
+      "initialize.string-id",
+      "initialize.zero-id",
+      "malformed-arguments.bool-element",
+      "malformed-arguments.float",
+      "malformed-arguments.integer",
+      "malformed-arguments.null-element",
+      "malformed-arguments.number-element",
+      "malformed-arguments.one-key-object-element",
+      "malformed-arguments.second-element-bad",
+      "malformed-arguments.single-char-string",
+      "malformed-arguments.string",
+      "malformed-arguments.triple",
+      "malformed-arguments.true",
+      "malformed-arguments.unhashable-key",
+      "name.empty-string",
+      "name.false",
+      "name.float",
+      "name.integer",
+      "name.list",
+      "name.missing",
+      "name.null",
+      "name.object",
+      "name.true",
+      "name.unicode",
+      "name.unknown-string",
+      "obligation.bare-infinity-token-ends-the-loop",
+      "obligation.bare-nan-token-ends-the-loop",
+      "obligation.id-integer-wider-than-64-bits",
+      "obligation.lone-surrogate-escape-ends-the-loop",
+      "obligation.non-ascii-name-inside-a-list",
+      "outcome.empty-text",
+      "outcome.error-text-with-quotes-and-newline",
+      "outcome.generic-exception",
+      "outcome.text",
+      "outcome.two-calls-in-order",
+      "outcome.unicode-error-text",
+      "outcome.unreachable-hub",
+      "outcome.unreachable-hub-empty-reason",
+      "params.empty-list-is-an-empty-mapping",
+      "params.empty-object-is-an-empty-mapping",
+      "params.empty-string-is-an-empty-mapping",
+      "params.false-is-an-empty-mapping",
+      "params.missing-is-an-empty-mapping",
+      "params.null-is-an-empty-mapping",
+      "params.truthy-float-is-an-error-string",
+      "params.truthy-integer-is-an-error-string",
+      "params.truthy-list-is-an-error-string",
+      "params.truthy-string-is-an-error-string",
+      "params.truthy-true-is-an-error-string",
+      "params.zero-is-an-empty-mapping",
+      "terminal.after-a-tool-call",
+      "terminal.empty-list",
+      "terminal.false",
+      "terminal.float",
+      "terminal.integer",
+      "terminal.is-not-reached-through-a-blank-line",
+      "terminal.keeps-earlier-replies",
+      "terminal.list",
+      "terminal.null",
+      "terminal.string",
+      "terminal.true",
+      "tools-call.forwards-hub-fetch",
+      "tools-call.forwards-hub-hubs",
+      "tools-call.forwards-hub-list",
+      "tools-call.forwards-hub-read",
+      "tools-call.forwards-hub-register",
+      "tools-call.forwards-hub-send",
+      "tools-call.forwards-hub-unregister",
+      "tools-call.forwards-hub-wait",
+      "tools-list.missing-id",
+      "tools-list.null-id",
+      "tools-list.params-ignored",
+      "tools-list.string-id",
+      "tools-list.zero-id",
+      "unknown-method.answered-with-empty-list-id",
+      "unknown-method.answered-with-empty-object-id",
+      "unknown-method.answered-with-empty-string-id",
+      "unknown-method.answered-with-false-id",
+      "unknown-method.answered-with-float-id",
+      "unknown-method.answered-with-negative-id",
+      "unknown-method.answered-with-string-id",
+      "unknown-method.answered-with-zero-id",
+      "unknown-method.case-sensitive",
+      "unknown-method.empty-object-is-silent",
+      "unknown-method.missing-id-is-silent",
+      "unknown-method.near-miss",
+      "unknown-method.no-method-member-but-an-id",
+      "unknown-method.non-string-method-with-id",
+      "unknown-method.null-id-is-silent",
+      "unknown-method.null-method-with-id"
+    ],
+    "obligation_count": 5
+  },
+  "cases": [
+    {
+      "id": "initialize.string-id",
+      "title": "initialize with a string id returns the frozen metadata",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":\"req-1\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.integer-id",
+      "title": "initialize with an integer id",
+      "input": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.zero-id",
+      "title": "id 0 is not absent and is echoed as 0",
+      "input": "{\"id\":0,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.negative-id",
+      "title": "a negative integer id survives unchanged",
+      "input": "{\"id\":-42,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": -42,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.null-id",
+      "title": "an explicit null id is still answered, with a null id",
+      "input": "{\"id\":null,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": null,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.missing-id",
+      "title": "a missing id is still answered, with a null id",
+      "input": "{\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": null,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.false-id",
+      "title": "id false is not None, so it is echoed as false",
+      "input": "{\"id\":false,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": false,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.params-ignored",
+      "title": "initialize params are read by nothing and change no reply",
+      "input": "{\"id\":2,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"x\"}}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "initialize.extra-members-ignored",
+      "title": "unknown envelope members are ignored",
+      "input": "{\"id\":3,\"method\":\"initialize\",\"extra\":[1,2],\"jsonrpc\":\"1.0\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-list.string-id",
+      "title": "tools/list returns all eight cards in source order",
+      "input": "{\"id\":\"t\",\"method\":\"tools/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "t",
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-list.zero-id",
+      "title": "tools/list with id 0",
+      "input": "{\"id\":0,\"method\":\"tools/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-list.missing-id",
+      "title": "tools/list is answered with a null id when none was sent",
+      "input": "{\"method\":\"tools/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": null,
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-list.null-id",
+      "title": "tools/list with an explicit null id",
+      "input": "{\"id\":null,\"method\":\"tools/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": null,
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-list.params-ignored",
+      "title": "tools/list ignores params entirely",
+      "input": "{\"id\":4,\"method\":\"tools/list\",\"params\":{\"cursor\":\"x\"}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-register",
+      "title": "tools/call forwards hub_register and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_register\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_register\", \"arguments\": {\"name\": \"some-session\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"slug\":\"some-session.u.ab12\"}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_register",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"slug\":\"some-session.u.ab12\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_register",
+            "arguments": {
+              "name": "some-session"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-list",
+      "title": "tools/call forwards hub_list and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_list\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_list\", \"arguments\": {}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "[{\"slug\":\"peer\",\"kind\":\"org\"}]"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_list",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "[{\"slug\":\"peer\",\"kind\":\"org\"}]"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-send",
+      "title": "tools/call forwards hub_send and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_send\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_send\", \"arguments\": {\"to\": \"peer\", \"body\": \"hello\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"sent\":true}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_send",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"sent\":true}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "to": "peer",
+              "body": "hello"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-fetch",
+      "title": "tools/call forwards hub_fetch and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_fetch\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_fetch\", \"arguments\": {\"id\": \"att-1\", \"dir\": \"out\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"saved\":\"out/x.txt\",\"bytes\":3}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_fetch",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"saved\":\"out/x.txt\",\"bytes\":3}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_fetch",
+            "arguments": {
+              "id": "att-1",
+              "dir": "out"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-unregister",
+      "title": "tools/call forwards hub_unregister and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_unregister\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_unregister\", \"arguments\": {}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"unregistered_on\":[]}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_unregister",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"unregistered_on\":[]}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_unregister",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-read",
+      "title": "tools/call forwards hub_read and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_read\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_read\", \"arguments\": {}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"messages\":[]}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_read",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"messages\":[]}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_read",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-wait",
+      "title": "tools/call forwards hub_wait and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_wait\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_wait\", \"arguments\": {\"timeout\": 5}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"messages\":[]}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_wait",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"messages\":[]}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_wait",
+            "arguments": {
+              "timeout": 5
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "tools-call.forwards-hub-hubs",
+      "title": "tools/call forwards hub_hubs and its arguments to the injected handler",
+      "input": "{\"id\": \"hub_hubs\", \"method\": \"tools/call\", \"params\": {\"name\": \"hub_hubs\", \"arguments\": {\"add\": \"example:7370\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"hubs\":[\"http://example:7370\"]}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "hub_hubs",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"hubs\":[\"http://example:7370\"]}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_hubs",
+            "arguments": {
+              "add": "example:7370"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.missing",
+      "title": "arguments missing coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.null",
+      "title": "arguments null coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":null}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.empty-object",
+      "title": "arguments empty-object coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":{}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.empty-list",
+      "title": "arguments empty-list coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.empty-string",
+      "title": "arguments empty-string coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":\"\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.zero",
+      "title": "arguments zero coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":0}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.false",
+      "title": "arguments false coerces to {}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":false}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.pair-list",
+      "title": "arguments pair-list coerces to {'a': 'b'}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[[\"a\",\"b\"]]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {
+              "a": "b"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.two-char-string-element",
+      "title": "arguments two-char-string-element coerces to {'a': 'b'}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[\"ab\"]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {
+              "a": "b"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.two-key-object-element",
+      "title": "arguments two-key-object-element coerces to {'k': 'v'}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[{\"k\":1,\"v\":2}]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {
+              "k": "v"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "arguments.several-pairs",
+      "title": "arguments several-pairs coerces to {'a': 'b', 'c': 'd'}",
+      "input": "{\"id\":\"a\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[[\"a\",\"b\"],[\"c\",\"d\"]]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {
+              "a": "b",
+              "c": "d"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.missing",
+      "title": "a missing tool name reaches the handler as 'None'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.null",
+      "title": "a null tool name reaches the handler as 'None'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":null}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.empty-string",
+      "title": "a empty-string tool name reaches the handler as ''",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":\"\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.integer",
+      "title": "a integer tool name reaches the handler as '5'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":5}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "5",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.float",
+      "title": "a float tool name reaches the handler as '1.5'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":1.5}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "1.5",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.true",
+      "title": "a true tool name reaches the handler as 'True'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":true}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "True",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.false",
+      "title": "a false tool name reaches the handler as 'False'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":false}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "False",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.unknown-string",
+      "title": "a unknown-string tool name reaches the handler as 'hub_nope'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_nope\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_nope",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.unicode",
+      "title": "a unicode tool name reaches the handler as 'café ❤'",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":\"caf\\u00e9 \\u2764\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "café ❤",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.list",
+      "title": "a list tool name reaches the handler as \"[1, 'a', None]\"",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":[1,\"a\",null]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "[1, 'a', None]",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "name.object",
+      "title": "a object tool name reaches the handler as \"{'a': 1}\"",
+      "input": "{\"id\":\"n\",\"method\":\"tools/call\",\"params\":{\"name\":{\"a\":1}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "n",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "{'a': 1}",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.missing-is-an-empty-mapping",
+      "title": "params missing is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\"}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.null-is-an-empty-mapping",
+      "title": "params null is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":null}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.empty-object-is-an-empty-mapping",
+      "title": "params empty-object is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":{}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.zero-is-an-empty-mapping",
+      "title": "params zero is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":0}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.false-is-an-empty-mapping",
+      "title": "params false is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":false}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.empty-list-is-an-empty-mapping",
+      "title": "params empty-list is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":[]}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.empty-string-is-an-empty-mapping",
+      "title": "params empty-string is falsy, so the handler sees name None and no arguments",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":\"\"}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "None",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.truthy-string-is-an-error-string",
+      "title": "params of type str fails inside the handler boundary",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":\"oops\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'str' object has no attribute 'get'\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.truthy-list-is-an-error-string",
+      "title": "params of type list fails inside the handler boundary",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":[1]}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'list' object has no attribute 'get'\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.truthy-integer-is-an-error-string",
+      "title": "params of type int fails inside the handler boundary",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":7}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'int' object has no attribute 'get'\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.truthy-float-is-an-error-string",
+      "title": "params of type float fails inside the handler boundary",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":2.5}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'float' object has no attribute 'get'\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "params.truthy-true-is-an-error-string",
+      "title": "params of type bool fails inside the handler boundary",
+      "input": "{\"id\":\"p\",\"method\":\"tools/call\",\"params\":true}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "p",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'bool' object has no attribute 'get'\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.text",
+      "title": "a successful handler string is carried verbatim",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "{\"rows\":[]}"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"rows\":[]}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.empty-text",
+      "title": "an empty handler string is still a successful result",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": ""
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.generic-exception",
+      "title": "a handler exception becomes str(e) inside content",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\"}}\n",
+      "dispatch": [
+        {
+          "kind": "exception",
+          "message": "not registered"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"not registered\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.unreachable-hub",
+      "title": "URLError becomes the source's own sentence, not an error member",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "url_error",
+          "reason": "[Errno 61] Connection refused"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"hub unreachable: [Errno 61] Connection refused\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.unreachable-hub-empty-reason",
+      "title": "an empty URLError reason still formats",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "url_error",
+          "reason": ""
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"hub unreachable: \"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.unicode-error-text",
+      "title": "a non-ASCII exception message is escaped by json.dumps",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "exception",
+          "message": "café ❤ 😀"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"caf\\u00e9 \\u2764 \\ud83d\\ude00\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.error-text-with-quotes-and-newline",
+      "title": "quoting and control characters are escaped",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n",
+      "dispatch": [
+        {
+          "kind": "exception",
+          "message": "he said \"no\"\nthen \\left\ttabbed"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"he said \\\"no\\\"\\nthen \\\\left\\ttabbed\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "outcome.two-calls-in-order",
+      "title": "two tool calls consume their handlers in order",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n{\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_read\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "first"
+        },
+        {
+          "kind": "text",
+          "text": "second"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "first"
+                }
+              ]
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "second"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          },
+          {
+            "tool": "hub_read",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.string",
+      "title": "malformed arguments (string) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":\"ab\"}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"dictionary update sequence element #0 has length 1; 2 is required\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.single-char-string",
+      "title": "malformed arguments (single-char-string) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":\"a\"}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"dictionary update sequence element #0 has length 1; 2 is required\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.number-element",
+      "title": "malformed arguments (number-element) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[1,2]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"cannot convert dictionary update sequence element #0 to a sequence\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.bool-element",
+      "title": "malformed arguments (bool-element) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[true]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"cannot convert dictionary update sequence element #0 to a sequence\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.null-element",
+      "title": "malformed arguments (null-element) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[null]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"cannot convert dictionary update sequence element #0 to a sequence\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.triple",
+      "title": "malformed arguments (triple) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[[\"a\",\"b\",\"c\"]]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"dictionary update sequence element #0 has length 3; 2 is required\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.one-key-object-element",
+      "title": "malformed arguments (one-key-object-element) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[{\"a\":1}]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"dictionary update sequence element #0 has length 1; 2 is required\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.second-element-bad",
+      "title": "malformed arguments (second-element-bad) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[[\"a\",\"b\"],[\"c\"]]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"dictionary update sequence element #1 has length 1; 2 is required\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.unhashable-key",
+      "title": "malformed arguments (unhashable-key) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":[[[\"x\"],\"b\"]]}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"unhashable type: 'list'\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.integer",
+      "title": "malformed arguments (integer) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":5}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'int' object is not iterable\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.float",
+      "title": "malformed arguments (float) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":2.5}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'float' object is not iterable\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "malformed-arguments.true",
+      "title": "malformed arguments (true) fail inside the handler boundary",
+      "input": "{\"id\":\"m\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\",\"arguments\":true}}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "m",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "{\"error\": \"'bool' object is not iterable\"}"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-string-id",
+      "title": "an unknown method with a string id gets an empty result",
+      "input": "{\"id\":\"u1\",\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "u1",
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-zero-id",
+      "title": "an unknown method with a zero id gets an empty result",
+      "input": "{\"id\":0,\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-false-id",
+      "title": "an unknown method with a false id gets an empty result",
+      "input": "{\"id\":false,\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": false,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-empty-string-id",
+      "title": "an unknown method with a empty-string id gets an empty result",
+      "input": "{\"id\":\"\",\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "",
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-empty-object-id",
+      "title": "an unknown method with a empty-object id gets an empty result",
+      "input": "{\"id\":{},\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": {},
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-empty-list-id",
+      "title": "an unknown method with a empty-list id gets an empty result",
+      "input": "{\"id\":[],\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": [],
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-negative-id",
+      "title": "an unknown method with a negative id gets an empty result",
+      "input": "{\"id\":-1,\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": -1,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.answered-with-float-id",
+      "title": "an unknown method with a float id gets an empty result",
+      "input": "{\"id\":1.5,\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1.5,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.null-id-is-silent",
+      "title": "an unknown method with a null id gets no reply at all",
+      "input": "{\"id\":null,\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.missing-id-is-silent",
+      "title": "an unknown method with no id gets no reply at all",
+      "input": "{\"method\":\"resources/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.empty-object-is-silent",
+      "title": "an object with neither method nor id is silent",
+      "input": "{}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.no-method-member-but-an-id",
+      "title": "no method member, but an id, still answers",
+      "input": "{\"id\":\"only-id\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "only-id",
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.non-string-method-with-id",
+      "title": "a non-string method is simply unrecognised",
+      "input": "{\"id\":9,\"method\":5}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.null-method-with-id",
+      "title": "a null method is simply unrecognised",
+      "input": "{\"id\":9,\"method\":null}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.case-sensitive",
+      "title": "method matching is exact: Initialize is unknown",
+      "input": "{\"id\":9,\"method\":\"Initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "unknown-method.near-miss",
+      "title": "tools/Call is not tools/call",
+      "input": "{\"id\":9,\"method\":\"tools/Call\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "id.object",
+      "title": "an object id is not None, so it is echoed verbatim",
+      "input": "{\"id\":{\"a\":1},\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": {
+              "a": 1
+            },
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "id.list",
+      "title": "a list id is echoed verbatim",
+      "input": "{\"id\":[1,2],\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": [
+              1,
+              2
+            ],
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "id.large-integer-within-64-bits",
+      "title": "2**53+1 survives as an exact integer",
+      "input": "{\"id\":9007199254740993,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 9007199254740993,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "id.float",
+      "title": "a float id survives by value",
+      "input": "{\"id\":1.5,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1.5,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "id.unicode-string",
+      "title": "a non-ASCII string id survives by value",
+      "input": "{\"id\":\"caf\\u00e9-\\u2764\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "café-❤",
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0
+      }
+    },
+    {
+      "id": "framing.empty-input",
+      "title": "no input at all produces no frames",
+      "input": "",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 0
+      }
+    },
+    {
+      "id": "framing.blank-lines-skipped",
+      "title": "blank lines are skipped in silence",
+      "input": "\n\n\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 3
+      }
+    },
+    {
+      "id": "framing.whitespace-only-skipped",
+      "title": "a whitespace-only line is skipped in silence",
+      "input": "   \t \n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.invalid-json-skipped",
+      "title": "unparseable input gets no reply at all",
+      "input": "not json at all\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.truncated-json-skipped",
+      "title": "a truncated object is skipped, not refused",
+      "input": "{\"id\":1,\"method\":\"initialize\"\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.trailing-comma-skipped",
+      "title": "CPython's json rejects a trailing comma, so it is skipped",
+      "input": "{\"method\":\"initialize\",}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.trailing-data-skipped",
+      "title": "trailing data after a value is not valid JSON",
+      "input": "{\"id\":1,\"method\":\"initialize\"} {\"x\":1}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.no-trailing-newline",
+      "title": "a final line without a newline is still processed",
+      "input": "{\"id\":1,\"method\":\"initialize\"}",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.crlf-separated",
+      "title": "CRLF is one line break, not two",
+      "input": "{\"id\":1,\"method\":\"initialize\"}\r\n{\"id\":2,\"method\":\"tools/list\"}\r\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "framing.lone-cr-separated",
+      "title": "a lone CR ends a line under universal newlines",
+      "input": "{\"id\":1,\"method\":\"initialize\"}\r{\"id\":2,\"method\":\"initialize\"}\r",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "framing.leading-and-trailing-spaces",
+      "title": "surrounding spaces are stripped before parsing",
+      "input": "   {\"id\":1,\"method\":\"initialize\"}   \n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.tab-padding",
+      "title": "tabs are stripped too",
+      "input": "\t{\"id\":1,\"method\":\"initialize\"}\t\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.separator-padding",
+      "title": "U+001C is whitespace to str.strip() even though it is not Unicode White_Space",
+      "input": "\u001c{\"id\":1,\"method\":\"initialize\"}\u001f\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.nbsp-padding",
+      "title": "a non-breaking space is stripped",
+      "input": " {\"id\":1,\"method\":\"initialize\"} \n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.ideographic-space-padding",
+      "title": "U+3000 is stripped",
+      "input": "　{\"id\":1,\"method\":\"initialize\"}　\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.zero-width-space-is-not-whitespace",
+      "title": "U+200B is NOT whitespace to Python, so the line fails to parse and is skipped",
+      "input": "​{\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.mixed-valid-and-invalid",
+      "title": "a bad line between two good ones changes nothing else",
+      "input": "{\"id\":1,\"method\":\"initialize\"}\ngarbage\n\n{\"id\":2,\"method\":\"tools/list\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "tools": "@tools"
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 4
+      }
+    },
+    {
+      "id": "framing.escaped-newline-inside-a-string",
+      "title": "an escaped newline inside a JSON string is data, not a frame boundary",
+      "input": "{\"id\":\"a\\nb\",\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"body\":\"one\\ntwo\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": "a\nb",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "body": "one\ntwo"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.unicode-payload",
+      "title": "non-ASCII arguments survive by value",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"body\":\"caf\\u00e9 \\u2764 \\ud83d\\ude00\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "body": "café ❤ 😀"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.raw-unicode-payload",
+      "title": "raw non-ASCII bytes in the line work the same way",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_send\",\"arguments\":{\"body\":\"café\"}}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_send",
+            "arguments": {
+              "body": "café"
+            }
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.duplicate-keys-last-wins",
+      "title": "a repeated member takes its last value",
+      "input": "{\"id\":1,\"method\":\"tools/list\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      }
+    },
+    {
+      "id": "framing.three-replies-keep-request-order",
+      "title": "replies come back in request order",
+      "input": "{\"id\":1,\"method\":\"initialize\"}\n{\"id\":2,\"method\":\"tools/list\"}\n{\"id\":3,\"method\":\"nope\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+              "tools": "@tools"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {}
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 3
+      }
+    },
+    {
+      "id": "terminal.integer",
+      "title": "a parsed int ends the loop and the next frame is never processed",
+      "input": "5\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'int' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.float",
+      "title": "a parsed float ends the loop and the next frame is never processed",
+      "input": "1.5\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'float' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.string",
+      "title": "a parsed str ends the loop and the next frame is never processed",
+      "input": "\"text\"\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'str' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.list",
+      "title": "a parsed list ends the loop and the next frame is never processed",
+      "input": "[1,2]\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'list' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.empty-list",
+      "title": "a parsed list ends the loop and the next frame is never processed",
+      "input": "[]\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'list' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.true",
+      "title": "a parsed bool ends the loop and the next frame is never processed",
+      "input": "true\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'bool' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.false",
+      "title": "a parsed bool ends the loop and the next frame is never processed",
+      "input": "false\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'bool' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.null",
+      "title": "a parsed NoneType ends the loop and the next frame is never processed",
+      "input": "null\n{\"id\":\"after\",\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'NoneType' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      }
+    },
+    {
+      "id": "terminal.keeps-earlier-replies",
+      "title": "frames answered before the terminal line are kept; the ones after are not",
+      "input": "{\"id\":1,\"method\":\"initialize\"}\n\"boom\"\n{\"id\":2,\"method\":\"tools/list\"}\n{\"id\":3,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 2,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'str' object has no attribute 'get'"
+        },
+        "lines_total": 4
+      }
+    },
+    {
+      "id": "terminal.after-a-tool-call",
+      "title": "a terminal line after a tool call leaves the handler's work done and stops there",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_list\"}}\n42\n{\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"hub_read\"}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "first"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "first"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "hub_list",
+            "arguments": {}
+          }
+        ],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'int' object has no attribute 'get'"
+        },
+        "lines_total": 3
+      }
+    },
+    {
+      "id": "terminal.is-not-reached-through-a-blank-line",
+      "title": "blank and invalid lines before a terminal line are skipped normally first",
+      "input": "\ngarbage\n\"boom\"\n{\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'str' object has no attribute 'get'"
+        },
+        "lines_total": 4
+      }
+    },
+    {
+      "id": "obligation.id-integer-wider-than-64-bits",
+      "title": "a 23-digit id is echoed exactly by the source",
+      "input": "{\"id\":12345678901234567890123,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 12345678901234567890123,
+            "result": {
+              "protocolVersion": "2024-11-05",
+              "capabilities": {
+                "tools": {}
+              },
+              "serverInfo": {
+                "name": "mailhub",
+                "version": "1.0"
+              }
+            }
+          }
+        ],
+        "calls": [],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      },
+      "unimplemented": {
+        "rust": "numeric-domain.integer-wider-than-64-bits"
+      }
+    },
+    {
+      "id": "obligation.bare-nan-token-ends-the-loop",
+      "title": "a bare NaN token parses to a float, which is not an object and ends the loop",
+      "input": "NaN\n{\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'float' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      },
+      "unimplemented": {
+        "rust": "numeric-domain.bare-non-standard-tokens"
+      }
+    },
+    {
+      "id": "obligation.bare-infinity-token-ends-the-loop",
+      "title": "a bare Infinity token behaves the same way",
+      "input": "-Infinity\n{\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'float' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      },
+      "unimplemented": {
+        "rust": "numeric-domain.bare-non-standard-tokens"
+      }
+    },
+    {
+      "id": "obligation.lone-surrogate-escape-ends-the-loop",
+      "title": "a lone surrogate escape decodes to a str, which ends the loop",
+      "input": "\"\\ud800\"\n{\"id\":1,\"method\":\"initialize\"}\n",
+      "dispatch": [],
+      "expect": {
+        "frames": [],
+        "calls": [],
+        "outcome": "terminated",
+        "lines_unprocessed": 1,
+        "terminal": {
+          "kind": "AttributeError",
+          "message": "'str' object has no attribute 'get'"
+        },
+        "lines_total": 2
+      },
+      "unimplemented": {
+        "rust": "string-domain.lone-surrogate-escape"
+      }
+    },
+    {
+      "id": "obligation.non-ascii-name-inside-a-list",
+      "title": "repr() of a container holding a non-ASCII string reaches the handler",
+      "input": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":[\"caf\\u00e9\"]}}\n",
+      "dispatch": [
+        {
+          "kind": "text",
+          "text": "ok"
+        }
+      ],
+      "expect": {
+        "frames": [
+          {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ]
+            }
+          }
+        ],
+        "calls": [
+          {
+            "tool": "['café']",
+            "arguments": {}
+          }
+        ],
+        "outcome": "completed",
+        "lines_unprocessed": 0,
+        "lines_total": 1
+      },
+      "unimplemented": {
+        "rust": "repr-domain.non-ascii-inside-a-container"
+      }
+    }
+  ]
+}

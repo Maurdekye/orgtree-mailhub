@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import unittest
+import unittest.mock
 import warnings
 
 ROOT = Path(os.environ.get("MH01_REPO") or Path(__file__).resolve().parents[1])
@@ -52,6 +53,52 @@ class InventoryControls(unittest.TestCase):
 
     def test_unknown_source_rejected(self):
         self.assertTrue(inventory.check(self.frozen, self.files, [*self.files, "mailhub/new_transport.py"]))
+
+    # ── the MH02 preparation register ───────────────────────────────────────
+    # Four new controls, so the suite's denominator moves from 32 to 36. The
+    # register exists to make an unregistered source file a failure; these
+    # prove it still does that after being widened.
+
+    def test_every_mh02_preparation_path_is_registered_exactly(self):
+        """The ten preparation paths are accepted, and each is spelled out."""
+        self.assertEqual(10, len(inventory.MH02_ADDITIONS))
+        self.assertTrue(inventory.MH02_ADDITIONS <= inventory.ADDITIONS)
+        for path in inventory.MH02_ADDITIONS:
+            self.assertFalse(path.endswith("/") or "*" in path,
+                             "%r is a wildcard, not an exact path" % path)
+        self.assertEqual([], inventory.check(self.frozen, self.files,
+                                             [*self.files, *inventory.MH02_ADDITIONS]))
+
+    def test_an_unregistered_preparation_file_is_rejected(self):
+        """A new file inside the crate that nobody registered must be refused,
+        so `native/` never becomes an unreviewed dumping ground."""
+        for intruder in ("native/mailhub-protocol/src/transport.rs",
+                         "native/mailhub-protocol/build.rs",
+                         "native/mailhub-runtime/src/main.rs"):
+            self.assertTrue(
+                inventory.check(self.frozen, self.files,
+                                [*self.files, *inventory.MH02_ADDITIONS, intruder]),
+                "%r was admitted without being registered" % intruder)
+
+    def test_each_registered_preparation_path_is_load_bearing(self):
+        """Dropping any single entry from the register makes exactly that path
+        refused -- a prefix rule would make the entries interchangeable."""
+        for path in sorted(inventory.MH02_ADDITIONS):
+            narrowed = inventory.ADDITIONS - {path}
+            with unittest.mock.patch.object(inventory, "ADDITIONS", narrowed):
+                self.assertTrue(
+                    inventory.check(self.frozen, self.files,
+                                    [*self.files, *inventory.MH02_ADDITIONS]),
+                    "%r stayed admitted after being removed from the register" % path)
+
+    def test_the_preparation_paths_add_no_product_runtime_source(self):
+        """Registering an artifact is not the same as censusing product source.
+        None of the ten may appear in the frozen source denominator, and the
+        denominator itself must not move."""
+        censused = {row["path"] for row in self.frozen["files"]}
+        self.assertEqual(set(), censused & inventory.MH02_ADDITIONS)
+        self.assertEqual(26, len(censused))
+        self.assertEqual(inventory.BASE, self.frozen["source_commit"])
 
     def test_changed_contract_rejected(self):
         changed = dict(self.files)

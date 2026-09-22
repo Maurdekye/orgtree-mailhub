@@ -1,0 +1,851 @@
+//! The pinned mailhub MCP stdio envelope, reproduced against one exact source.
+//!
+//! The semantic reference is `hubtool.py`'s `serve()` function and its literal
+//! `TOOLS` declaration at product commit
+//! `6477321f89d2d2e1b9313e71e940c76c35b892fb`. Everything in this file is a
+//! statement about that source, not about MCP in general: where the source and
+//! a generic MCP reading disagree, the source wins and the disagreement is
+//! written down rather than normalised away.
+//!
+//! What this module does NOT do, by construction: no transport, no socket, no
+//! file, no database, no account, no credential, no clock, no identity, no
+//! PID, no listener, no registration, no process. It takes a `&str` of already
+//! received text and an injected [`Dispatcher`], and returns frames.
+//!
+//! The four behaviours that a generic MCP implementation gets wrong here:
+//!
+//! 1. A recognised method is answered even when `id` is absent or null — the
+//!    reply then carries `"id": null`. There is no notification suppression
+//!    for `initialize`, `tools/list` or `tools/call`.
+//! 2. An UNRECOGNISED method is answered only when `id` is neither missing nor
+//!    null, and the answer is `{}` — an empty result, never a JSON-RPC error
+//!    member. `id: 0` and `id: false` are answered; they are not `None`.
+//! 3. A blank line or a line that fails to parse as JSON is skipped in
+//!    silence. There is no parse-error reply.
+//! 4. A line that PARSES but is not a JSON object is terminal: the source
+//!    calls `.get` on it, the `AttributeError` escapes `serve()`, and every
+//!    later line is never processed. This is the one outcome that is neither
+//!    a reply nor a skip.
+//!
+//! Handler failures never become JSON-RPC errors either. They are turned into
+//! a JSON string INSIDE `result.content[0].text`, so the envelope still reads
+//! as success.
+
+use std::sync::OnceLock;
+
+use serde_json::{Map, Value};
+
+/// Product commit whose `serve()` and `TOOLS` this module reproduces.
+pub const SOURCE_COMMIT: &str = "6477321f89d2d2e1b9313e71e940c76c35b892fb";
+
+/// `initialize` metadata, verbatim from the pinned source.
+pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// `serverInfo.name`, verbatim from the pinned source.
+pub const SERVER_NAME: &str = "mailhub";
+/// `serverInfo.version`, verbatim from the pinned source.
+pub const SERVER_VERSION: &str = "1.0";
+
+/// The eight tool cards, in the source's declaration order, byte-derived from
+/// the pinned `TOOLS` literal by `ast.literal_eval` and re-serialised as JSON.
+/// Order is contractual: `tools/list` returns this list as it stands.
+pub const TOOLS_JSON: &str = r##"[
+  {
+    "name": "hub_register",
+    "description": "Join the mail hub as THIS SESSION. Choose a UNIQUE, semantically appropriate `name` that reflects this session's own context / directive / purpose (e.g. 'orgtree-redteam', 'terrain-pipeline') — every session has its own identity, and the name is the key. REMEMBER the name you chose: registering with it again later resumes the SAME address (<name>.<user>.<fingerprint>); a different name is a different identity. Immutable once minted. Returns your address and the roster — ⚠ if the result carries `resumed` and YOU did not register this name earlier, another session owns it: pick a different name.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "this session's self-chosen identity name — unique, purpose-describing, reused on every later register"
+        }
+      }
+    }
+  },
+  {
+    "name": "hub_list",
+    "description": "Everyone on your hubs — orgs and chats — with kind, presence and last_seen. On a multi-hub identity the rosters are MERGED, one row per slug, each row's `hubs` naming where it lives.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "hub_send",
+    "description": "Send mail to any hub client (org or chat) by its slug from hub_list. On a multi-hub identity the hub is resolved by roster (several hold the target → the local one wins; none → refused naming the hubs searched — never guessed).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "to",
+        "body"
+      ]
+    }
+  },
+  {
+    "name": "hub_fetch",
+    "description": "Download a mail attachment by its id (the listener and hub_read surface ids beside filenames). Saves into `dir` (default: the current directory) and returns the written path.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "dir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "hub_unregister",
+    "description": "The polite exit: remove this identity's row from every hub on its list (queued mail for you ages out on the hub's retention). Your local identity is KEPT — registering again later resumes the identical address.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "hub_read",
+    "description": "Fetch (and consume) any mail waiting for you right now — across ALL your hubs; each message carries `hub` so you know where to reply (acks go back to the hub each message came from automatically).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "hub_wait",
+    "description": "Wait up to `timeout` seconds (max 55) for new mail — polls every hub on your list (the window is split across them); each message carries `hub`; empty result on timeout.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "hub_hubs",
+    "description": "This identity's mailserver list. No args = show it. `add` joins another hub (registers there immediately; same address everywhere — the fingerprint derives from your uid, not the hub). `remove` drops one (its polling stops; the others' cursors are untouched). Addresses accept bare host / host:port (http + :7370 assumed).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "add": {
+          "type": "string"
+        },
+        "remove": {
+          "type": "string"
+        }
+      }
+    }
+  }
+]"##;
+
+fn tools_value() -> &'static Value {
+    static TOOLS: OnceLock<Value> = OnceLock::new();
+    TOOLS.get_or_init(|| {
+        serde_json::from_str(TOOLS_JSON).expect("embedded tool cards must be valid JSON")
+    })
+}
+
+/// The eight tool cards as a JSON array value.
+pub fn tools() -> &'static Value {
+    tools_value()
+}
+
+/// The tool names in declaration order.
+pub fn tool_names() -> Vec<&'static str> {
+    tools_value()
+        .as_array()
+        .expect("tool cards are an array")
+        .iter()
+        .map(|card| card["name"].as_str().expect("every card names a tool"))
+        .collect()
+}
+
+// ───────────────────────────────────────────────────────── the injected edge
+
+/// What the injected dispatcher did. The source's `dispatch` returns a string
+/// and may raise; those are the only three shapes `serve()` distinguishes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// `dispatch` returned this exact string.
+    Text(String),
+    /// `dispatch` raised `urllib.error.URLError`; the field is `e.reason`
+    /// stringified, which is what the source interpolates.
+    UrlError { reason: String },
+    /// `dispatch` raised any other `Exception`; the field is `str(e)`.
+    Exception { message: String },
+}
+
+/// One recorded call into the injected dispatcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Call {
+    /// The forwarded tool name, after the source's `str(...)` coercion.
+    pub tool: String,
+    /// The forwarded arguments, after the source's `dict(... or {})` coercion.
+    pub arguments: Map<String, Value>,
+}
+
+/// The synthetic handler boundary. No real handler is ever reachable from this
+/// crate: the only way a tool call produces anything is through this trait.
+pub trait Dispatcher {
+    fn dispatch(&mut self, tool: &str, arguments: &Map<String, Value>) -> DispatchOutcome;
+}
+
+/// A dispatcher that replays a queue of prepared outcomes and records what it
+/// was asked. Test-only; it holds no handle to anything outside itself.
+#[derive(Debug, Default)]
+pub struct ScriptedDispatcher {
+    queue: std::collections::VecDeque<DispatchOutcome>,
+    /// Every call the run made, in order.
+    pub calls: Vec<Call>,
+    /// Calls that arrived after the queue was empty — a harness fault, never
+    /// a product behaviour, so it is counted rather than papered over.
+    pub overruns: usize,
+}
+
+impl ScriptedDispatcher {
+    pub fn new<I: IntoIterator<Item = DispatchOutcome>>(outcomes: I) -> Self {
+        Self {
+            queue: outcomes.into_iter().collect(),
+            calls: Vec::new(),
+            overruns: 0,
+        }
+    }
+
+    /// Outcomes that were prepared and never consumed.
+    pub fn unused(&self) -> usize {
+        self.queue.len()
+    }
+}
+
+impl Dispatcher for ScriptedDispatcher {
+    fn dispatch(&mut self, tool: &str, arguments: &Map<String, Value>) -> DispatchOutcome {
+        self.calls.push(Call {
+            tool: tool.to_string(),
+            arguments: arguments.clone(),
+        });
+        match self.queue.pop_front() {
+            Some(outcome) => outcome,
+            None => {
+                self.overruns += 1;
+                DispatchOutcome::Exception {
+                    message: "scripted dispatcher exhausted".to_string(),
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────── the outcomes
+
+/// What one input line produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LineOutcome {
+    /// Blank after stripping, or not parseable as JSON: `continue`, no reply.
+    Skipped,
+    /// Parsed, recognised as an unanswerable frame: no reply, loop continues.
+    Silent,
+    /// One reply frame, without its terminating newline.
+    Reply(String),
+    /// `serve()` raised and the loop ended here.
+    Terminal { kind: String, message: String },
+}
+
+/// How a whole run ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// Every line was consumed and `serve()` returned normally.
+    Completed,
+    /// `serve()` raised; `lines_unprocessed` of the input never ran.
+    Terminated { kind: String, message: String },
+    /// This implementation cannot model the pinned source for that input, and
+    /// says so instead of guessing. A declared obligation, never a pass.
+    Unrepresentable { line_index: usize, detail: String },
+}
+
+/// The full record of one run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunReport {
+    /// Reply frames in emission order, each without its newline.
+    pub frames: Vec<String>,
+    /// Exactly what would have been written to the stream: every frame
+    /// followed by one `\n`, and nothing else.
+    pub raw: String,
+    /// Calls that reached the injected dispatcher, in order.
+    pub calls: Vec<Call>,
+    pub outcome: RunOutcome,
+    pub lines_total: usize,
+    pub lines_processed: usize,
+    pub lines_unprocessed: usize,
+}
+
+// ──────────────────────────────────────────────────── Python string handling
+
+/// Every code point for which CPython 3.13's `str.isspace()` is true, which is
+/// exactly the set `str.strip()` removes. Enumerated from the pinned test
+/// runtime (CPython 3.13.15) rather than assumed: Rust's `char::is_whitespace`
+/// follows the Unicode `White_Space` property and therefore does NOT include
+/// U+001C..U+001F, which Python strips.
+const PY_WHITESPACE: [char; 29] = [
+    '\u{9}', '\u{a}', '\u{b}', '\u{c}', '\u{d}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', '\u{20}',
+    '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
+    '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}',
+    '\u{202f}', '\u{205f}', '\u{3000}',
+];
+
+fn is_py_space(c: char) -> bool {
+    PY_WHITESPACE.contains(&c)
+}
+
+/// `str.strip()` with no argument, as CPython 3.13 performs it.
+pub fn python_strip(s: &str) -> &str {
+    s.trim_matches(is_py_space)
+}
+
+/// Split text the way an iterated `sys.stdin` does: `\n`, `\r\n` and a lone
+/// `\r` all end a line (universal newlines), and a final fragment with no
+/// terminator is still a line. The terminator itself is not returned, because
+/// the source strips it away immediately.
+pub fn universal_lines(input: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                out.push(&input[start..i]);
+                i += 1;
+                start = i;
+            }
+            b'\r' => {
+                out.push(&input[start..i]);
+                i += if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    2
+                } else {
+                    1
+                };
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < bytes.len() {
+        out.push(&input[start..]);
+    }
+    out
+}
+
+/// `json.dumps(value)` for a one-key error object, matching CPython's
+/// defaults: `", "`/`": "` separators and `ensure_ascii=True`.
+fn py_dumps_error(message: &str) -> String {
+    let mut out = String::from("{\"error\": ");
+    py_json_string(message, &mut out);
+    out.push('}');
+    out
+}
+
+/// CPython `json`'s ASCII string encoder.
+fn py_json_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let cp = c as u32;
+                if cp > 0xffff {
+                    let v = cp - 0x10000;
+                    out.push_str(&format!("\\u{:04x}", 0xd800 + (v >> 10)));
+                    out.push_str(&format!("\\u{:04x}", 0xdc00 + (v & 0x3ff)));
+                } else {
+                    out.push_str(&format!("\\u{:04x}", cp));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// CPython's `repr()` of a float, which is also its `str()`.
+fn python_float_repr(x: f64) -> String {
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { "-inf" } else { "inf" }.to_string();
+    }
+    // `{:e}` is Rust's shortest round-tripping form, which is the same digit
+    // string CPython's repr uses; only the layout rules differ.
+    let formatted = format!("{:e}", x);
+    let (mantissa, exponent) = formatted
+        .split_once('e')
+        .expect("Rust's LowerExp always emits an exponent");
+    let exponent: i32 = exponent.parse().expect("Rust emits a decimal exponent");
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
+    // value == 0.<digits> * 10^decpt
+    let decpt = exponent + 1;
+    let mut body = String::new();
+    if decpt <= -4 || decpt > 16 {
+        body.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            body.push('.');
+            body.push_str(&digits[1..]);
+        }
+        let e = decpt - 1;
+        body.push_str(&format!("e{}{:02}", if e < 0 { '-' } else { '+' }, e.abs()));
+    } else if decpt <= 0 {
+        body.push_str("0.");
+        for _ in 0..(-decpt) {
+            body.push('0');
+        }
+        body.push_str(&digits);
+    } else if decpt as usize >= digits.len() {
+        body.push_str(&digits);
+        for _ in 0..(decpt as usize - digits.len()) {
+            body.push('0');
+        }
+        body.push_str(".0");
+    } else {
+        body.push_str(&digits[..decpt as usize]);
+        body.push('.');
+        body.push_str(&digits[decpt as usize..]);
+    }
+    if negative {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+fn python_number(n: &serde_json::Number) -> String {
+    if let Some(i) = n.as_i64() {
+        return i.to_string();
+    }
+    if let Some(u) = n.as_u64() {
+        return u.to_string();
+    }
+    python_float_repr(n.as_f64().expect("a serde_json number is i64, u64 or f64"))
+}
+
+/// `str(value)` for a value that came out of `json.loads`.
+///
+/// `Err` means this crate will not guess: the source would produce a CPython
+/// `repr` this implementation does not reproduce, and the caller must surface
+/// that as an unimplemented obligation instead of inventing an answer.
+pub fn python_str(value: &Value) -> Result<String, String> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        other => python_repr(other),
+    }
+}
+
+/// `repr(value)` for a value that came out of `json.loads`, over the subset
+/// this crate reproduces exactly.
+pub fn python_repr(value: &Value) -> Result<String, String> {
+    match value {
+        Value::Null => Ok("None".to_string()),
+        Value::Bool(true) => Ok("True".to_string()),
+        Value::Bool(false) => Ok("False".to_string()),
+        Value::Number(n) => Ok(python_number(n)),
+        Value::String(s) => python_string_repr(s),
+        Value::Array(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                parts.push(python_repr(item)?);
+            }
+            Ok(format!("[{}]", parts.join(", ")))
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                return Ok("{}".to_string());
+            }
+            let mut parts = Vec::with_capacity(map.len());
+            for (key, item) in map {
+                parts.push(format!(
+                    "{}: {}",
+                    python_string_repr(key)?,
+                    python_repr(item)?
+                ));
+            }
+            Ok(format!("{{{}}}", parts.join(", ")))
+        }
+    }
+}
+
+/// CPython's `repr()` of a str, restricted to ASCII.
+///
+/// Deliberately refuses non-ASCII rather than approximating it: Python decides
+/// whether to escape a character by its Unicode category, and this crate does
+/// not carry a category table. A non-ASCII string is still fully supported
+/// wherever `str()` is what the source calls — only `repr()`, reached solely
+/// through a container, is bounded here.
+fn python_string_repr(s: &str) -> Result<String, String> {
+    if !s.is_ascii() {
+        return Err(format!(
+            "repr() of the non-ASCII string {s:?} depends on CPython's \
+             printability table, which this crate does not reproduce"
+        ));
+    }
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::new();
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    Ok(out)
+}
+
+/// Why `dict(...)` did not produce a mapping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DictFailure {
+    /// A CPython exception the source's `except Exception` arm catches. The
+    /// field is `str(e)`, which is the whole of what reaches the wire.
+    Caught(String),
+    /// An input this crate declines to model rather than guess at.
+    Unrepresentable(String),
+}
+
+/// Python truthiness for a value that came out of `json.loads`.
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i != 0
+            } else if let Some(u) = n.as_u64() {
+                u != 0
+            } else {
+                let f = n.as_f64().expect("a serde_json number is i64, u64 or f64");
+                // NaN is truthy in Python; only a zero magnitude is false.
+                f.is_nan() || f != 0.0
+            }
+        }
+        Value::String(s) => !s.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
+fn py_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if n.is_f64() {
+                "float"
+            } else {
+                "int"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// `dict(value)` over the subset this crate reproduces exactly.
+fn python_dict(value: &Value) -> Result<Map<String, Value>, DictFailure> {
+    match value {
+        Value::Object(map) => Ok(map.clone()),
+        Value::String(_) | Value::Array(_) => {
+            let elements: Vec<Value> = match value {
+                Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
+                Value::Array(items) => items.clone(),
+                _ => unreachable!(),
+            };
+            let mut out = Map::new();
+            for (index, element) in elements.iter().enumerate() {
+                let pair: Vec<Value> = match element {
+                    Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
+                    Value::Array(items) => items.clone(),
+                    // A dict iterates over its KEYS, so `dict([{ "a": 1, "b": 2 }])`
+                    // really does yield `{'a': 'b'}`.
+                    Value::Object(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
+                    // A number, a bool or None is not a sequence at all.
+                    _ => {
+                        // TypeError
+                        return Err(DictFailure::Caught(format!(
+                            "cannot convert dictionary update sequence element #{index} \
+                             to a sequence"
+                        )));
+                    }
+                };
+                if pair.len() != 2 {
+                    // ValueError
+                    return Err(DictFailure::Caught(format!(
+                        "dictionary update sequence element #{index} has length {}; \
+                         2 is required",
+                        pair.len()
+                    )));
+                }
+                match &pair[0] {
+                    Value::String(key) => {
+                        out.insert(key.clone(), pair[1].clone());
+                    }
+                    Value::Array(_) | Value::Object(_) => {
+                        // TypeError
+                        return Err(DictFailure::Caught(format!(
+                            "unhashable type: '{}'",
+                            py_type_name(&pair[0])
+                        )));
+                    }
+                    other => {
+                        return Err(DictFailure::Unrepresentable(format!(
+                            "a {} dictionary key is legal in Python but cannot be carried \
+                             by a JSON object, so this crate refuses it rather than \
+                             coercing it",
+                            py_type_name(other)
+                        )))
+                    }
+                }
+            }
+            Ok(out)
+        }
+        // TypeError
+        other => Err(DictFailure::Caught(format!(
+            "'{}' object is not iterable",
+            py_type_name(other)
+        ))),
+    }
+}
+
+// ────────────────────────────────────────────────────────────── the envelope
+
+fn reply_frame(id: &Value, result: Value) -> String {
+    // Emitted with serde_json, then compared by VALUE. The source's exact
+    // spacing and key order are `json.dumps` defaults, not product
+    // requirements, and the profile says so explicitly.
+    let mut envelope = Map::new();
+    envelope.insert("jsonrpc".to_string(), Value::String("2.0".to_string()));
+    envelope.insert("id".to_string(), id.clone());
+    envelope.insert("result".to_string(), result);
+    serde_json::to_string(&Value::Object(envelope)).expect("a JSON value always serialises")
+}
+
+fn initialize_result() -> Value {
+    let mut server_info = Map::new();
+    server_info.insert("name".to_string(), Value::String(SERVER_NAME.to_string()));
+    server_info.insert(
+        "version".to_string(),
+        Value::String(SERVER_VERSION.to_string()),
+    );
+    let mut capabilities = Map::new();
+    capabilities.insert("tools".to_string(), Value::Object(Map::new()));
+    let mut result = Map::new();
+    result.insert(
+        "protocolVersion".to_string(),
+        Value::String(PROTOCOL_VERSION.to_string()),
+    );
+    result.insert("capabilities".to_string(), Value::Object(capabilities));
+    result.insert("serverInfo".to_string(), Value::Object(server_info));
+    Value::Object(result)
+}
+
+fn content_result(text: String) -> Value {
+    let mut item = Map::new();
+    item.insert("type".to_string(), Value::String("text".to_string()));
+    item.insert("text".to_string(), Value::String(text));
+    let mut result = Map::new();
+    result.insert(
+        "content".to_string(),
+        Value::Array(vec![Value::Object(item)]),
+    );
+    Value::Object(result)
+}
+
+/// Process one already-received line exactly as the pinned `serve()` loop
+/// would. `Err` is an input this crate declines to model.
+pub fn process_line<D: Dispatcher + ?Sized>(
+    line: &str,
+    dispatcher: &mut D,
+) -> Result<LineOutcome, String> {
+    let stripped = python_strip(line);
+    if stripped.is_empty() {
+        return Ok(LineOutcome::Skipped);
+    }
+    let message: Value = match serde_json::from_str(stripped) {
+        Ok(value) => value,
+        // `except ValueError: continue`. Note the standing obligation: CPython
+        // also accepts the bare tokens NaN/Infinity/-Infinity and integers
+        // wider than 64 bits, which serde_json rejects or narrows. The profile
+        // carries those as declared unimplemented obligations rather than
+        // letting this arm absorb them.
+        Err(_) => return Ok(LineOutcome::Skipped),
+    };
+    let object = match &message {
+        Value::Object(map) => map,
+        other => {
+            // `msg.get(...)` on a non-dict raises AttributeError, and nothing
+            // in serve() catches it: the loop ends here.
+            return Ok(LineOutcome::Terminal {
+                kind: "AttributeError".to_string(),
+                message: format!("'{}' object has no attribute 'get'", py_type_name(other)),
+            });
+        }
+    };
+    let method = object.get("method");
+    let id = object.get("id").cloned().unwrap_or(Value::Null);
+    let method_name = method.and_then(|m| m.as_str());
+
+    match method_name {
+        Some("initialize") => Ok(LineOutcome::Reply(reply_frame(&id, initialize_result()))),
+        Some("tools/list") => {
+            let mut result = Map::new();
+            result.insert("tools".to_string(), tools_value().clone());
+            Ok(LineOutcome::Reply(reply_frame(&id, Value::Object(result))))
+        }
+        Some("tools/call") => {
+            let params = object.get("params").cloned().unwrap_or(Value::Null);
+            let params = if python_truthy(&params) {
+                params
+            } else {
+                Value::Object(Map::new())
+            };
+            let text = call_text(&params, dispatcher)?;
+            Ok(LineOutcome::Reply(reply_frame(&id, content_result(text))))
+        }
+        // Every other method, including a non-string one: answered with an
+        // empty result only when the id is neither missing nor null.
+        _ => {
+            if id.is_null() {
+                Ok(LineOutcome::Silent)
+            } else {
+                Ok(LineOutcome::Reply(reply_frame(
+                    &id,
+                    Value::Object(Map::new()),
+                )))
+            }
+        }
+    }
+}
+
+/// The body of the source's `try:` around `dispatch`, including the two
+/// `except` arms. `Err` is an input this crate declines to model.
+fn call_text<D: Dispatcher + ?Sized>(params: &Value, dispatcher: &mut D) -> Result<String, String> {
+    // `p.get("name")` — an AttributeError here IS inside the try, so it
+    // becomes an error string rather than ending the loop.
+    let params = match params {
+        Value::Object(map) => map,
+        other => {
+            return Ok(py_dumps_error(&format!(
+                "'{}' object has no attribute 'get'",
+                py_type_name(other)
+            )))
+        }
+    };
+    let name = params.get("name").cloned().unwrap_or(Value::Null);
+    let tool = python_str(&name)?;
+    let raw_arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let arguments = if python_truthy(&raw_arguments) {
+        match python_dict(&raw_arguments) {
+            Ok(map) => map,
+            Err(DictFailure::Caught(message)) => return Ok(py_dumps_error(&message)),
+            Err(DictFailure::Unrepresentable(why)) => return Err(why),
+        }
+    } else {
+        Map::new()
+    };
+    Ok(match dispatcher.dispatch(&tool, &arguments) {
+        DispatchOutcome::Text(text) => text,
+        DispatchOutcome::UrlError { reason } => {
+            py_dumps_error(&format!("hub unreachable: {reason}"))
+        }
+        DispatchOutcome::Exception { message } => py_dumps_error(&message),
+    })
+}
+
+/// Run a whole stream of already-received text through the envelope.
+pub fn run<D: Dispatcher + ?Sized>(input: &str, dispatcher: &mut D) -> RunReport {
+    let lines = universal_lines(input);
+    let lines_total = lines.len();
+    let mut frames: Vec<String> = Vec::new();
+    let mut raw = String::new();
+    let mut outcome = RunOutcome::Completed;
+    let mut processed = 0usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        match process_line(line, dispatcher) {
+            Ok(LineOutcome::Skipped) | Ok(LineOutcome::Silent) => processed += 1,
+            Ok(LineOutcome::Reply(frame)) => {
+                processed += 1;
+                raw.push_str(&frame);
+                raw.push('\n');
+                frames.push(frame);
+            }
+            Ok(LineOutcome::Terminal { kind, message }) => {
+                processed += 1;
+                outcome = RunOutcome::Terminated { kind, message };
+                break;
+            }
+            Err(detail) => {
+                outcome = RunOutcome::Unrepresentable {
+                    line_index: index,
+                    detail,
+                };
+                break;
+            }
+        }
+    }
+
+    RunReport {
+        frames,
+        raw,
+        calls: Vec::new(),
+        outcome,
+        lines_total,
+        lines_processed: processed,
+        lines_unprocessed: lines_total - processed,
+    }
+}
+
+/// Run a stream against a [`ScriptedDispatcher`] and fold its recorded calls
+/// into the report. This is the entry point the test driver uses.
+pub fn run_scripted(
+    input: &str,
+    outcomes: Vec<DispatchOutcome>,
+) -> (RunReport, ScriptedDispatcher) {
+    let mut dispatcher = ScriptedDispatcher::new(outcomes);
+    let mut report = run(input, &mut dispatcher);
+    report.calls = dispatcher.calls.clone();
+    (report, dispatcher)
+}

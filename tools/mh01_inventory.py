@@ -16,9 +16,35 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "6e856eec8ccfbcf8d16451123903b9d2ce16450b"
 OUTPUT = "docs/mh01-source-inventory.json"
-ADDITIONS = {OUTPUT, "docs/mh01-contract.md", "tools/mh01_inventory.py",
-             "tests/mh01_contract.py", "tests/test_mh01_inventory.py",
-             "tests/fixtures/mh01-wire.json"}
+MH01_ADDITIONS = {OUTPUT, "docs/mh01-contract.md", "tools/mh01_inventory.py",
+                  "tests/mh01_contract.py", "tests/test_mh01_inventory.py",
+                  "tests/fixtures/mh01-wire.json"}
+
+# MH02 protocol preparation: an isolated Rust library for the MCP stdio
+# envelope, its neutral profile and its shared runner. None of these is product
+# runtime source -- there is no launcher, listener, packaging or workspace entry
+# for any of them -- so they are registered here as artifacts rather than being
+# added to the censused source denominator.
+#
+# EVERY PATH IS SPELLED OUT, ON PURPOSE. A `native/` prefix rule would admit any
+# future file under that directory without a reviewer ever seeing it, and the
+# whole value of this register is that an unregistered source file is REFUSED.
+# Adding a file to that crate means adding its exact path here, which is a
+# reviewable line in a diff.
+MH02_ADDITIONS = {
+    "native/mailhub-protocol/Cargo.toml",
+    "native/mailhub-protocol/Cargo.lock",
+    "native/mailhub-protocol/.gitignore",
+    "native/mailhub-protocol/src/lib.rs",
+    "native/mailhub-protocol/src/envelope.rs",
+    "native/mailhub-protocol/tests/envelope_contract.rs",
+    "native/mailhub-protocol/examples/envelope_probe.rs",
+    "tests/fixtures/mh02-mcp-envelope.json",
+    "tests/mh02_mcp_contract.py",
+    "docs/mh02-protocol-prep.md",
+}
+
+ADDITIONS = MH01_ADDITIONS | MH02_ADDITIONS
 
 def git(*args):
     return subprocess.check_output(["git", "-C", str(ROOT), *args])

@@ -1,0 +1,32 @@
+# Isolated MH02 protocol-preparation crate.
+#
+# This is a LIBRARY ONLY. It has no binary target, is not a member of any
+# workspace, is not referenced by a product launcher and is not packaged. It
+# performs no transport, filesystem, database, account, credential, clock,
+# identity, process or listener work; the only executable it carries is a
+# test-only example driver that speaks a job protocol over inherited pipes.
+[package]
+name = "mailhub-protocol"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.71"
+license = "MIT"
+publish = false
+description = "MH02 preparation: the pinned mailhub MCP stdio envelope, with an injected dispatcher."
+
+# Deliberately empty: this crate must not be pulled into a parent workspace.
+[workspace]
+
+[lib]
+name = "mailhub_protocol"
+path = "src/lib.rs"
+
+[[example]]
+name = "envelope_probe"
+path = "examples/envelope_probe.rs"
+
+[dependencies]
+# A maintained JSON implementation, not a handwritten parser. Default features
+# only: `arbitrary_precision` is deliberately NOT enabled, because it would
+# change the numeric domain this slice is characterising rather than record it.
+serde_json = "1.0.150"
