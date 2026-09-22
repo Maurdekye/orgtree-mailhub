@@ -29,7 +29,10 @@
 //! can prove, against a real process rather than a hand-written receipt, that
 //! a driver which emits perfectly good observations and THEN fails cannot be
 //! collected as a success. It is reachable only from a job on the driver's own
-//! stdin, changes no envelope behaviour, and calls nothing in `std::process`.
+//! stdin and changes no envelope behaviour. It calls no function in
+//! `std::process`: the only name it takes from there is the `ExitCode` TYPE
+//! that `main` returns, which is the ordinary way a Rust program reports its
+//! own status — it starts nothing and terminates nothing.
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
