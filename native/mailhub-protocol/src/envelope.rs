@@ -71,6 +71,28 @@ pub const SERVER_VERSION: &str = "1.0";
 /// `except ValueError: continue`.
 pub const MAX_NESTING_DEPTH: usize = 256;
 
+/// How many decimal DIGITS an integer literal may carry.
+///
+/// CPython's integers are unbounded, but converting one to or from a decimal
+/// STRING is not: since 3.11 the interpreter refuses a conversion longer than
+/// `sys.get_int_max_str_digits()` and raises `ValueError`. The pinned
+/// verification interpreter, CPython 3.13.15, reports both the live and the
+/// default limit as 4300, and `json.loads` of a 4301-digit literal raises
+/// there — which the source's `except ValueError: continue` turns into a
+/// SILENT SKIP.
+///
+/// So this bound is PARITY, not a divergence, and it is deliberately the same
+/// number rather than a smaller invented cap: at 4300 digits both sides decode
+/// the integer exactly, and at 4301 both sides skip the line. A decoder that
+/// accepted 4301 digits would answer a request the pinned source refuses to
+/// answer, which is a protocol change in the direction that is hardest to see.
+///
+/// An interpreter configured with a different limit is an explicit
+/// QUALIFICATION MISMATCH: the shared profile asserts the oracle's live value
+/// before it compares anything, and fails rather than quietly re-deriving the
+/// expectation from whatever interpreter happens to be running.
+pub const MAX_INT_STR_DIGITS: usize = 4300;
+
 /// The eight tool cards, in the source's declaration order, byte-derived from
 /// the pinned `TOOLS` literal by `ast.literal_eval` and re-serialised as JSON.
 /// Order is contractual: `tools/list` returns this list as it stands.
@@ -196,11 +218,8 @@ pub enum PyValue {
     None,
     /// JSON `true`/`false`, CPython `bool`.
     Bool(bool),
-    /// A JSON integer literal, CPython `int`. Held as `i128` so the whole of
-    /// serde_json's `i64`/`u64` range is exact; integers wider than that are
-    /// still a declared obligation, because the decoder hands them over as
-    /// floats before this type ever sees them.
-    Int(i128),
+    /// A JSON integer literal, CPython `int`, held EXACTLY — see [`PyInt`].
+    Int(PyInt),
     /// A JSON number written with a fraction or an exponent, CPython `float`.
     Float(f64),
     /// CPython `str`.
@@ -210,6 +229,97 @@ pub enum PyValue {
     /// CPython `dict`, in insertion order.
     Dict(PyDict),
 }
+
+/// A CPython `int`, held exactly.
+///
+/// CPython's integers are unbounded and a machine word is not, so the value is
+/// kept as its CANONICAL decimal text: an optional `-`, then decimal digits
+/// with no leading zero, and `"0"` for zero. That is exactly the spelling
+/// CPython's own `str()` of the integer produces, so [`py_dumps`] and
+/// [`python_repr`] write the text straight out and cannot round, truncate or
+/// re-spell the value on the way. Because the form is canonical, two `PyInt`s
+/// are equal exactly when the integers they denote are.
+///
+/// Two things this type exists to make impossible:
+///
+/// * no integer ever transits `f64`. `12345678901234567890123` and
+///   `12345678901234567890124` are distinct here, where the nearest `f64` is
+///   one value for both;
+/// * no integer is ever written to the wire as a QUOTED string. The decimal
+///   text is an internal representation; on the wire it is a bare JSON number
+///   token, which is what the pinned source emits.
+///
+/// The width a literal may have on the way IN is bounded by
+/// [`MAX_INT_STR_DIGITS`], which mirrors the pinned interpreter rather than
+/// this crate's own convenience.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PyInt {
+    decimal: String,
+}
+
+impl PyInt {
+    /// The canonical decimal text — CPython's `str()` of the integer.
+    pub fn as_decimal(&self) -> &str {
+        &self.decimal
+    }
+
+    /// Whether the value is zero. `-0` canonicalises to `0`, exactly as
+    /// CPython's decoder gives one `int` for both spellings.
+    pub fn is_zero(&self) -> bool {
+        self.decimal == "0"
+    }
+
+    /// Whether the value is negative.
+    pub fn is_negative(&self) -> bool {
+        self.decimal.starts_with('-')
+    }
+
+    /// How many decimal digits the value has, ignoring the sign. This is the
+    /// count CPython's `sys.get_int_max_str_digits()` limit is measured in.
+    pub fn digits(&self) -> usize {
+        self.decimal.len() - usize::from(self.is_negative())
+    }
+
+    /// The value as an `i128`, or `None` when it does not fit.
+    ///
+    /// Nothing in the envelope needs this — the envelope only ever echoes,
+    /// prints and forwards integers, and all three are exact on the text. It
+    /// exists for a caller that genuinely wants a machine integer, such as the
+    /// test-only driver reading its own exit code out of a job.
+    pub fn to_i128(&self) -> Option<i128> {
+        self.decimal.parse().ok()
+    }
+
+    /// Build from text that is ALREADY canonical. Private on purpose: every
+    /// public route in is either a machine integer or [`number_from_token`],
+    /// and both canonicalise.
+    fn from_canonical(decimal: String) -> Self {
+        PyInt { decimal }
+    }
+}
+
+impl fmt::Display for PyInt {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str(&self.decimal)
+    }
+}
+
+macro_rules! py_int_from_machine_integer {
+    ($($type:ty),* $(,)?) => {
+        $(
+            impl From<$type> for PyInt {
+                /// Rust's own decimal formatting of a machine integer is
+                /// already canonical: no leading zero, `-` for negatives and
+                /// `0` for zero.
+                fn from(value: $type) -> PyInt {
+                    PyInt { decimal: value.to_string() }
+                }
+            }
+        )*
+    };
+}
+
+py_int_from_machine_integer!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
 
 /// An insertion-ordered string-keyed mapping with CPython's duplicate-key
 /// rule: assigning to an existing key REPLACES its value and LEAVES its
@@ -259,6 +369,11 @@ impl PyDict {
 }
 
 impl PyValue {
+    /// A CPython `int` from a machine integer.
+    pub fn int<T: Into<PyInt>>(value: T) -> PyValue {
+        PyValue::Int(value.into())
+    }
+
     fn as_str(&self) -> Option<&str> {
         match self {
             PyValue::Str(s) => Some(s.as_str()),
@@ -332,13 +447,19 @@ pub enum DecodeError {
     /// Read this arm precisely. It is NOT a proof that CPython's `json` would
     /// have rejected the same text: it carries every parser failure other
     /// than the depth bound below, and serde_json rejects some input CPython
-    /// accepts. The four known ones — the bare tokens `NaN`/`Infinity`, a
-    /// lone surrogate escape, an integer wider than 64 bits, and a literal
-    /// whose exponent overflows such as `1e999` — are recorded as NAMED
-    /// obligations in the shared profile and exercised from both sides, so
-    /// they are visible rather than hidden. What this arm cannot do is
-    /// promise that no FURTHER such input exists; only the ones written down
-    /// are accounted for.
+    /// accepts. The three known ones — the bare tokens `NaN`/`Infinity`, a
+    /// lone surrogate escape, and a literal whose exponent overflows such as
+    /// `1e999` — are recorded as NAMED obligations in the shared profile and
+    /// exercised from both sides, so they are visible rather than hidden.
+    /// What this arm cannot do is promise that no FURTHER such input exists;
+    /// only the ones written down are accounted for.
+    ///
+    /// It also carries one refusal that is PARITY rather than a divergence: an
+    /// integer literal with more than [`MAX_INT_STR_DIGITS`] decimal digits.
+    /// CPython's `int()` raises `ValueError` there, the source's
+    /// `except ValueError: continue` skips the line, and this arm IS that
+    /// skip. Naming it as a refusal would be wrong — it would make the two
+    /// implementations look different on an input they answer identically.
     Malformed(String),
     /// CPython's `json` would have SUCCEEDED and this module declines to
     /// model the result. It must never reach the skip arm, because that would
@@ -395,7 +516,7 @@ fn parse_json(text: &str) -> Result<PyValue, DecodeError> {
         Ok(value) => Ok(value),
         Err(error) if too_deep.get() => Err(DecodeError::Unrepresentable(Refusal::new(
             Refusal::NESTING_DEPTH_EXCEEDED,
-            one_field("limit", PyValue::Int(MAX_NESTING_DEPTH as i128)),
+            one_field("limit", PyValue::int(MAX_NESTING_DEPTH)),
             format!(
                 "the input nests more than {MAX_NESTING_DEPTH} containers deep; CPython's \
                  decoder accepts it and this module states a shallower bound rather than \
@@ -492,6 +613,219 @@ fn negative_zero_integer_rewrite(text: &str) -> Option<String> {
     // Only an ASCII `-` was ever removed, so the result is still valid UTF-8.
     Some(String::from_utf8(out).expect("only an ASCII byte was dropped"))
 }
+/// The key serde_json hands a NUMBER through when `arbitrary_precision` is on.
+///
+/// That feature is how this crate sees a wide integer's exact digits. With it,
+/// a literal that fits `i64`/`u64` still arrives at `visit_i64`/`visit_u64`
+/// unchanged, and everything else — every integer wider than a machine word,
+/// and every float — arrives as a ONE-ENTRY MAP under this key whose value is
+/// the raw lexeme the parser just scanned. Nothing is rounded on the way,
+/// because nothing has been converted yet.
+///
+/// A real JSON document may of course carry an object with that very key, and
+/// it must not be mistaken for a number. THREE things have to hold together
+/// before a map is read as one, and the first is the load-bearing one:
+///
+/// 1. the value arrives through `visit_string`, i.e. as an OWNED `String`.
+///    serde_json's own parser never calls `visit_string` for a document
+///    string: `StrRead` and `SliceRead` hand out a borrowed or copied `&str`
+///    through `visit_borrowed_str`/`visit_str`, and `IoRead` calls
+///    `visit_str`. Only the private `String` deserializer that carries the
+///    number payload hands over ownership;
+/// 2. the map holds exactly that one entry;
+/// 3. the text is one complete JSON number token.
+///
+/// If any of them fails the entry is kept as an ordinary key with an ordinary
+/// string value and the map is finished as the mapping it is — nothing is
+/// lost, because the raw text is still in hand either way. The profile
+/// exercises that path directly with a user object built to look like the
+/// marker.
+const SERDE_JSON_NUMBER_TOKEN: &str = "$serde_json::private::Number";
+
+/// What one lexed JSON number token denotes.
+enum NumberFromToken {
+    /// A CPython `int`, exactly.
+    Int(PyInt),
+    /// A CPython `float`.
+    Float(f64),
+    /// A well-formed integer literal with more than [`MAX_INT_STR_DIGITS`]
+    /// decimal digits. CPython raises `ValueError` there and the source skips
+    /// the line, so this must reach the caller as an ordinary parse failure —
+    /// the silent skip — and never as a value or as a named refusal.
+    TooManyDigits(usize),
+    /// A finite literal whose exponent overflows `f64`, such as `1e999`.
+    /// CPython returns `inf`; this crate declines, and that difference is a
+    /// declared obligation of its own rather than something to close here.
+    OutOfRange,
+    /// Not a JSON number token at all.
+    NotANumber,
+}
+
+/// Is `token` one complete JSON number literal, and does it carry a fraction
+/// or an exponent?
+///
+/// `Some(false)` is an integer, `Some(true)` a float, `None` not a number.
+///
+/// This is a VALIDATOR for text the parser has already lexed, not a second
+/// parser: it reads no document, consumes no input and decides nothing about
+/// syntax. It exists so a string arriving through the private number map can
+/// be told apart from an ordinary object that happens to use the same key,
+/// and so this crate does not depend on serde_json's internal spelling of the
+/// lexeme it hands back.
+fn classify_json_number(token: &str) -> Option<bool> {
+    let bytes = token.as_bytes();
+    let mut index = 0usize;
+    let digit = |byte: Option<&u8>| matches!(byte, Some(b'0'..=b'9'));
+    if bytes.first() == Some(&b'-') {
+        index += 1;
+    }
+    match bytes.get(index) {
+        // JSON allows exactly one leading zero, and only on its own.
+        Some(b'0') => {
+            index += 1;
+            if digit(bytes.get(index)) {
+                return None;
+            }
+        }
+        Some(b'1'..=b'9') => {
+            while digit(bytes.get(index)) {
+                index += 1;
+            }
+        }
+        _ => return None,
+    }
+    let mut is_float = false;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while digit(bytes.get(index)) {
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
+        is_float = true;
+    }
+    if matches!(bytes.get(index), Some(b'e') | Some(b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+') | Some(b'-')) {
+            index += 1;
+        }
+        let start = index;
+        while digit(bytes.get(index)) {
+            index += 1;
+        }
+        if index == start {
+            return None;
+        }
+        is_float = true;
+    }
+    if index != bytes.len() {
+        return None;
+    }
+    Some(is_float)
+}
+
+/// Turn one lexed JSON number token into the CPython value it denotes.
+fn number_from_token(token: &str) -> NumberFromToken {
+    let Some(is_float) = classify_json_number(token) else {
+        return NumberFromToken::NotANumber;
+    };
+    if is_float {
+        // Rust's `f64` parser is correctly rounded, as CPython's `float()` is,
+        // so the two agree on every finite literal. An overflowing exponent
+        // saturates to an infinity here; CPython returns that infinity and
+        // this crate declines it, which is the standing obligation.
+        return match token.parse::<f64>() {
+            Ok(value) if value.is_finite() => NumberFromToken::Float(value),
+            _ => NumberFromToken::OutOfRange,
+        };
+    }
+    let digits = token.len() - usize::from(token.starts_with('-'));
+    if digits > MAX_INT_STR_DIGITS {
+        return NumberFromToken::TooManyDigits(digits);
+    }
+    // JSON forbids a leading zero, so `-0` is the one spelling that is not
+    // already canonical — and CPython decodes it to the `int` 0.
+    let canonical = if token == "-0" { "0" } else { token };
+    NumberFromToken::Int(PyInt::from_canonical(canonical.to_string()))
+}
+
+/// One value that may turn out to be serde_json's private number payload.
+enum MaybeNumber {
+    /// An OWNED string. serde_json's JSON parser never produces one for a
+    /// document string, so this came from the private number deserializer.
+    OwnedText(String),
+    /// An ordinary decoded value.
+    Value(PyValue),
+}
+
+/// The seed used for the value under a key that spells
+/// [`SERDE_JSON_NUMBER_TOKEN`]. Everything except an owned string is decoded
+/// exactly as any other value would be, one nesting level down, so an ordinary
+/// object using that key is still bounded by [`MAX_NESTING_DEPTH`].
+struct MaybeNumberSeed<'a> {
+    inner: PyValueSeed<'a>,
+}
+
+impl<'de> DeserializeSeed<'de> for MaybeNumberSeed<'_> {
+    type Value = MaybeNumber;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<MaybeNumber, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for MaybeNumberSeed<'_> {
+    type Value = MaybeNumber;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a JSON value, or serde_json's private number payload")
+    }
+
+    /// THE discriminator. See [`SERDE_JSON_NUMBER_TOKEN`].
+    fn visit_string<E: serde_core::de::Error>(self, value: String) -> Result<MaybeNumber, E> {
+        Ok(MaybeNumber::OwnedText(value))
+    }
+
+    fn visit_unit<E: serde_core::de::Error>(self) -> Result<MaybeNumber, E> {
+        self.inner.visit_unit().map(MaybeNumber::Value)
+    }
+
+    fn visit_none<E: serde_core::de::Error>(self) -> Result<MaybeNumber, E> {
+        self.inner.visit_none().map(MaybeNumber::Value)
+    }
+
+    fn visit_bool<E: serde_core::de::Error>(self, value: bool) -> Result<MaybeNumber, E> {
+        self.inner.visit_bool(value).map(MaybeNumber::Value)
+    }
+
+    fn visit_i64<E: serde_core::de::Error>(self, value: i64) -> Result<MaybeNumber, E> {
+        self.inner.visit_i64(value).map(MaybeNumber::Value)
+    }
+
+    fn visit_u64<E: serde_core::de::Error>(self, value: u64) -> Result<MaybeNumber, E> {
+        self.inner.visit_u64(value).map(MaybeNumber::Value)
+    }
+
+    fn visit_f64<E: serde_core::de::Error>(self, value: f64) -> Result<MaybeNumber, E> {
+        self.inner.visit_f64(value).map(MaybeNumber::Value)
+    }
+
+    fn visit_str<E: serde_core::de::Error>(self, value: &str) -> Result<MaybeNumber, E> {
+        self.inner.visit_str(value).map(MaybeNumber::Value)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, access: A) -> Result<MaybeNumber, A::Error> {
+        self.inner.visit_seq(access).map(MaybeNumber::Value)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, access: A) -> Result<MaybeNumber, A::Error> {
+        self.inner.visit_map(access).map(MaybeNumber::Value)
+    }
+}
+
+#[derive(Clone, Copy)]
 struct PyValueSeed<'a> {
     depth: usize,
     too_deep: &'a std::cell::Cell<bool>,
@@ -539,11 +873,11 @@ impl<'de> Visitor<'de> for PyValueSeed<'_> {
     }
 
     fn visit_i64<E>(self, value: i64) -> Result<PyValue, E> {
-        Ok(PyValue::Int(i128::from(value)))
+        Ok(PyValue::int(value))
     }
 
     fn visit_u64<E>(self, value: u64) -> Result<PyValue, E> {
-        Ok(PyValue::Int(i128::from(value)))
+        Ok(PyValue::int(value))
     }
 
     fn visit_f64<E>(self, value: f64) -> Result<PyValue, E> {
@@ -570,10 +904,69 @@ impl<'de> Visitor<'de> for PyValueSeed<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<PyValue, A::Error> {
+        // The FIRST key is read BEFORE the depth test, and the ordering is
+        // load-bearing. With serde_json's `arbitrary_precision` a NUMBER
+        // arrives as a one-entry map (see [`SERDE_JSON_NUMBER_TOKEN`]), and a
+        // number is a SCALAR: charging it a nesting level would refuse a wide
+        // integer sitting at the bound as though it were a container, which is
+        // a depth-bound answer given to an input that never reached the bound.
+        let first_key = access.next_key::<String>()?;
+        let mut first_value: Option<PyValue> = None;
+        let mut second_key: Option<String> = None;
+
+        if first_key.as_deref() == Some(SERDE_JSON_NUMBER_TOKEN) {
+            // The seed sits one level down, so a genuine container under this
+            // key is still bounded exactly as it would be under any other.
+            match access.next_value_seed(MaybeNumberSeed {
+                inner: self.inner(),
+            })? {
+                MaybeNumber::Value(value) => first_value = Some(value),
+                MaybeNumber::OwnedText(raw) => {
+                    second_key = access.next_key::<String>()?;
+                    if second_key.is_none() {
+                        match number_from_token(&raw) {
+                            NumberFromToken::Int(value) => return Ok(PyValue::Int(value)),
+                            NumberFromToken::Float(value) => return Ok(PyValue::Float(value)),
+                            NumberFromToken::TooManyDigits(digits) => {
+                                return Err(serde_core::de::Error::custom(format!(
+                                    "integer literal has {digits} decimal digits; the pinned \
+                                     CPython decoder raises ValueError past \
+                                     {MAX_INT_STR_DIGITS}, and the source skips such a line"
+                                )))
+                            }
+                            NumberFromToken::OutOfRange => {
+                                return Err(serde_core::de::Error::custom(format!(
+                                    "number out of range: the literal {raw} has no finite \
+                                     f64 value"
+                                )))
+                            }
+                            // Not the parser's payload after all: an ordinary
+                            // object whose first value is an owned string.
+                            NumberFromToken::NotANumber => {}
+                        }
+                    }
+                    first_value = Some(PyValue::Str(raw));
+                }
+            }
+        }
+
+        // Everything from here down is an ordinary mapping, and a mapping
+        // answers for its own nesting level.
         if self.depth >= MAX_NESTING_DEPTH {
             return Err(self.too_deep());
         }
         let mut dict = PyDict::new();
+        if let Some(key) = first_key {
+            let value = match first_value {
+                Some(value) => value,
+                None => access.next_value_seed(self.inner())?,
+            };
+            dict.insert(key, value);
+        }
+        if let Some(key) = second_key {
+            let value = access.next_value_seed(self.inner())?;
+            dict.insert(key, value);
+        }
         while let Some(key) = access.next_key::<String>()? {
             let value = access.next_value_seed(self.inner())?;
             dict.insert(key, value);
@@ -805,7 +1198,7 @@ fn py_dumps_into(value: &PyValue, out: &mut String) {
         PyValue::None => out.push_str("null"),
         PyValue::Bool(true) => out.push_str("true"),
         PyValue::Bool(false) => out.push_str("false"),
-        PyValue::Int(i) => out.push_str(&i.to_string()),
+        PyValue::Int(i) => out.push_str(i.as_decimal()),
         PyValue::Float(f) => out.push_str(&py_dumps_float(*f)),
         PyValue::Str(s) => py_json_string(s, out),
         PyValue::List(items) => {
@@ -953,7 +1346,7 @@ pub fn python_repr(value: &PyValue) -> Result<String, Refusal> {
         PyValue::None => Ok("None".to_string()),
         PyValue::Bool(true) => Ok("True".to_string()),
         PyValue::Bool(false) => Ok("False".to_string()),
-        PyValue::Int(i) => Ok(i.to_string()),
+        PyValue::Int(i) => Ok(i.as_decimal().to_string()),
         PyValue::Float(f) => Ok(python_float_repr(*f)),
         PyValue::Str(s) => python_string_repr(s),
         PyValue::List(items) => {
@@ -1040,7 +1433,7 @@ fn python_truthy(value: &PyValue) -> bool {
     match value {
         PyValue::None => false,
         PyValue::Bool(b) => *b,
-        PyValue::Int(i) => *i != 0,
+        PyValue::Int(i) => !i.is_zero(),
         // NaN is truthy in Python; only a zero magnitude is false, and -0.0
         // compares equal to 0.0.
         PyValue::Float(f) => f.is_nan() || *f != 0.0,
@@ -1048,6 +1441,17 @@ fn python_truthy(value: &PyValue) -> bool {
         PyValue::List(items) => !items.is_empty(),
         PyValue::Dict(map) => !map.is_empty(),
     }
+}
+
+/// CPython's `type(value).__name__` for a value that came out of
+/// `json.loads`.
+///
+/// Public because the TYPE is half of what exact-integer work has to observe:
+/// an implementation that answers a wide integer as a `float` of the same
+/// magnitude matches on value under any comparator that treats JSON's single
+/// number type as one type, and differs here.
+pub fn py_type_of(value: &PyValue) -> &'static str {
+    py_type_name(value)
 }
 
 fn py_type_name(value: &PyValue) -> &'static str {
@@ -1419,7 +1823,184 @@ mod tests {
             );
         }
         // And one that does parse keeps the rewrite's result.
-        assert_eq!(decode_line("-0"), Ok(PyValue::Int(0)));
+        assert_eq!(decode_line("-0"), Ok(PyValue::int(0)));
         assert_eq!(decode_line("-0.0"), Ok(PyValue::Float(-0.0)));
+    }
+
+    /// The lexeme validator, on its own. It is not a parser and must not
+    /// accept anything JSON does not spell as one complete number.
+    #[test]
+    fn a_number_lexeme_is_classified_exactly() {
+        for integer in [
+            "0",
+            "-0",
+            "7",
+            "-7",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "18446744073709551615",
+            "12345678901234567890123",
+        ] {
+            assert_eq!(classify_json_number(integer), Some(false), "{integer}");
+        }
+        for float in [
+            "0.0", "-0.0", "1.5", "1e2", "1E2", "1e+2", "1e-2", "-1.5e-9",
+        ] {
+            assert_eq!(classify_json_number(float), Some(true), "{float}");
+        }
+        // Not one complete JSON number: leading zeros, bad signs, missing
+        // separators, trailing text, CPython's own non-standard tokens, and
+        // the empty string.
+        for other in [
+            "",
+            "-",
+            "+1",
+            "01",
+            "-01",
+            "1.",
+            ".5",
+            "1e",
+            "1e+",
+            "1-0",
+            "1 2",
+            "1,",
+            "0x10",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "nan",
+            "1_000",
+            " 1",
+            "1 ",
+            "--1",
+            "1.2.3",
+            "1e2e3",
+            "$serde_json::private::Number",
+        ] {
+            assert_eq!(classify_json_number(other), None, "{other:?}");
+        }
+    }
+
+    /// The digit bound is measured on DIGITS, not on the length of the
+    /// literal, so a sign never costs a digit.
+    #[test]
+    fn the_decimal_digit_bound_ignores_the_sign() {
+        let at_bound = "9".repeat(MAX_INT_STR_DIGITS);
+        let past_bound = "9".repeat(MAX_INT_STR_DIGITS + 1);
+        for sign in ["", "-"] {
+            let accepted = format!("{sign}{at_bound}");
+            match number_from_token(&accepted) {
+                NumberFromToken::Int(value) => {
+                    assert_eq!(value.digits(), MAX_INT_STR_DIGITS);
+                    assert_eq!(value.as_decimal(), accepted);
+                }
+                _ => panic!("{MAX_INT_STR_DIGITS} digits must decode"),
+            }
+            let refused = format!("{sign}{past_bound}");
+            assert!(
+                matches!(
+                    number_from_token(&refused),
+                    NumberFromToken::TooManyDigits(count) if count == MAX_INT_STR_DIGITS + 1
+                ),
+                "{} digits must be refused",
+                MAX_INT_STR_DIGITS + 1
+            );
+            // And it reaches a caller as the source's own silent skip, never
+            // as a named refusal.
+            assert!(matches!(
+                decode_line(&refused),
+                Err(DecodeError::Malformed(_))
+            ));
+        }
+    }
+
+    /// An overflowing exponent stays a declared divergence: it must not
+    /// quietly start saturating to an infinity now that the lexeme is in hand.
+    #[test]
+    fn an_overflowing_float_literal_is_still_out_of_range() {
+        for text in ["1e999", "-1e999", "1.5e400", "1e309"] {
+            assert!(
+                matches!(number_from_token(text), NumberFromToken::OutOfRange),
+                "{text}"
+            );
+            assert!(
+                matches!(decode_line(text), Err(DecodeError::Malformed(_))),
+                "{text}"
+            );
+        }
+        // Underflow is NOT overflow: CPython gives 0.0 and so does this.
+        assert_eq!(decode_line("1e-999"), Ok(PyValue::Float(0.0)));
+        assert_eq!(decode_line("-1e-999"), Ok(PyValue::Float(-0.0)));
+    }
+
+    /// The canonical form is what makes equality mean equality.
+    #[test]
+    fn an_integer_is_canonical_however_it_was_built() {
+        assert_eq!(PyValue::int(0), decode_line("-0").unwrap());
+        assert_eq!(PyValue::int(0), decode_line("0").unwrap());
+        assert_eq!(PyValue::int(-1i64), decode_line("-1").unwrap());
+        assert_eq!(
+            PyValue::int(u64::MAX),
+            decode_line("18446744073709551615").unwrap()
+        );
+        let wide = decode_line("12345678901234567890123").unwrap();
+        assert_eq!(wide, PyValue::int(12345678901234567890123i128));
+        assert_ne!(wide, decode_line("12345678901234567890124").unwrap());
+        // ... and the two really do share one f64.
+        let approximate = 12345678901234567890123f64;
+        assert_eq!(approximate, 12345678901234567890124f64);
+    }
+
+    /// An ordinary object that spells the parser's private key is an ordinary
+    /// object. This is the control for the whole `arbitrary_precision` design.
+    #[test]
+    fn a_user_object_is_never_mistaken_for_the_private_number_payload() {
+        let marker = SERDE_JSON_NUMBER_TOKEN;
+        // One entry, and its value even LOOKS like a number lexeme.
+        let one = format!("{{{:?}: \"123\"}}", marker);
+        let PyValue::Dict(fields) = decode_line(&one).unwrap() else {
+            panic!("a JSON object decodes to a dict")
+        };
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields.get(marker), Some(&PyValue::Str("123".to_string())));
+        // Two entries, the marker first.
+        let two = format!("{{{:?}: \"123\", \"b\": 1}}", marker);
+        let PyValue::Dict(fields) = decode_line(&two).unwrap() else {
+            panic!("a JSON object decodes to a dict")
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.get(marker), Some(&PyValue::Str("123".to_string())));
+        assert_eq!(fields.get("b"), Some(&PyValue::int(1)));
+        assert_eq!(
+            fields.keys().cloned().collect::<Vec<_>>(),
+            vec![marker.to_string(), "b".to_string()]
+        );
+        // A non-string value under the marker key is not even ambiguous.
+        let nested = format!("{{{:?}: {{\"deep\": [1]}}}}", marker);
+        assert!(matches!(decode_line(&nested), Ok(PyValue::Dict(_))));
+    }
+
+    /// A number is a SCALAR however serde_json delivers it, so it must not
+    /// consume a nesting level. Without this, a wide integer at the bound
+    /// would be refused as if the input nested one container deeper.
+    #[test]
+    fn a_wide_number_at_the_depth_bound_is_not_a_container() {
+        let open = "[".repeat(MAX_NESTING_DEPTH);
+        let close = "]".repeat(MAX_NESTING_DEPTH);
+        // A machine-width integer at the bound is accepted today; a wide one
+        // and a float have to be accepted on exactly the same terms.
+        for scalar in ["1", "12345678901234567890123", "1.5"] {
+            let text = format!("{open}{scalar}{close}");
+            assert!(decode_line(&text).is_ok(), "{scalar} at the bound");
+        }
+        // One container deeper is still refused BY NAME.
+        let deeper = format!("[{open}1{close}]");
+        assert!(matches!(
+            decode_line(&deeper),
+            Err(DecodeError::Unrepresentable(Refusal {
+                reason: Refusal::NESTING_DEPTH_EXCEEDED,
+                ..
+            }))
+        ));
     }
 }

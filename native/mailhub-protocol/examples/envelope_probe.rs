@@ -16,12 +16,22 @@
 //! ```text
 //! {"op":"identify"}
 //! {"op":"run","id":"<case>","input":"<text>","dispatch":[{"kind":"text","text":"…"}]}
+//! {"op":"decode","id":"<case>","text":"<one line>"}
 //! {"op":"exit-after-input","code":42}
 //! {"op":"quit"}
 //! ```
 //!
 //! Dispatch outcome kinds are `text`, `url_error` (field `reason`) and
 //! `exception` (field `message`), replayed in call order.
+//!
+//! `decode` exists for the exact-integer work and reports one decoded line
+//! WITHOUT running the envelope at all: the CPython type name, `str()`,
+//! `repr()` and `json.dumps()` of the value. It is how the profile observes a
+//! value's TYPE and its exact output LEXEME rather than only the round-tripped
+//! number a tolerant comparator would accept — an implementation that answered
+//! a wide integer as a float, or as a quoted digit string, matches on value
+//! and fails here. It decodes text handed to it on this same pipe and reaches
+//! nothing else.
 //!
 //! `exit-after-input` exists for ONE test: the runner's own gate on how this
 //! process ends. It acknowledges the job, keeps answering normally, and then
@@ -69,35 +79,101 @@ fn outcome_from(value: &PyValue) -> Result<DispatchOutcome, String> {
     }
 }
 
-fn text(value: &str) -> PyValue {
+fn text_value(value: &str) -> PyValue {
     PyValue::Str(value.to_string())
 }
 
 fn count(value: usize) -> PyValue {
-    PyValue::Int(value as i128)
+    PyValue::int(value)
 }
 
 fn identify() -> PyDict {
     let mut server = PyDict::new();
-    server.insert("name".to_string(), text(envelope::SERVER_NAME));
-    server.insert("version".to_string(), text(envelope::SERVER_VERSION));
+    server.insert("name".to_string(), text_value(envelope::SERVER_NAME));
+    server.insert("version".to_string(), text_value(envelope::SERVER_VERSION));
     let mut out = PyDict::new();
-    out.insert("op".to_string(), text("identify"));
-    out.insert("implementation".to_string(), text("rust/mailhub-protocol"));
-    out.insert("source_commit".to_string(), text(envelope::SOURCE_COMMIT));
+    out.insert("op".to_string(), text_value("identify"));
+    out.insert(
+        "implementation".to_string(),
+        text_value("rust/mailhub-protocol"),
+    );
+    out.insert(
+        "source_commit".to_string(),
+        text_value(envelope::SOURCE_COMMIT),
+    );
     out.insert(
         "protocol_version".to_string(),
-        text(envelope::PROTOCOL_VERSION),
+        text_value(envelope::PROTOCOL_VERSION),
     );
     out.insert("server_info".to_string(), PyValue::Dict(server));
     out.insert(
         "max_nesting_depth".to_string(),
         count(envelope::MAX_NESTING_DEPTH),
     );
+    // The decimal-digit bound this build enforces. The profile compares it
+    // against the ORACLE interpreter's live `sys.get_int_max_str_digits()` and
+    // fails the run when they differ, rather than re-deriving the expectation
+    // from whichever interpreter happens to be present.
+    out.insert(
+        "max_int_str_digits".to_string(),
+        count(envelope::MAX_INT_STR_DIGITS),
+    );
     // The embedded card text verbatim, so the caller can hash it against the
     // cards it re-derived from the pinned AST instead of trusting this crate.
-    out.insert("tools_json".to_string(), text(envelope::TOOLS_JSON));
+    out.insert("tools_json".to_string(), text_value(envelope::TOOLS_JSON));
     out
+}
+
+/// Report one decoded line: its CPython type and its three exact renderings.
+fn decode_job(job: &PyDict) -> Result<PyDict, String> {
+    let text = string_field(job, "text")
+        .ok_or_else(|| "a decode job needs a string `text`".to_string())?;
+    let mut out = PyDict::new();
+    out.insert("op".to_string(), text_value("decode"));
+    if let Some(id) = job.get("id") {
+        out.insert("id".to_string(), id.clone());
+    }
+    match envelope::decode_line(&text) {
+        Err(DecodeError::Malformed(message)) => {
+            out.insert("status".to_string(), text_value("malformed"));
+            out.insert("detail".to_string(), text_value(&message));
+        }
+        Err(DecodeError::Unrepresentable(refusal)) => {
+            out.insert("status".to_string(), text_value("unrepresentable"));
+            out.insert("reason".to_string(), text_value(refusal.reason));
+            out.insert("fields".to_string(), PyValue::Dict(refusal.fields.clone()));
+            out.insert("detail".to_string(), text_value(&refusal.detail));
+        }
+        Ok(value) => {
+            out.insert("status".to_string(), text_value("ok"));
+            out.insert("type".to_string(), text_value(envelope::py_type_of(&value)));
+            // The value itself, re-encoded. A wide integer travels as a bare
+            // JSON number token, never as a quoted string, so the caller's own
+            // decoder sees the same integer this one did.
+            out.insert("value".to_string(), value.clone());
+            out.insert("dumps".to_string(), text_value(&envelope::py_dumps(&value)));
+            if let PyValue::Int(integer) = &value {
+                out.insert("int_digits".to_string(), count(integer.digits()));
+            }
+            match envelope::python_str(&value) {
+                Ok(rendered) => {
+                    out.insert("str".to_string(), text_value(&rendered));
+                }
+                Err(refusal) => {
+                    out.insert("str_refusal".to_string(), text_value(refusal.reason));
+                }
+            }
+            match envelope::python_repr(&value) {
+                Ok(rendered) => {
+                    out.insert("repr".to_string(), text_value(&rendered));
+                }
+                Err(refusal) => {
+                    out.insert("repr_refusal".to_string(), text_value(refusal.reason));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn run_job(job: &PyDict) -> Result<PyDict, String> {
@@ -121,7 +197,7 @@ fn run_job(job: &PyDict) -> Result<PyDict, String> {
         .iter()
         .map(|call| {
             let mut row = PyDict::new();
-            row.insert("tool".to_string(), text(&call.tool));
+            row.insert("tool".to_string(), text_value(&call.tool));
             // Insertion order, not sorted: the order a handler was handed its
             // arguments in is part of what this driver is reporting.
             row.insert(
@@ -133,40 +209,40 @@ fn run_job(job: &PyDict) -> Result<PyDict, String> {
         .collect();
 
     let mut out = PyDict::new();
-    out.insert("op".to_string(), text("run"));
+    out.insert("op".to_string(), text_value("run"));
     if let Some(id) = job.get("id") {
         out.insert("id".to_string(), id.clone());
     }
     out.insert(
         "frames".to_string(),
-        PyValue::List(report.frames.iter().map(|f| text(f)).collect()),
+        PyValue::List(report.frames.iter().map(|f| text_value(f)).collect()),
     );
-    out.insert("raw".to_string(), text(&report.raw));
+    out.insert("raw".to_string(), text_value(&report.raw));
     out.insert("calls".to_string(), PyValue::List(calls));
     match &report.outcome {
         RunOutcome::Completed => {
-            out.insert("outcome".to_string(), text("completed"));
+            out.insert("outcome".to_string(), text_value("completed"));
         }
         RunOutcome::Terminated { kind, message } => {
-            out.insert("outcome".to_string(), text("terminated"));
+            out.insert("outcome".to_string(), text_value("terminated"));
             let mut terminal = PyDict::new();
-            terminal.insert("kind".to_string(), text(kind));
-            terminal.insert("message".to_string(), text(message));
+            terminal.insert("kind".to_string(), text_value(kind));
+            terminal.insert("message".to_string(), text_value(message));
             out.insert("terminal".to_string(), PyValue::Dict(terminal));
         }
         RunOutcome::Unrepresentable {
             line_index,
             refusal,
         } => {
-            out.insert("outcome".to_string(), text("unrepresentable"));
+            out.insert("outcome".to_string(), text_value("unrepresentable"));
             let mut row = PyDict::new();
             row.insert("line_index".to_string(), count(*line_index));
             // `reason` and `fields` are the machine-readable half, and they
             // are what an expectation binds to. `detail` is prose and is
             // reported so a human reading a failure can see what happened.
-            row.insert("reason".to_string(), text(refusal.reason));
+            row.insert("reason".to_string(), text_value(refusal.reason));
             row.insert("fields".to_string(), PyValue::Dict(refusal.fields.clone()));
-            row.insert("detail".to_string(), text(&refusal.detail));
+            row.insert("detail".to_string(), text_value(&refusal.detail));
             out.insert("unrepresentable".to_string(), PyValue::Dict(row));
         }
     }
@@ -185,12 +261,15 @@ fn run_job(job: &PyDict) -> Result<PyDict, String> {
 /// Arm the deliberate abnormal exit. See the module note: this is the runner's
 /// own negative control and touches nothing the envelope does.
 fn exit_after_input(job: &PyDict) -> Result<(PyDict, u8), String> {
-    let code = match job.get("code") {
-        Some(PyValue::Int(value)) if (0..=255).contains(value) => *value as u8,
+    let code = match job.get("code").and_then(|value| match value {
+        PyValue::Int(integer) => integer.to_i128(),
+        _ => None,
+    }) {
+        Some(value) if (0..=255).contains(&value) => value as u8,
         _ => return Err("`exit-after-input` needs an integer `code` in 0..=255".to_string()),
     };
     let mut out = PyDict::new();
-    out.insert("op".to_string(), text("exit-after-input"));
+    out.insert("op".to_string(), text_value("exit-after-input"));
     out.insert("code".to_string(), count(usize::from(code)));
     Ok((out, code))
 }
@@ -210,7 +289,7 @@ fn main() -> ExitCode {
             Ok(line) => line,
             Err(error) => {
                 let mut row = PyDict::new();
-                row.insert("error".to_string(), text(&format!("stdin: {error}")));
+                row.insert("error".to_string(), text_value(&format!("stdin: {error}")));
                 emit(&mut out, &PyValue::Dict(row));
                 break;
             }
@@ -222,7 +301,10 @@ fn main() -> ExitCode {
             Ok(PyValue::Dict(job)) => job,
             Ok(_) => {
                 let mut row = PyDict::new();
-                row.insert("error".to_string(), text("a job must be a JSON object"));
+                row.insert(
+                    "error".to_string(),
+                    text_value("a job must be a JSON object"),
+                );
                 emit(&mut out, &PyValue::Dict(row));
                 continue;
             }
@@ -236,7 +318,10 @@ fn main() -> ExitCode {
                     }
                 };
                 let mut row = PyDict::new();
-                row.insert("error".to_string(), text(&format!("unreadable job: {why}")));
+                row.insert(
+                    "error".to_string(),
+                    text_value(&format!("unreadable job: {why}")),
+                );
                 emit(&mut out, &PyValue::Dict(row));
                 continue;
             }
@@ -248,6 +333,7 @@ fn main() -> ExitCode {
         let result = match op.as_str() {
             "identify" => Ok(identify()),
             "run" => run_job(&job),
+            "decode" => decode_job(&job),
             "exit-after-input" => exit_after_input(&job).map(|(row, code)| {
                 exit_code = code;
                 row
@@ -261,7 +347,7 @@ fn main() -> ExitCode {
                 if let Some(id) = job.get("id") {
                     row.insert("id".to_string(), id.clone());
                 }
-                row.insert("error".to_string(), text(&message));
+                row.insert("error".to_string(), text_value(&message));
                 row
             }
         };

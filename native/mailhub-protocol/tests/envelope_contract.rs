@@ -8,10 +8,10 @@
 //! deliberately cannot express.
 
 use mailhub_protocol::{
-    decode_line, process_line, py_dumps, python_repr, python_str, python_strip, run, run_scripted,
-    tool_names, tools, universal_lines, DecodeError, DispatchOutcome, LineOutcome, PyValue,
-    Refusal, RunOutcome, ScriptedDispatcher, MAX_NESTING_DEPTH, PROTOCOL_VERSION, SERVER_NAME,
-    SERVER_VERSION,
+    decode_line, process_line, py_dumps, py_type_of, python_repr, python_str, python_strip, run,
+    run_scripted, tool_names, tools, universal_lines, DecodeError, DispatchOutcome, LineOutcome,
+    PyValue, Refusal, RunOutcome, ScriptedDispatcher, MAX_INT_STR_DIGITS, MAX_NESTING_DEPTH,
+    PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION,
 };
 use serde_json::{json, Value};
 
@@ -458,7 +458,7 @@ fn nesting_past_the_stated_bound_is_refused_by_name_and_never_skipped() {
             assert_eq!(refusal.reason, Refusal::NESTING_DEPTH_EXCEEDED);
             assert_eq!(
                 refusal.fields.get("limit"),
-                Some(&PyValue::Int(MAX_NESTING_DEPTH as i128)),
+                Some(&PyValue::int(MAX_NESTING_DEPTH)),
                 "the bound that was exceeded is part of the refusal, not just its prose"
             );
         }
@@ -648,5 +648,264 @@ fn no_tool_name_can_reach_a_real_handler() {
         assert_eq!(dispatcher.overruns, 0);
         let frame: Value = serde_json::from_str(&report.frames[0]).expect("JSON");
         assert_eq!(frame["result"]["content"][0]["text"], format!("ok:{name}"));
+    }
+}
+
+// ── exact integers ─────────────────────────────────────────────────────────
+// These are the crate-side half of the wide-integer work. The neutral profile
+// asserts the same behaviour against the pinned Python source; what is here is
+// what the profile cannot express — the frame TEXT, the refusal arm a skipped
+// line took, and the helper functions on their own.
+
+/// The 23-digit id from the profile, and the integer one above it. The two
+/// share a single `f64`, which is the whole point of using them.
+const WIDE: &str = "12345678901234567890123";
+const WIDE_NEXT: &str = "12345678901234567890124";
+
+fn initialize(raw_id: &str) -> String {
+    format!("{{\"id\":{raw_id},\"method\":\"initialize\"}}\n")
+}
+
+fn tool_call(raw_name: &str, raw_arguments: &str) -> String {
+    format!(
+        "{{\"id\":1,\"method\":\"tools/call\",\
+         \"params\":{{\"name\":{raw_name},\"arguments\":{raw_arguments}}}}}\n"
+    )
+}
+
+#[test]
+fn a_wide_id_is_echoed_as_the_exact_decimal_token() {
+    let (report, _) = run_scripted(&initialize(WIDE), vec![]);
+    assert_eq!(report.frames.len(), 1);
+    let frame = &report.frames[0];
+    // The TEXT, not the parsed value. A comparator that honours JSON's single
+    // number type cannot tell an integer from the float it rounds to, so the
+    // assertion that matters is about the token on the wire.
+    assert!(
+        frame.contains(&format!("\"id\": {WIDE},")),
+        "the frame does not carry the exact token: {frame}"
+    );
+    // ...and specifically NOT as a quoted digit string, and NOT as a float.
+    assert!(!frame.contains(&format!("\"{WIDE}\"")), "{frame}");
+    assert!(!frame.contains("e+"), "{frame}");
+    assert!(!frame.contains("1.2345678901234568"), "{frame}");
+}
+
+#[test]
+fn two_ids_that_share_one_f64_stay_two_different_ids() {
+    let input = format!("{}{}", initialize(WIDE), initialize(WIDE_NEXT));
+    let (report, _) = run_scripted(&input, vec![]);
+    assert_eq!(report.frames.len(), 2);
+    assert!(report.frames[0].contains(WIDE), "{}", report.frames[0]);
+    assert!(report.frames[1].contains(WIDE_NEXT), "{}", report.frames[1]);
+    assert_ne!(report.frames[0], report.frames[1]);
+    // The f64 they would both collapse to.
+    let collapsed: f64 = WIDE.parse().expect("a float parse");
+    assert_eq!(collapsed, WIDE_NEXT.parse::<f64>().expect("a float parse"));
+}
+
+#[test]
+fn a_wide_integer_survives_every_argument_position() {
+    let arguments =
+        format!("{{\"flat\":{WIDE},\"list\":[[{WIDE_NEXT}]],\"map\":{{\"k\":-{WIDE}}}}}");
+    let (_, dispatcher) = run_scripted(
+        &tool_call("\"hub_send\"", &arguments),
+        vec![DispatchOutcome::Text("ok".to_string())],
+    );
+    let forwarded = &dispatcher.calls[0].arguments;
+    assert_eq!(forwarded.get("flat"), Some(&py(WIDE)));
+    assert_eq!(
+        forwarded.get("list"),
+        Some(&PyValue::List(vec![PyValue::List(vec![py(WIDE_NEXT)])]))
+    );
+    let PyValue::Dict(inner) = forwarded.get("map").expect("the nested mapping") else {
+        panic!("the nested argument is a mapping")
+    };
+    assert_eq!(inner.get("k"), Some(&py(&format!("-{WIDE}"))));
+    // Every one of them is an `int`, not a float that happens to compare
+    // equal: `py_type_of` is the check a value comparison cannot make.
+    assert_eq!(py_type_of(forwarded.get("flat").expect("flat")), "int");
+}
+
+#[test]
+fn a_wide_integer_tool_name_keeps_every_digit_through_str_and_repr() {
+    // `str()` of a bare integer name.
+    let (_, dispatcher) = run_scripted(
+        &tool_call(WIDE, "{}"),
+        vec![DispatchOutcome::Text("ok".to_string())],
+    );
+    assert_eq!(dispatcher.calls[0].tool, WIDE);
+    // `repr()` of a container holding one.
+    let (_, dispatcher) = run_scripted(
+        &tool_call(&format!("[{WIDE},{{\"k\":-{WIDE_NEXT}}}]"), "{}"),
+        vec![DispatchOutcome::Text("ok".to_string())],
+    );
+    assert_eq!(
+        dispatcher.calls[0].tool,
+        format!("[{WIDE}, {{'k': -{WIDE_NEXT}}}]")
+    );
+}
+
+#[test]
+fn an_integer_and_its_float_spelling_are_different_tool_names() {
+    for (raw, expected, type_name) in [
+        ("9007199254740993", "9007199254740993", "int"),
+        ("9007199254740993.0", "9007199254740992.0", "float"),
+        ("1e2", "100.0", "float"),
+        ("100", "100", "int"),
+        ("-0", "0", "int"),
+        ("-0.0", "-0.0", "float"),
+    ] {
+        let (_, dispatcher) = run_scripted(
+            &tool_call(raw, "{}"),
+            vec![DispatchOutcome::Text("ok".to_string())],
+        );
+        assert_eq!(dispatcher.calls[0].tool, expected, "input {raw}");
+        assert_eq!(py_type_of(&py(raw)), type_name, "input {raw}");
+    }
+}
+
+#[test]
+fn the_interpreter_digit_bound_is_a_silent_skip_and_not_a_refusal() {
+    let at_bound = format!("1{}", "0".repeat(MAX_INT_STR_DIGITS - 1));
+    let past_bound = format!("1{}", "0".repeat(MAX_INT_STR_DIGITS));
+
+    // At the bound both sides answer.
+    let (report, _) = run_scripted(&initialize(&at_bound), vec![]);
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.frames.len(), 1);
+    assert!(report.frames[0].contains(&at_bound));
+
+    // One digit further CPython raises ValueError, the source's
+    // `except ValueError: continue` skips the line, and so does this. It must
+    // NOT become a named refusal: that would record a difference that is not
+    // there, and would stop the following request from being answered.
+    let input = format!("{}{}", initialize(&past_bound), initialize("1"));
+    let (report, _) = run_scripted(&input, vec![]);
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.frames.len(), 1);
+    assert!(report.frames[0].contains("\"id\": 1,"));
+    assert_eq!(report.lines_unprocessed, 0);
+    assert!(matches!(
+        decode_line(&past_bound),
+        Err(DecodeError::Malformed(_))
+    ));
+}
+
+#[test]
+fn an_overflowing_exponent_is_still_the_declared_divergence() {
+    // Reading the raw lexeme would make `1e999` saturate to an infinity the
+    // way CPython's does. It deliberately does not: that obligation is not
+    // this slice's to close, and it is asserted here so it cannot drift shut
+    // by accident.
+    for raw in ["1e999", "-1e999", "1.5e400"] {
+        assert!(
+            matches!(decode_line(raw), Err(DecodeError::Malformed(_))),
+            "{raw}"
+        );
+        let input = format!("{}{}", initialize(raw), initialize("1"));
+        let (report, _) = run_scripted(&input, vec![]);
+        assert_eq!(report.frames.len(), 1, "{raw}");
+        assert_eq!(report.outcome, RunOutcome::Completed, "{raw}");
+    }
+    // The bare non-standard tokens are untouched too.
+    for raw in ["NaN", "Infinity", "-Infinity"] {
+        assert!(
+            matches!(decode_line(raw), Err(DecodeError::Malformed(_))),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn a_private_parser_marker_object_is_ordinary_data_end_to_end() {
+    let marker = "{\"$serde_json::private::Number\":\"123\"}";
+    // As an argument value.
+    let (_, dispatcher) = run_scripted(
+        &tool_call("\"hub_read\"", marker),
+        vec![DispatchOutcome::Text("ok".to_string())],
+    );
+    assert_eq!(dispatcher.calls[0].arguments.len(), 1);
+    assert_eq!(
+        dispatcher.calls[0]
+            .arguments
+            .get("$serde_json::private::Number"),
+        Some(&PyValue::Str("123".to_string()))
+    );
+    // And as the tool name, where `str()` of a mapping is its `repr()`.
+    let (_, dispatcher) = run_scripted(
+        &tool_call(marker, "{}"),
+        vec![DispatchOutcome::Text("ok".to_string())],
+    );
+    assert_eq!(
+        dispatcher.calls[0].tool,
+        "{'$serde_json::private::Number': '123'}"
+    );
+}
+
+#[test]
+fn malformed_number_spellings_never_become_dispatchable() {
+    // Leading zeros, bad signs, missing separators, embedded digits and the
+    // landed `1-0` family. Every one of them is a line CPython's decoder
+    // rejects, so the source skips it in silence and no handler runs.
+    for raw in [
+        "01",
+        "-01",
+        "+1",
+        "1.",
+        ".5",
+        "1_000",
+        "--1",
+        "0x10",
+        "1 2",
+        "1-0",
+        "1.2-0",
+        "1e2-0",
+        "1e",
+        "1e+",
+        "12345678901234567890123-0",
+    ] {
+        assert!(
+            matches!(decode_line(raw), Err(DecodeError::Malformed(_))),
+            "{raw} decoded"
+        );
+        let input = format!("{raw}\n{}", initialize("1"));
+        let (report, dispatcher) = run_scripted(&input, vec![]);
+        assert_eq!(report.frames.len(), 1, "{raw}");
+        assert!(dispatcher.calls.is_empty(), "{raw} reached a handler");
+    }
+    // Digits INSIDE a string stay a string, which is what a quoted-digit
+    // answer would look like.
+    let quoted = format!("\"{WIDE}\"");
+    assert_eq!(py_type_of(&py(&quoted)), "str");
+    assert_eq!(python_str(&py(&quoted)).expect("a str"), WIDE);
+    assert_eq!(
+        python_repr(&py(&quoted)).expect("a repr"),
+        format!("'{WIDE}'")
+    );
+}
+
+#[test]
+fn py_dumps_writes_a_wide_integer_as_a_bare_token() {
+    for raw in [
+        WIDE,
+        WIDE_NEXT,
+        "-12345678901234567890123",
+        "170141183460469231731687303715884105728",
+        "-170141183460469231731687303715884105728",
+        "9223372036854775807",
+        "-9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "0",
+    ] {
+        let value = py(raw);
+        assert_eq!(py_type_of(&value), "int", "{raw}");
+        assert_eq!(py_dumps(&value), raw, "{raw}");
+        assert_eq!(python_str(&value).expect("a str"), raw, "{raw}");
+        assert_eq!(python_repr(&value).expect("a repr"), raw, "{raw}");
+        // And it round-trips: the text this crate wrote decodes to the same
+        // value, which a quoted or rounded answer would not.
+        assert_eq!(decode_line(&py_dumps(&value)), Ok(value), "{raw}");
     }
 }

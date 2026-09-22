@@ -31,6 +31,16 @@ there is no code path from here to a profile, a store or a socket. While the
 extracted function runs, an audit hook refuses EVERY audited operation, and a
 control proves the hook fires.
 
+The profile has two kinds of case and both run on both sides. An ENVELOPE
+case feeds a whole stdin text through `serve()` and judges the reply stream. A
+DECODE case feeds ONE line through the decoder alone and judges what CPython
+says the value IS — its type name, `str()`, `repr()` and `json.dumps()` — which
+is how an exact-integer requirement is observed rather than inferred: a wide
+integer answered as a float of the same magnitude, or as a quoted digit
+string, matches on value under any comparator that honours JSON's single
+number type, and differs here. Decode cases carry only inputs the two sides
+AGREE on; every declared divergence stays in the obligation machinery.
+
     <python> tests/mh02_mcp_contract.py [-v]
     <python> tests/mh02_mcp_contract.py --target both --rust-driver <path>
 
@@ -670,6 +680,107 @@ def json_equal(want, got) -> bool:
     return False
 
 
+def json_number_tokens(raw: str) -> list:
+    """Every complete JSON number LEXEME in a reply stream, in stream order.
+
+    Parsed values are not enough for exact integers, and `json_equal` above
+    says why in its own docstring: an int and a float of the same value are
+    DELIBERATELY equal there, because JSON has one number type and the source
+    never distinguishes them. That tolerance is exactly the hole an exact
+    integer falls through — `100` answered as `1e2`, `1` answered as `1.0`, or
+    a value that survives only because the comparator widened it — so the text
+    actually written to the wire has to be read as text.
+
+    The scan is a lexer, not a parser: outside a string, a `-` or a digit
+    begins a number, and the token is the run of characters a JSON number can
+    be spelled with. Anything inside a string is data and is skipped, so a
+    tool name made of digits is never counted as a number.
+    """
+    tokens = []
+    index, in_string, escaped = 0, False, False
+    while index < len(raw):
+        char = raw[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "-" or char.isdigit():
+            start = index
+            while index < len(raw) and (raw[index] in "-+.eE" or raw[index].isdigit()):
+                index += 1
+            tokens.append(raw[start:index])
+            continue
+        index += 1
+    return tokens
+
+
+def python_decode(text: str) -> dict:
+    """CPython's own answer for one decoded line.
+
+    The four renderings are the four the source itself reaches for: it calls
+    `json.loads` on the line, `str()` on a tool name, and `json.dumps` on the
+    reply; `repr()` is what `str()` of a container is. The pinned AST anchors
+    already prove the source calls them, so this needs no extracted function —
+    it needs the interpreter's own behaviour, which is what it reads.
+    """
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        return {"status": "malformed", "detail": str(error)}
+    row = {"status": "ok", "type": type(value).__name__, "value": value,
+           "str": str(value), "repr": repr(value), "dumps": json.dumps(value)}
+    # `bool` is an `int` in Python and is not one here, exactly as it is not
+    # one in the crate.
+    if isinstance(value, int) and not isinstance(value, bool):
+        row["int_digits"] = len(str(abs(value)))
+    return row
+
+
+def decode_errors(case: dict, observation: dict) -> list:
+    """Judge one decode case. One function, both targets."""
+    expect = case["expect"]
+    errors = []
+    status = observation.get("status")
+    if status != expect["status"]:
+        errors.append("decode-status: expected %r, observed %r (%s)"
+                      % (expect["status"], status, observation.get("detail")))
+        return errors
+    if status != "ok":
+        return errors
+    for field in ("type", "str", "repr", "dumps"):
+        want, got = expect[field], observation.get(field)
+        if want != got:
+            errors.append("decode-%s: expected %r, observed %r" % (field, want, got))
+    # What actually travelled. The driver writes the decoded value back as a
+    # BARE JSON token, so this side's own decoder sees whatever the other side
+    # really emitted: an integer turned into a quoted digit string arrives as
+    # a `str` and is caught here even though `str`/`repr`/`dumps` were right.
+    if "value" not in observation:
+        errors.append("decode-wire: the observation carries no transported value")
+        return errors
+    wire = observation["value"]
+    wire_type = type(wire).__name__
+    if wire_type != expect["type"]:
+        errors.append("decode-wire-type: the value on the wire is a %s, expected a %s"
+                      % (wire_type, expect["type"]))
+    elif json.dumps(wire) != expect["dumps"]:
+        errors.append("decode-wire-value: the value on the wire re-encodes as %r, expected %r"
+                      % (json.dumps(wire), expect["dumps"]))
+    if "int_digits" in expect and observation.get("int_digits") != expect["int_digits"]:
+        errors.append("decode-int-digits: expected %r, observed %r"
+                      % (expect["int_digits"], observation.get("int_digits")))
+    return errors
+
+
 def bounded_obligation_errors(case: dict, observation: dict, profile: dict) -> list:
     """Judge the rust side of a case that carries a declared obligation.
 
@@ -788,6 +899,16 @@ def case_errors(case: dict, observation: dict, profile: dict) -> list:
             errors.append("call[%d].arguments: expected %r, observed %r"
                           % (index, want["arguments"], got["arguments"]))
 
+    # The LEXEMES, where a case says what they must be. See
+    # `json_number_tokens`: this is the assertion `json_equal`'s deliberate
+    # int/float tolerance cannot make.
+    want_tokens = expect.get("number_tokens")
+    if want_tokens is not None:
+        got_tokens = json_number_tokens(observation.get("raw") or "")
+        if sorted(got_tokens) != sorted(want_tokens):
+            errors.append("number-lexemes: expected the number tokens %r on the wire, "
+                          "observed %r" % (sorted(want_tokens), sorted(got_tokens)))
+
     want_terminal = expect.get("terminal")
     got_terminal = observation.get("terminal")
     if not json_equal(want_terminal, got_terminal):
@@ -819,7 +940,7 @@ def _method_name(prefix, label):
     return "test_%s_%s" % (prefix, re.sub(r"\W+", "_", label).strip("_"))
 
 
-def registration_errors(cases) -> list:
+def registration_errors(cases, decode_cases=()) -> list:
     """Every declared case must reach the runner as its OWN executable test.
 
     Inherited from the MH01 round-3 finding: `_method_name` collapses runs of
@@ -829,7 +950,7 @@ def registration_errors(cases) -> list:
     declared obligation would never run while the suite reported green.
     """
     errors, by_id, by_name = [], {}, {}
-    for index, case in enumerate(cases):
+    for index, case in enumerate(list(cases) + list(decode_cases)):
         cid = case["id"]
         if cid in by_id:
             errors.append("case id %r is declared twice, at positions %d and %d"
@@ -869,6 +990,23 @@ def manifest_errors(profile: dict) -> list:
     if manifest.get("obligation_count") != declared_obligations:
         errors.append("the manifest declares %r obligation cases but %d carry one"
                       % (manifest.get("obligation_count"), declared_obligations))
+    # The decode cases get the same anti-drop discipline: a count and an id
+    # list, so quietly deleting one is a failure rather than a smaller suite.
+    decode_manifest = profile.get("decode_manifest")
+    decode_cases = profile.get("decode_cases") or []
+    if not isinstance(decode_manifest, dict):
+        errors.append("the profile carries no decode manifest, so nothing states how many "
+                      "decode cases were meant to exist")
+        return errors
+    if decode_manifest.get("count") != len(decode_cases):
+        errors.append("the decode manifest declares %r cases but the profile carries %d"
+                      % (decode_manifest.get("count"), len(decode_cases)))
+    decode_ids = sorted(case["id"] for case in decode_cases)
+    if decode_manifest.get("ids") != decode_ids:
+        errors.append("the decode manifest's id list disagrees with the decode cases "
+                      "(missing %s, extra %s)"
+                      % (sorted(set(decode_manifest.get("ids") or []) - set(decode_ids)),
+                         sorted(set(decode_ids) - set(decode_manifest.get("ids") or []))))
     return errors
 
 
@@ -900,10 +1038,33 @@ def obligation_of(case: dict, target: str):
 def obligation_errors(profile: dict) -> list:
     errors = []
     declared = {row["id"]: row for row in profile.get("obligations") or []}
+    cases_by_id = {case["id"]: case for case in profile.get("cases") or []}
     for row in declared.values():
-        for field in ("id", "implementation", "summary", "exercised_by", "disposition"):
+        for field in ("id", "implementation", "summary", "exercised_by", "disposition",
+                      "status"):
             if not row.get(field):
                 errors.append("obligation %r records no %s" % (row.get("id"), field))
+        status = row.get("status")
+        if status not in (None, "open", "closed"):
+            errors.append("obligation %r records the unknown status %r" % (row["id"], status))
+        # A CLOSED obligation keeps its identity and its history and stops
+        # being a free pass. It has to name the cases that now assert the
+        # normative behaviour, those cases have to exist, and none of them may
+        # still declare the divergence — otherwise "closed" would be a word in
+        # a fixture rather than something the suite can tell apart from open.
+        if status == "closed":
+            closed_by = row.get("closed_by") or []
+            if not closed_by:
+                errors.append("obligation %r is closed and names no case that asserts the "
+                              "behaviour it used to excuse" % row["id"])
+            for cid in closed_by:
+                case = cases_by_id.get(cid)
+                if case is None:
+                    errors.append("obligation %r is closed by the case %r, which does not exist"
+                                  % (row["id"], cid))
+                elif obligation_of(case, row["implementation"]) is not None:
+                    errors.append("obligation %r is closed by the case %r, which still declares "
+                                  "a divergence for %r" % (row["id"], cid, row["implementation"]))
     used = set()
     for case in profile.get("cases") or []:
         for target in (case.get("unimplemented") or {}):
@@ -935,15 +1096,63 @@ def obligation_errors(profile: dict) -> list:
                     "case %r declares an `observed` outcome identical to its normative "
                     "expectation, which declares no divergence at all" % case["id"])
     for oid, row in declared.items():
-        if row.get("exercised_by") == "profile case" and oid not in used:
+        if row.get("status") == "closed" and oid in used:
+            errors.append("obligation %r is recorded as closed and a case still declares it"
+                          % oid)
+            continue
+        if (row.get("status") != "closed" and row.get("exercised_by") == "profile case"
+                and oid not in used):
             errors.append("obligation %r claims a profile case exercises it, and none does" % oid)
+    return errors
+
+
+def oracle_limit_errors(profile: dict) -> list:
+    """The pinned interpreter's decimal-digit limit is a PRECONDITION.
+
+    CPython refuses to convert an integer longer than
+    `sys.get_int_max_str_digits()` decimal digits and raises `ValueError`,
+    which the source's `except ValueError: continue` turns into a silent skip.
+    The profile's digit-boundary cases are written against one exact value of
+    that limit, so a differently configured interpreter is a QUALIFICATION
+    MISMATCH and has to fail loudly — never be absorbed by re-deriving the
+    expectation from whatever happens to be running.
+    """
+    errors = []
+    declared = (profile.get("oracle") or {}).get("int_max_str_digits")
+    if not isinstance(declared, int):
+        errors.append("the profile states no oracle integer digit limit, so the "
+                      "digit-boundary cases assert nothing about the interpreter that ran")
+        return errors
+    live = sys.get_int_max_str_digits()
+    default = sys.int_info.default_max_str_digits
+    if live != declared:
+        errors.append("this interpreter's live sys.get_int_max_str_digits() is %d and the "
+                      "profile is written against %d" % (live, declared))
+    if default != declared:
+        errors.append("this interpreter's default int_info.default_max_str_digits is %d and "
+                      "the profile is written against %d" % (default, declared))
+    # And the limit really is where the profile says it is, measured rather
+    # than read off an attribute.
+    try:
+        json.loads("1" * declared)
+    except ValueError as error:
+        errors.append("a %d-digit literal was refused by this interpreter (%s)"
+                      % (declared, error))
+    try:
+        json.loads("1" * (declared + 1))
+    except ValueError:
+        pass
+    else:
+        errors.append("a %d-digit literal was ACCEPTED by this interpreter, so the boundary "
+                      "the profile pins is not where it says it is" % (declared + 1))
     return errors
 
 
 def profile_errors(profile: dict, anchors: Anchors) -> list:
     errors = list(source_errors(profile, anchors))
     errors.extend(manifest_errors(profile))
-    errors.extend(registration_errors(profile.get("cases") or []))
+    errors.extend(registration_errors(profile.get("cases") or [],
+                                      profile.get("decode_cases") or []))
     errors.extend(obligation_errors(profile))
     if profile.get("schema") != "orgtree.mailhub-mcp-envelope/v1":
         errors.append("the profile does not declare the expected schema")
@@ -951,7 +1160,16 @@ def profile_errors(profile: dict, anchors: Anchors) -> list:
         errors.append("the profile declares no tool-card placeholder")
     # Secrets never enter a fixture. Scan the CASES only; the source digests
     # are long hex strings by design.
-    if re.search(r"\b[0-9a-f]{32,}\b", json.dumps(profile.get("cases") or [])):
+    #
+    # A long run of DECIMAL digits is exempt, and deliberately so: the
+    # exact-integer cases carry integer literals up to the pinned
+    # interpreter's 4300-digit bound, and every one of them would otherwise
+    # read as a credential. The exemption is narrow — a candidate still has to
+    # be pure decimal, so any hex letter at all still trips this.
+    suspicious = [run for run in re.findall(r"\b[0-9a-f]{32,}\b",
+                                            json.dumps(profile.get("cases") or []))
+                  if not run.isdigit()]
+    if suspicious:
         errors.append("the profile contains what looks like a literal credential or digest")
     return errors
 
@@ -1041,6 +1259,14 @@ def _drop_tool_card(profile):
     return thin
 
 
+# The exact-integer cases the controls above reach for by name. Naming them
+# here rather than inline means a rename breaks the controls loudly instead of
+# leaving them silently pointed at nothing.
+WIDE_INTEGER_OBLIGATION = "numeric-domain.integer-wider-than-64-bits"
+WIDE_INTEGER_CASE = "obligation.id-integer-wider-than-64-bits"
+WIDE_DECODE_CASE = "decode.integer-wider-than-64-bits"
+NEGATIVE_DECODE_CASE = "decode.negative-integer-wider-than-64-bits"
+
 IMPLEMENTATION_CONTROLS = []
 
 
@@ -1049,6 +1275,90 @@ def implementation_control(label, case_id, expected_label):
         IMPLEMENTATION_CONTROLS.append((label, case_id, expected_label, patch))
         return patch
     return register
+
+
+def _reopen_closed_obligation(profile):
+    """A closed obligation, declared again by the case that closed it."""
+    broken = _clone(profile)
+    row = next(r for r in broken["obligations"] if r.get("status") == "closed")
+    # NOT `_find`, which clones: this has to mutate the case that is really in
+    # the profile being judged.
+    case = next(c for c in broken["cases"] if c["id"] == row["closed_by"][0])
+    case["unimplemented"] = {row["implementation"]: {
+        "obligation": row["id"], "difference": "invented", "observed": {
+            "frames": [], "calls": [], "outcome": "completed", "lines_unprocessed": 0}}}
+    return broken
+
+
+def _closed_without_a_case(profile):
+    broken = _clone(profile)
+    row = next(r for r in broken["obligations"] if r.get("status") == "closed")
+    row["closed_by"] = []
+    return broken
+
+
+def _closed_by_a_ghost(profile):
+    broken = _clone(profile)
+    row = next(r for r in broken["obligations"] if r.get("status") == "closed")
+    row["closed_by"] = ["integer.no-such-case"]
+    return broken
+
+
+def _obligation_without_status(profile):
+    broken = _clone(profile)
+    broken["obligations"][0].pop("status", None)
+    return broken
+
+
+def _redeclare_wide_integer(profile):
+    """The case that now asserts exact integers, wearing its old declaration.
+
+    This is the control for the one thing a closed obligation must never be:
+    a case that quietly keeps its free pass after the behaviour landed.
+    """
+    case = _clone(_find(profile["cases"], WIDE_INTEGER_CASE))
+    case["unimplemented"] = {"rust": {
+        "obligation": WIDE_INTEGER_OBLIGATION,
+        "difference": "the echoed id is the nearest f64",
+        "observed": {**_clone(case["expect"]),
+                     "frames": [], "calls": [], "outcome": "completed",
+                     "lines_unprocessed": 0}}}
+    return case
+
+
+def _retoken(observation, replace):
+    """Rewrite the number lexemes of a reply stream, frames and raw together."""
+    broken = _clone(observation)
+    frames = [replace(frame) for frame in broken["frames"]]
+    return {**broken, "frames": frames,
+            "raw": "".join(frame + "\n" for frame in frames)}
+
+
+def _as_float_lexeme(observation):
+    return _retoken(observation, lambda frame: re.sub(
+        r"(?<![\w.])(\d{17,})(?![\d.])", lambda m: repr(float(m.group(1))), frame))
+
+
+def _as_quoted_lexeme(observation):
+    return _retoken(observation, lambda frame: re.sub(
+        r"(?<![\w.\"])(\d{17,})(?![\d.])", r'"\1"', frame))
+
+
+def _unsigned(decode_observation):
+    broken = dict(decode_observation)
+    for field in ("str", "repr", "dumps"):
+        broken[field] = broken[field].lstrip("-")
+    broken["value"] = -broken["value"]
+    return broken
+
+
+def _clamped(decode_observation):
+    broken = dict(decode_observation)
+    clamped = min(decode_observation["value"], 2 ** 63 - 1)
+    broken["value"] = clamped
+    for field in ("str", "repr", "dumps"):
+        broken[field] = str(clamped)
+    return broken
 
 
 @implementation_control("a top-level error member instead of a result",
@@ -1187,10 +1497,13 @@ def load_profile():
 PROFILE = load_profile()
 ANCHORS = Anchors(PROFILE["source_commit"])
 CASES = PROFILE["cases"]
+DECODE_CASES = PROFILE.get("decode_cases") or []
 ORACLE = Oracle(ANCHORS)
 
 PYTHON_OBSERVATIONS = {}
+PYTHON_DECODE = {}
 RUST_OBSERVATIONS = {}
+RUST_DECODE = {}
 RUST_IDENTITY = None
 RUST_RECEIPT = None
 RUST_BLOCKER = None
@@ -1199,6 +1512,12 @@ RUST_BLOCKER = None
 def collect_python():
     for case in CASES:
         PYTHON_OBSERVATIONS[case["id"]] = ORACLE.observe(case)
+    # Under the same guard as the extracted function: decoding a line opens no
+    # file, no socket and no process, and this is where that is proved rather
+    # than asserted.
+    with guarded():
+        for case in DECODE_CASES:
+            PYTHON_DECODE[case["id"]] = python_decode(case["text"])
 
 
 def collect_rust():
@@ -1225,6 +1544,9 @@ def collect_rust():
                                           "input": case["input"],
                                           "dispatch": case.get("dispatch") or []})
                 RUST_OBSERVATIONS[case["id"]] = rust_observation(answer)
+            for case in DECODE_CASES:
+                RUST_DECODE[case["id"]] = session.request(
+                    {"op": "decode", "id": case["id"], "text": case["text"]})
         RUST_RECEIPT = session.receipt()
         # cleanup_errors now carries the exit-status gate, so a driver that
         # answered every job and then exited non-zero blocks the collection
@@ -1251,6 +1573,12 @@ def identity_errors():
     if RUST_IDENTITY.get("server_info") != PROFILE["server"]["serverInfo"]:
         errors.append("the driver reports serverInfo %r, the source declares %r"
                       % (RUST_IDENTITY.get("server_info"), PROFILE["server"]["serverInfo"]))
+    declared_limit = (PROFILE.get("oracle") or {}).get("int_max_str_digits")
+    if RUST_IDENTITY.get("max_int_str_digits") != declared_limit:
+        errors.append("the driver enforces a %r-digit integer bound and the oracle this "
+                      "profile is written against enforces %r; the digit-boundary cases "
+                      "would be comparing two different boundaries"
+                      % (RUST_IDENTITY.get("max_int_str_digits"), declared_limit))
     embedded = RUST_IDENTITY.get("tools_json")
     canonical = json.dumps(ANCHORS.cards, indent=2, ensure_ascii=False)
     if embedded != canonical:
@@ -1285,6 +1613,8 @@ def _install_tests():
         lambda self: _expect_empty(profile_errors(PROFILE, ANCHORS)))
     add("registry", "the profile covers every branch the source really has",
         lambda self: _expect_empty(coverage_errors(PROFILE)))
+    add("registry", "this interpreter's integer digit limit is the one the profile pins",
+        lambda self: _expect_empty(oracle_limit_errors(PROFILE)))
     add("registry", "the extracted AST still has the shape this oracle was written against",
         lambda self: _expect_empty(shape_errors(ANCHORS)))
 
@@ -1315,6 +1645,27 @@ def _install_tests():
         add("rust", case["id"], rust_case)
         installed_rust.append(case["id"])
 
+    # ── one decode test per case, per target ────────────────────────────────
+    for case in DECODE_CASES:
+
+        def python_decode_case(self, c=case):
+            observation = PYTHON_DECODE.get(c["id"])
+            self.assertIsNotNone(observation, "the oracle produced no decode observation")
+            _expect_empty(decode_errors(c, observation))
+
+        add("python", case["id"], python_decode_case)
+        installed_python.append(case["id"])
+
+        def rust_decode_case(self, c=case):
+            if RUST_BLOCKER:
+                self.fail("environment blocker: %s" % RUST_BLOCKER)
+            observation = RUST_DECODE.get(c["id"])
+            self.assertIsNotNone(observation, "the driver produced no decode observation")
+            _expect_empty(decode_errors(c, observation))
+
+        add("rust", case["id"], rust_decode_case)
+        installed_rust.append(case["id"])
+
     # Count what the class ACTUALLY carries, not what we meant to install.
     # registration_errors rejects the known collision before the run; this is
     # the independent check that no declared obligation went missing by some
@@ -1322,7 +1673,8 @@ def _install_tests():
     for prefix, intended in (("python", installed_python), ("rust", installed_rust)):
         actual = sum(1 for name in vars(MH02Contract) if name.startswith("test_%s_" % prefix))
         add("registry", "every declared case is installed as its own %s test" % prefix,
-            lambda self, want=len(CASES), got=actual, p=prefix: self.assertEqual(
+            lambda self, want=len(CASES) + len(DECODE_CASES), got=actual, p=prefix:
+            self.assertEqual(
                 want, got,
                 "%d cases are declared but %d are installed as %s tests, so a declared "
                 "obligation is not being executed" % (want, got, p)))
@@ -1397,6 +1749,63 @@ def _install_tests():
              **PROFILE,
              "cases": CASES + [{"id": "x", "expect": {"calls": []},
                                 "unimplemented": {"rust": "not-declared"}}]}))),
+        # ── the exact-integer machinery ────────────────────────────────────
+        ("a closed obligation that a case still declares must be caught",
+         lambda: _expect_empty(obligation_errors(_reopen_closed_obligation(PROFILE)))),
+        ("a closed obligation that names no asserting case must be caught",
+         lambda: _expect_empty(obligation_errors(_closed_without_a_case(PROFILE)))),
+        ("a closed obligation naming a case that does not exist must be caught",
+         lambda: _expect_empty(obligation_errors(_closed_by_a_ghost(PROFILE)))),
+        ("an obligation with no status at all must be caught",
+         lambda: _expect_empty(obligation_errors(_obligation_without_status(PROFILE)))),
+        ("a stale `still divergent` declaration on a case that now passes must be caught",
+         lambda: _expect_empty(bounded_obligation_errors(
+             _redeclare_wide_integer(PROFILE), PYTHON_OBSERVATIONS[WIDE_INTEGER_CASE],
+             PROFILE))),
+        ("a profile that pins a different interpreter digit limit must be caught",
+         lambda: _expect_empty(oracle_limit_errors(
+             {**PROFILE, "oracle": {**PROFILE["oracle"], "int_max_str_digits": 1234}}))),
+        ("a profile that states no interpreter digit limit must be caught",
+         lambda: _expect_empty(oracle_limit_errors(
+             {key: value for key, value in PROFILE.items() if key != "oracle"}))),
+        ("a stripped decode manifest must be caught",
+         lambda: _expect_empty(manifest_errors(
+             {key: value for key, value in PROFILE.items() if key != "decode_manifest"}))),
+        ("deleting a single decode case must be caught",
+         lambda: _expect_empty(manifest_errors(
+             {**PROFILE, "decode_cases": DECODE_CASES[:-1]}))),
+        ("a decode case id that collides with an envelope case must be caught",
+         lambda: _expect_empty(registration_errors(
+             CASES, DECODE_CASES + [{"id": CASES[0]["id"]}]))),
+        # A wide integer answered as the nearest float has the SAME value to a
+        # comparator that honours JSON's single number type. Only the lexemes
+        # tell them apart, so this control proves the lexeme assertion is the
+        # thing doing the work.
+        ("a wide id answered as the nearest float must fail on its lexeme",
+         lambda: _expect_empty(case_errors(
+             _find(CASES, WIDE_INTEGER_CASE),
+             _as_float_lexeme(PYTHON_OBSERVATIONS[WIDE_INTEGER_CASE]), PROFILE))),
+        ("an integer answered as a quoted digit string must fail",
+         lambda: _expect_empty(case_errors(
+             _find(CASES, WIDE_INTEGER_CASE),
+             _as_quoted_lexeme(PYTHON_OBSERVATIONS[WIDE_INTEGER_CASE]), PROFILE))),
+        ("a decode observation whose type is a float must fail",
+         lambda: _expect_empty(decode_errors(
+             _find(DECODE_CASES, WIDE_DECODE_CASE),
+             {**PYTHON_DECODE[WIDE_DECODE_CASE], "type": "float"}))),
+        ("a decode observation that transported quoted digits must fail",
+         lambda: _expect_empty(decode_errors(
+             _find(DECODE_CASES, WIDE_DECODE_CASE),
+             {**PYTHON_DECODE[WIDE_DECODE_CASE],
+              "value": PYTHON_DECODE[WIDE_DECODE_CASE]["dumps"]}))),
+        ("a decode observation that lost its sign must fail",
+         lambda: _expect_empty(decode_errors(
+             _find(DECODE_CASES, NEGATIVE_DECODE_CASE),
+             _unsigned(PYTHON_DECODE[NEGATIVE_DECODE_CASE])))),
+        ("a decode observation clamped to a machine width must fail",
+         lambda: _expect_empty(decode_errors(
+             _find(DECODE_CASES, WIDE_DECODE_CASE),
+             _clamped(PYTHON_DECODE[WIDE_DECODE_CASE])))),
     ]
     for label, thunk in expectation_controls:
         def control(self, t=thunk):
@@ -1531,12 +1940,16 @@ def _obligation_control(label, case_id):
     return register
 
 
-@_obligation_control("the declared f64 difference replaced by an unrelated error envelope",
-                     "obligation.id-integer-wider-than-64-bits")
+@_obligation_control("a declared skip difference replaced by an unrelated error envelope",
+                     "obligation.bare-nan-token-ends-the-loop")
 def _obligation_unrelated_error_envelope(observation, profile):
     """The reviewer's round-3 mutation, kept as a standing control.
 
-    The obligation names ONE difference: the echoed id loses precision. This
+    It used to be pinned to the wide-integer obligation; that obligation is
+    now CLOSED, so it is pinned to another declared gap instead rather than
+    being deleted along with the declaration it happened to be written
+    against. The obligation names ONE difference: the bare token is skipped
+    where the source ends its loop, so the NEXT request is answered. This
     frame loses the result envelope entirely, invents a JSON-RPC error member
     the source never emits, and answers a string id the request never sent —
     none of which the obligation excuses.
@@ -1544,8 +1957,8 @@ def _obligation_unrelated_error_envelope(observation, profile):
     return _reframe(observation, [{"jsonrpc": "2.0", "id": "WRONG-ID", "error": {"code": -1}}])
 
 
-@_obligation_control("the declared f64 difference turned into a dropped reply",
-                     "obligation.id-integer-wider-than-64-bits")
+@_obligation_control("a declared skip difference turned into a dropped reply",
+                     "obligation.bare-nan-token-ends-the-loop")
 def _obligation_dropped_reply(observation, profile):
     return _reframe(observation, [])
 
@@ -1700,8 +2113,22 @@ def _cleanup_on_timeout(self):
     session = DriverSession(driver, timeout=30.0, expect_clean_exit=False)
     with self.assertRaises(DriverTimeout):
         with session:
-            # A budget no answer can meet, so the read really does time out.
-            session.request({"op": "identify"}, timeout=0.000001)
+            # A budget of EXACTLY ZERO, so the read really does time out.
+            #
+            # This used to be 0.000001, and that made the control flaky: about
+            # one run in thirty passed the read instead of timing out, on the
+            # unchanged pre-existing suite as well as on this one.
+            # `queue.Queue.get` computes its remaining budget from a clock
+            # whose tick on this platform is far coarser than a microsecond,
+            # so `endtime - time()` stayed positive across repeated
+            # microsecond waits until the tick finally advanced — by which
+            # time the driver had answered and the read succeeded. A budget of
+            # zero is refused before any wait at all, and the driver cannot
+            # have answered in the zero elapsed time between the flush
+            # returning and the queue being looked at. The size of the budget
+            # was never what this control is about: it is about a timed-out
+            # read still closing the process and leaving nothing behind.
+            session.request({"op": "identify"}, timeout=0)
     self.assertIsNotNone(session.returncode, "a timeout must still close the driver")
     self.assertNotIn("still running", " ".join(session.cleanup_errors))
 

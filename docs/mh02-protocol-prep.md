@@ -70,7 +70,7 @@ reading of MCP or JSON-RPC, and the profile asserts the source, not the reading.
 | `native/mailhub-protocol/src/envelope.rs` | Parsing, the envelope, the CPython coercion helpers and the injected dispatcher boundary. |
 | `native/mailhub-protocol/tests/envelope_contract.rs` | The crate's own behaviour and framing checks. |
 | `native/mailhub-protocol/examples/envelope_probe.rs` | Test-only pipe driver. Never a service. |
-| `tests/fixtures/mh02-mcp-envelope.json` | The language-neutral profile: 154 cases, a case manifest, the source digests, the eight cards and the declared obligations with their bounded divergences. |
+| `tests/fixtures/mh02-mcp-envelope.json` | The language-neutral profile: 168 envelope cases and 15 decode cases, a manifest for each, the pinned interpreter's integer digit limit, the source digests, the eight cards and the declared obligations with their bounded divergences. |
 | `tests/mh02_mcp_contract.py` | The shared assertions plus the Python and Rust adapters. |
 | `docs/mh02-protocol-prep.md` | This file. |
 
@@ -125,11 +125,46 @@ ones it cannot:
   so the source skips the line in silence — lost its minus, became the valid
   `{"x":10}`, and was dispatched to a handler as real work. `framing.minus-zero-*`
   carries that input and its neighbours at the public boundary.
+* **Exact integers.** CPython's integers are unbounded; a machine word is
+  not, and `serde_json` converts a literal outside i64/u64 to an `f64` before
+  any visitor can see it. The crate therefore enables `arbitrary_precision`, a
+  serde_json-only feature that adds no package to the lock, and takes the RAW
+  LEXEME instead of a converted number. Nothing is rounded on the way in, and
+  `PyInt` keeps the value as canonical decimal text — an optional `-`, digits
+  with no leading zero, `"0"` for zero — which is exactly CPython's own
+  `str()` of the integer, so decode, id echo, `str`/`repr`, `json.dumps` and
+  the driver's own report all write the same digits. **No integer transits
+  `f64` and none is ever written as a quoted string**; on the wire it is a
+  bare JSON number token, and the profile asserts the token text as well as
+  the value, because a comparator that honours JSON's single number type
+  cannot tell `100` from `1e2` or a wide integer from the float it rounds to.
+  Two boundaries come with it. CPython refuses to convert an integer longer
+  than `sys.get_int_max_str_digits()` decimal digits — 4300 on the pinned
+  verification interpreter, both live and by default — and raises
+  `ValueError`, which the source's `except ValueError: continue` turns into a
+  silent skip; the crate states the same bound as `MAX_INT_STR_DIGITS` and
+  skips the same lines, so 4300 digits is answered by both sides and 4301 is
+  skipped by both. An interpreter configured with another limit is a
+  qualification mismatch: the profile asserts the live and default values, and
+  the driver reports the bound it enforces so the two are compared before any
+  case is judged. And `arbitrary_precision` delivers a number as a ONE-ENTRY
+  MAP under the private key `$serde_json::private::Number`, which ordinary
+  JSON could spell too; three conditions have to hold together before a map is
+  read as a number — the value arrives as an OWNED `String` (serde_json's
+  parser never does that for a document string; `StrRead`/`SliceRead` borrow
+  or copy a `&str` and `IoRead` calls `visit_str`), the map holds exactly that
+  one entry, and the text is one complete JSON number token. When any of them
+  fails the entry stays an ordinary key and string value and the map is
+  finished as the mapping it is. A user object built to look like the marker
+  is carried as a profile case and as a crate test.
 * **Nesting depth.** `serde_json`'s default bound is 128 nested containers,
   which ordinary input can cross while CPython's decoder does not. The crate
   raises that bound (`unbounded_depth`, a serde_json-only feature that adds no
   package) and enforces its own stated `MAX_NESTING_DEPTH` of 256, so 140-deep
-  input is answered identically on both sides.
+  input is answered identically on both sides. A number is a SCALAR however
+  the parser delivers it, so the one-entry map that carries a wide integer
+  does not consume a nesting level: the first key is read before the depth
+  test, and a crate test holds that shut at exactly the bound.
 * **Refusal versus silence.** `DecodeError` separates `Malformed`, which is
   skipped in silence under the source's `except ValueError: continue`, from
   `Unrepresentable`, which stops the run with a NAMED refusal because routing
@@ -139,13 +174,17 @@ ones it cannot:
   depth bound, and on the two `repr`/mapping-key boundaries below.
   `Malformed` is the default arm, and it is **not** a proof that CPython would
   have rejected the same text. It carries every parser failure other than the
-  depth bound, and `serde_json` rejects some input CPython accepts. The four
-  known ones — the bare `NaN`/`Infinity` tokens, a lone surrogate escape, an
-  integer wider than 64 bits, and an overflowing literal such as `1e999` — are
-  recorded as named obligations and exercised from both sides, so they are
-  visible rather than hidden. What the split cannot promise is that no
-  FURTHER such input exists; only the ones written down are accounted for, and
-  finding another one means adding an obligation, not widening this arm.
+  depth bound, and `serde_json` rejects some input CPython accepts. The three
+  known ones — the bare `NaN`/`Infinity` tokens, a lone surrogate escape, and
+  an overflowing literal such as `1e999` — are recorded as named obligations
+  and exercised from both sides, so they are visible rather than hidden. What
+  the split cannot promise is that no FURTHER such input exists; only the ones
+  written down are accounted for, and finding another one means adding an
+  obligation, not widening this arm. One refusal in this arm is **parity, not
+  a divergence**: an integer literal longer than the pinned interpreter's
+  `MAX_INT_STR_DIGITS` decimal digits, where CPython raises `ValueError` and
+  the source skips the line too. Naming it as an obligation would record a
+  difference that is not there.
 * **Which refusal, not just that one happened.** Every `Unrepresentable`
   carries a `Refusal`: a STABLE reason name — `nesting-depth-exceeded`,
   `repr-of-non-ascii-string`, `non-string-dict-key` — plus the `fields` that
@@ -267,7 +306,7 @@ observation to stop being accepted by it.
 
 | Obligation | What Rust cannot do |
 |---|---|
-| `numeric-domain.integer-wider-than-64-bits` | CPython integers are unbounded; `serde_json` narrows anything outside i64/u64 to f64, so a 23-digit id loses its exact value. |
+| ~~`numeric-domain.integer-wider-than-64-bits`~~ **CLOSED** | CPython integers are unbounded and `serde_json` USED TO narrow anything outside i64/u64 to f64, so a 23-digit id lost its exact value. It no longer does: see **Exact integers** above. The obligation keeps its id and the case that carried it keeps its own, and both now assert the source's answer. A stale `still divergent` declaration on a case that passes is a failure, and so is a `closed` row that names no case asserting the behaviour, names a case that does not exist, or is still declared by one. |
 | `numeric-domain.bare-non-standard-tokens` | CPython's `json` accepts bare `NaN`/`Infinity`/`-Infinity` and returns a float, which ends the source's loop. `serde_json` rejects them, so Rust skips the line and keeps going. |
 | `string-domain.lone-surrogate-escape` | CPython decodes a lone `\ud800` into an unpaired surrogate and returns a `str`, ending the loop. `serde_json` rejects it; a Rust `String` cannot hold one. |
 | `repr-domain.non-ascii-inside-a-container` | `repr()` of a non-ASCII string follows CPython's printability table. The crate refuses with reason `repr-of-non-ascii-string` and the string itself, instead of guessing. `str()` of a bare string tool name — the reachable case — is exact. |
@@ -275,8 +314,8 @@ observation to stop being accepted by it.
 | `numeric-domain.overflowing-float-literal` | CPython decodes a finite literal whose exponent overflows, such as `1e999`, to the float `inf`, which ends the source's loop. `serde_json` reports it as out of range, so Rust skips the line. |
 | `depth-domain.nesting-past-the-stated-bound` | CPython's decoder accepts nesting far deeper than this crate states a bound for. Past `MAX_NESTING_DEPTH` the crate refuses the line with reason `nesting-depth-exceeded` and the bound it exceeded, rather than letting a decoder error read as the source's silent skip. 140 deep is answered identically by both; 257 deep is the declared refusal. |
 
-`arbitrary_precision` is deliberately **not** enabled on `serde_json`: it would
-change the numeric domain this slice is characterising rather than record it.
+Six obligations remain open and unchanged by this slice. The seventh is
+closed above; nothing else moved, and both MH01 conversion blockers stay open.
 
 ## Toolchain and dependencies
 
@@ -309,19 +348,29 @@ rather than left to be rediscovered.) There is no SQL, HTTP, async or process de
 and none is needed. The lock was generated and every check runs with
 `--offline --locked`.
 
-Feature selection, stated rather than defaulted: `unbounded_depth` is ON (a
-serde_json-only feature, no package), because the library's 128-container
-default is shallower than CPython's and the crate enforces its own stated bound
-instead. `arbitrary_precision` is OFF and `preserve_order` is unused — the
-first would change the numeric domain this slice is characterising rather than
-record it, and the second would add `indexmap` and `equivalent` to the lock.
+Feature selection, stated rather than defaulted, and **the lock is byte
+identical either way** — every feature below is serde_json-only and adds no
+package. `unbounded_depth` is ON, because the library's 128-container default
+is shallower than CPython's and the crate enforces its own stated bound
+instead. `arbitrary_precision` is ON, because it is the only way to see a wide
+integer's exact digits without hand-writing a JSON parser: it hands over the
+raw lexeme rather than a converted number. `float_roundtrip` is OFF and not
+needed — float lexemes are parsed with Rust's own correctly-rounded `f64`
+parser, which agrees with CPython's `float()` on every finite literal.
+`preserve_order` is unused, because it would add `indexmap` and `equivalent`
+to the lock; the crate decodes into its own insertion-ordered `PyValue`
+instead.
 
-Numeric-domain behaviour of the chosen decoder, recorded: integers inside i64 or
-u64 are exact (including 2⁵³+1, which a naive f64 implementation loses);
-anything wider becomes f64; `NaN`, `Infinity` and `-Infinity` are rejected as
-input, and so is a finite literal whose exponent overflows, such as `1e999`,
-where CPython returns `inf`; the integer token `-0` is normalised to the `int`
-0 the way CPython decodes it, while `-0.0` and `-0e0` stay negative zero; float
+Numeric-domain behaviour of the chosen decoder, recorded: every integer the
+pinned interpreter accepts is exact, at any width — 2⁵³±1, the i64 and u64
+boundaries, past 2¹²⁷, 100 digits and the interpreter's own 4300-digit bound —
+and two integers that share one `f64` stay two integers; an integer literal
+with more than 4300 decimal digits is skipped, which is what CPython's
+`ValueError` makes the source do as well; `NaN`, `Infinity` and `-Infinity`
+are rejected as input, and so is a finite literal whose exponent overflows,
+such as `1e999`, where CPython returns `inf`; the integer token `-0` is the
+`int` 0 the way CPython decodes it, while `-0.0` and `-0e0` stay negative
+zero; an exponent or fraction spelling is a `float` and stays one; float
 output differs from CPython only in formatting, which value comparison
 absorbs.
 
@@ -337,6 +386,15 @@ python -B tests/test_mh01_inventory.py
 python -B tests/mh01_contract.py
 python -B tests/mh02_mcp_contract.py --target both --rust-driver <built envelope_probe>
 ```
+
+The profile runs 433 tests: 168 envelope cases and 15 decode cases on each of
+the two targets, plus the registry, control, obligation and cleanup checks. An
+ENVELOPE case puts a whole stdin text through `serve()` and judges the reply
+stream; a DECODE case puts ONE line through the decoder alone and judges what
+CPython says the value IS — its type name, `str()`, `repr()`, `json.dumps()`,
+its digit count, and the value that actually travelled down the pipe. Decode
+cases carry only input the two sides agree on; every declared divergence stays
+in the obligation machinery above.
 
 A missing Rust driver is an **environment blocker** that fails the run. It is
 never a skip and never a pass: `--target python` alone, an absent driver and a
