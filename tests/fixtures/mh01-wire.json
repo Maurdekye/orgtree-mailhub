@@ -1,0 +1,871 @@
+{
+  "schema": "orgtree.mailhub-wire-profile/v1",
+  "source_commit": "6e856eec8ccfbcf8d16451123903b9d2ce16450b",
+  "intent": "The mail hub's public boundary, frozen as language-neutral cases. This file is the contract; a driver is only one way to execute it. The Python driver (tests/mh01_contract.py) qualifies the pinned Python source; a second driver against the Rust binary qualifies the port with no change to this file.",
+  "conventions": {
+    "principals": "Symbolic names. The driver mints a fresh random slug and secret per principal per case, so no credential is ever written here.",
+    "placeholders": "@<principal>.slug resolves to that principal's address; @cap.<name> to a value captured from an earlier response; @env.hub_name and @env.retention_days to the hub's configured identity.",
+    "as": "Principals whose credentials go in X-Org-Auth, space separated. A ':bad' suffix presents a WRONG secret for that real slug. Omitted means no header at all.",
+    "surface": "'full' is the whole app; 'public' is the FR-10 API-only listener. Coverage accounting uses the full surface only.",
+    "legacy": "true marks behaviour recorded as it IS, not as v3 wants it. A port must reproduce it or carry a recorded ruling to change it -- it must not be silently 'fixed'.",
+    "store": "Two seams a wire profile cannot express: backdating a row, and running one retention pass. Any driver must provide both."
+  },
+  "cases": [
+    {
+      "id": "register.first-registration-returns-hub-identity-and-roster",
+      "family": "registration",
+      "intent": "A first registration mints the address and answers with the hub's identity, its retention policy and the full roster.",
+      "principals": ["alpha"],
+      "steps": [
+        {
+          "request": {"method": "POST", "path": "/api/register", "as": ["alpha"],
+                      "json": {"slug": "@alpha.slug", "org_name": "Alpha Org", "username": "alice", "blurb": "first"}},
+          "expect": {"status": 200,
+                     "keys_exactly": ["ok", "name", "retention_days", "roster"],
+                     "json": {"ok": true, "name": "@env.hub_name", "retention_days": "@env.retention_days"}}
+        }
+      ]
+    },
+    {
+      "id": "register.roster-row-carries-display-fields-and-kind",
+      "family": "registration",
+      "intent": "The roster row a client sees is slug/org_name/username/blurb/online/last_seen/kind. Default kind is 'org'.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"],
+                     "json": {"slug": "@alpha.slug", "org_name": "Alpha Org", "username": "alice", "blurb": "hello"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/api/roster", "as": ["alpha"]},
+         "expect": {"status": 200, "keys_exactly": ["name", "roster"]}}
+      ]
+    },
+    {
+      "id": "register.kind-chat-is-recorded",
+      "family": "registration",
+      "intent": "FR-06: an independent chat session registers as kind 'chat'; anything other than the exact string 'chat' falls back to 'org'.",
+      "principals": ["chatter", "weird"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["chatter"],
+                     "json": {"slug": "@chatter.slug", "org_name": "a chat", "kind": "chat"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["weird"],
+                     "json": {"slug": "@weird.slug", "org_name": "odd", "kind": "something-else"}},
+         "expect": {"status": 200}}
+      ]
+    },
+    {
+      "id": "register.malformed-slug-is-refused-422",
+      "family": "registration",
+      "intent": "The slug grammar is ^[a-z0-9][a-z0-9._-]{0,127}$. Uppercase, spaces and a leading separator are all refused.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "Not A Slug!"}},
+         "expect": {"status": 422}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "-leading-dash"}},
+         "expect": {"status": 422}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": ""}},
+         "expect": {"status": 422}}
+      ]
+    },
+    {
+      "id": "register.without-a-secret-for-that-slug-is-refused-401",
+      "family": "registration",
+      "intent": "Registration authenticates INLINE rather than through the shared helper: the header must carry a secret for the very slug being registered. No header, or a header for a different slug, is refused.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "json": {"slug": "@alpha.slug"}},
+         "expect": {"status": 401}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@alpha.slug"}},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "register.address-ownership-first-write-wins-403",
+      "family": "registration",
+      "intent": "Joining is open but ADDRESSES are owned. Once a slug is held, a different secret is refused 403 -- taking it requires producing a secret that hashes to the holder's stored fingerprint.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug", "org_name": "the holder"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha:bad"], "json": {"slug": "@alpha.slug", "org_name": "the thief"}},
+         "expect": {"status": 403}}
+      ]
+    },
+    {
+      "id": "register.re-registration-refreshes-display-fields",
+      "family": "registration",
+      "intent": "The same secret re-registering is not an error: it updates org_name/username/blurb and keeps the address.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug", "org_name": "before"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug", "org_name": "after", "blurb": "changed"}},
+         "expect": {"status": 200, "json": {"ok": true}}}
+      ]
+    },
+    {
+      "id": "unregister.authenticated-client-removes-its-own-rows",
+      "family": "registration",
+      "intent": "The polite exit removes only the caller's own roster rows and names them back.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/unregister", "as": ["alpha"], "json": {}},
+         "expect": {"status": 200, "keys_exactly": ["unregistered"],
+                    "equals_at": {"unregistered.0": "@alpha.slug"}, "length": {"unregistered": 1}}}
+      ]
+    },
+    {
+      "id": "unregister.without-credentials-is-refused-401",
+      "family": "registration",
+      "intent": "An unauthenticated caller cannot remove anyone.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/unregister", "json": {}},
+         "expect": {"status": 401}}
+      ]
+    },
+
+    {
+      "id": "auth.wrong-secret-is-not-a-principal",
+      "family": "authentication",
+      "intent": "A wrong secret for a real slug does not authenticate. This is the address-theft attempt in its cheapest form; the hub compares the FULL sha256 digest, never the 6-character display suffix.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/api/roster", "as": ["alpha:bad"]},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "auth.malformed-header-yields-no-principals",
+      "family": "authentication",
+      "intent": "A header with no colon, an empty slug or an empty secret contributes no principal, so the call is refused rather than partially trusted.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "GET", "path": "/api/roster", "raw_auth": "garbage-with-no-colon"},
+         "expect": {"status": 401}},
+        {"request": {"method": "GET", "path": "/api/roster", "raw_auth": ":secret-without-slug"},
+         "expect": {"status": 401}},
+        {"request": {"method": "GET", "path": "/api/roster", "raw_auth": "slug-without-secret:"},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "auth.unknown-slug-is-refused",
+      "family": "authentication",
+      "intent": "A never-registered slug is simply not a principal.",
+      "principals": ["ghost"],
+      "steps": [
+        {"request": {"method": "GET", "path": "/api/roster", "as": ["ghost"]},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "auth.multiplexed-header-proceeds-for-the-valid-principals",
+      "family": "authentication",
+      "intent": "One call may carry several identities. Invalid pairs drop out of the principal set; the call proceeds for the valid ones rather than failing whole.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/api/roster", "as": ["alpha", "beta"]},
+         "expect": {"status": 200, "keys_exactly": ["name", "roster"]}}
+      ]
+    },
+    {
+      "id": "roster.requires-credentials-401",
+      "family": "roster",
+      "intent": "The roster is not public on the API surface.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "GET", "path": "/api/roster"}, "expect": {"status": 401}}
+      ]
+    },
+
+    {
+      "id": "send.accepted-message-returns-hub-custody",
+      "family": "send",
+      "intent": "The 200 IS the 'received' receipt: it confirms hub custody and returns the id, the hub-clock received_at and whether this was a duplicate.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "hello beta", "kind": "note"}},
+         "expect": {"status": 200, "keys_exactly": ["id", "received_at", "duplicate"],
+                    "json": {"duplicate": false}},
+         "capture": {"mid": "id"}}
+      ]
+    },
+    {
+      "id": "send.envelope-shape-on-delivery",
+      "family": "send",
+      "intent": "The envelope a recipient sees is exactly id/from/to/body/kind/thread_id/sent_at/received_at/attachments. `sent_at` is the sender's claim and rides through untouched; `received_at` is the hub clock and is the ordering authority.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "shape", "kind": "note",
+                              "thread_id": "t-1", "sent_at": "2020-01-01T00:00:00.000Z"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "json": {"messages": [{"from": "@alpha.slug", "to": "@beta.slug",
+                                           "body": "shape", "kind": "note", "thread_id": "t-1",
+                                           "sent_at": "2020-01-01T00:00:00.000Z",
+                                           "attachments": []}]}}}
+      ]
+    },
+    {
+      "id": "send.unauthenticated-is-refused-401",
+      "family": "send",
+      "intent": "A sender must present credentials, and the `from` it claims must be one of them.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "json": {"to": "@beta.slug", "body": "x"}},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "send.spoofed-from-is-refused-401",
+      "family": "send",
+      "intent": "Presenting alpha's credentials while claiming to be beta is refused: `from` must be inside the authenticated set.",
+      "principals": ["alpha", "beta", "victim"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["victim"], "json": {"slug": "@victim.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"from": "@victim.slug", "to": "@beta.slug", "body": "not from me"}},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "send.unknown-recipient-is-refused-422",
+      "family": "send",
+      "intent": "The hub refuses mail to an address nobody holds, rather than queueing for a stranger.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "nobody-holds-this-address", "body": "x"}},
+         "expect": {"status": 422}}
+      ]
+    },
+    {
+      "id": "send.body-is-truncated-at-20000-characters",
+      "family": "send",
+      "intent": "BODY_MAX mirrors the org-inbox truncation. An over-long body is TRUNCATED and accepted, not refused -- the port must not turn this into an error.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": {"@repeat": {"unit": "a", "times": 20050}}}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages.0.body": 20000}}}
+      ]
+    },
+    {
+      "id": "send.replay-of-the-same-id-is-a-duplicate-and-the-first-payload-wins",
+      "family": "send",
+      "intent": "The message id is client-minted and the insert is INSERT OR IGNORE, so a retry is idempotent: the second call reports duplicate:true, returns the ORIGINAL received_at, and the stored body stays the first one.",
+      "legacy": true,
+      "legacy_note": "This is NOT the approved v3 original-key replay contract. A same-id send with a CHANGED payload is silently accepted as a duplicate rather than refused as a conflict, and the changed body is discarded without telling the sender. Recorded as it is; a port must not quietly bless it as the target semantics, and must not quietly fix it either -- changing it needs a recorded ruling.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"id": "replay-case-id-1", "to": "@beta.slug", "body": "the original"}},
+         "expect": {"status": 200, "json": {"duplicate": false, "id": "replay-case-id-1"}},
+         "capture": {"first_received": "received_at"}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"id": "replay-case-id-1", "to": "@beta.slug", "body": "a DIFFERENT body"}},
+         "expect": {"status": 200, "json": {"duplicate": true, "received_at": "@cap.first_received"}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "json": {"messages": [{"body": "the original"}]}}}
+      ]
+    },
+    {
+      "id": "send.more-than-ten-attachments-is-refused-422",
+      "family": "send",
+      "intent": "MAX_FILES_PER_MESSAGE is 10 and is checked before any attachment is resolved.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "too many",
+                              "attachments": ["a1","a2","a3","a4","a5","a6","a7","a8","a9","a10","a11"]}},
+         "expect": {"status": 422}}
+      ]
+    },
+    {
+      "id": "send.unknown-or-foreign-attachment-is-refused-422",
+      "family": "send",
+      "intent": "An attachment id must exist AND be owned by the sender. A stranger's blob cannot be attached to your mail.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "x", "attachments": ["no-such-attachment-id"]}},
+         "expect": {"status": 422}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["beta"],
+                     "params": {"name": "betas.bin"}, "content": "beta owns this"},
+         "expect": {"status": 200}, "capture": {"betas_aid": "id"}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "x", "attachments": ["@cap.betas_aid"]}},
+         "expect": {"status": 422}}
+      ]
+    },
+
+    {
+      "id": "poll.requires-credentials-401",
+      "family": "custody",
+      "intent": "Polling is authenticated; there is no anonymous drain.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/poll", "params": {"wait": "0"}, "json": {}},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "poll.returns-queued-mail-in-received-order",
+      "family": "custody",
+      "intent": "received_at then rowid is the ordering authority -- NOT the sender's claimed sent_at. Here sent_at is deliberately reversed and the delivery order must still follow the hub clock.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "first", "sent_at": "2030-01-01T00:00:00.000Z"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "second", "sent_at": "2000-01-01T00:00:00.000Z"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "keys_exactly": ["name", "messages", "receipts", "roster"],
+                    "sequence": {"path": "messages", "field": "body", "equals": ["first", "second"]}}}
+      ]
+    },
+    {
+      "id": "poll.redelivers-until-the-recipient-acks",
+      "family": "custody",
+      "intent": "Delivery is at-least-once. A message stays queued -- and keeps coming back on every poll -- until the recipient acknowledges custody. Collapsing the repeat is the client's job.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "sticky"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "json": {"messages": [{"id": "@cap.mid", "body": "sticky"}]}}},
+        {"request": {"method": "POST", "path": "/api/ack", "as": ["beta"], "json": {"ids": ["@cap.mid"]}},
+         "expect": {"status": 200, "keys_exactly": ["acked"], "json": {"acked": 1}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 0}}}
+      ]
+    },
+    {
+      "id": "ack.only-the-recipient-may-take-custody",
+      "family": "custody",
+      "intent": "The sender acknowledging its own message must be a no-op. Custody belongs to the addressee.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "mine"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/ack", "as": ["alpha"], "json": {"ids": ["@cap.mid"]}},
+         "expect": {"status": 200, "json": {"acked": 0}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1}}}
+      ]
+    },
+    {
+      "id": "ack.repeating-an-ack-counts-zero",
+      "family": "custody",
+      "intent": "Only the queued->fetched transition counts. A repeated ack is accepted and reports 0, so a retrying client cannot inflate custody.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "once"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/ack", "as": ["beta"], "json": {"ids": ["@cap.mid"]}},
+         "expect": {"status": 200, "json": {"acked": 1}}},
+        {"request": {"method": "POST", "path": "/api/ack", "as": ["beta"], "json": {"ids": ["@cap.mid"]}},
+         "expect": {"status": 200, "json": {"acked": 0}}}
+      ]
+    },
+    {
+      "id": "ack.requires-credentials-401",
+      "family": "custody",
+      "intent": "There is no anonymous acknowledgment.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/ack", "json": {"ids": ["whatever"]}},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "poll.one-call-multiplexes-every-identity-it-presents",
+      "family": "custody",
+      "intent": "One instance holds several orgs and polls once for all of them. Mail for each presented identity arrives in the same response.",
+      "principals": ["sender", "orgone", "orgtwo"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["sender"], "json": {"slug": "@sender.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["orgone"], "json": {"slug": "@orgone.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["orgtwo"], "json": {"slug": "@orgtwo.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["sender"], "json": {"to": "@orgone.slug", "body": "for one"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["sender"], "json": {"to": "@orgtwo.slug", "body": "for two"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["orgone", "orgtwo"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 2},
+                    "sequence": {"path": "messages", "field": "body", "equals": ["for one", "for two"]}}}
+      ]
+    },
+
+    {
+      "id": "receipts.delivered-then-read-climb-the-ladder",
+      "family": "receipts",
+      "intent": "The recipient reports delivered, then read; the sender collects both on its own poll. 'fetched' comes from the ack, 'delivered' and 'read' from the recipient's receipts.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "ladder"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/ack", "as": ["beta"], "json": {"ids": ["@cap.mid"]}},
+         "expect": {"status": 200, "json": {"acked": 1}}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["beta"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "delivered", "at": "2026-01-01T00:00:00.000Z"}]}},
+         "expect": {"status": 200, "keys_exactly": ["recorded"], "json": {"recorded": 1}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["alpha"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"receipts": 1},
+                    "json": {"receipts": [{"id": "@cap.mid", "state": "delivered"}]}}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["beta"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "read", "at": "2026-01-02T00:00:00.000Z"}]}},
+         "expect": {"status": 200, "json": {"recorded": 1}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["alpha"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"receipts": 1},
+                    "json": {"receipts": [{"id": "@cap.mid", "state": "read"}]}}}
+      ]
+    },
+    {
+      "id": "receipts.are-pushed-to-the-sender-once",
+      "family": "receipts",
+      "intent": "A receipt is marked pushed when it is returned, so the sender's NEXT poll does not repeat it. This is loss-tolerant by design: a dropped response loses display state, never a message.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "once only"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["beta"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "delivered"}]}},
+         "expect": {"status": 200, "json": {"recorded": 1}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["alpha"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"receipts": 1}}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["alpha"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"receipts": 0}}}
+      ]
+    },
+    {
+      "id": "receipts.a-rung-is-written-once-and-only-by-the-recipient",
+      "family": "receipts",
+      "intent": "The timestamp column is set only while NULL, so a second 'delivered' records 0 -- the ladder is monotonic. A third party cannot report on someone else's mail.",
+      "principals": ["alpha", "beta", "stranger"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["stranger"], "json": {"slug": "@stranger.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "monotonic"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["stranger"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "delivered"}]}},
+         "expect": {"status": 200, "json": {"recorded": 0}}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["beta"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "delivered"}]}},
+         "expect": {"status": 200, "json": {"recorded": 1}}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["beta"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "delivered"}]}},
+         "expect": {"status": 200, "json": {"recorded": 0}}}
+      ]
+    },
+    {
+      "id": "receipts.unknown-states-are-ignored-not-refused",
+      "family": "receipts",
+      "intent": "Only 'delivered' and 'read' are recorded. Anything else is skipped silently and counts 0 -- the call still succeeds.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "states"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/receipts", "as": ["beta"],
+                     "json": {"receipts": [{"id": "@cap.mid", "state": "banana"},
+                                           {"id": "@cap.mid", "state": "fetched"}]}},
+         "expect": {"status": 200, "json": {"recorded": 0}}}
+      ]
+    },
+    {
+      "id": "receipts.requires-credentials-401",
+      "family": "receipts",
+      "intent": "Receipt reporting is authenticated.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/receipts", "json": {"receipts": []}},
+         "expect": {"status": 401}}
+      ]
+    },
+
+    {
+      "id": "attachments.upload-returns-an-id-and-the-stored-length",
+      "family": "attachments",
+      "intent": "The uploader gets back a server-minted id and the byte count actually stored. The filename arrives as a query parameter and is basename-d and capped at 255 characters.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "notes.txt"}, "content": "twelve bytes"},
+         "expect": {"status": 200, "keys_exactly": ["id", "bytes"], "json": {"bytes": 12}}}
+      ]
+    },
+    {
+      "id": "attachments.upload-requires-credentials-401",
+      "family": "attachments",
+      "intent": "Anonymous blob upload is refused; the first presented principal becomes the owner.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/attachments", "params": {"name": "x.bin"}, "content": "x"},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "attachments.oversize-upload-is-refused-413",
+      "family": "attachments",
+      "intent": "MAX_FILE_BYTES is 25 MiB and mirrors the orgtree caps. One byte over is refused with 413, not truncated.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "big.bin"},
+                     "content": {"@repeat": {"unit": "x", "times": 26214401}}},
+         "expect": {"status": 413}}
+      ]
+    },
+    {
+      "id": "attachments.owner-may-download-its-own-blob",
+      "family": "attachments",
+      "intent": "Before any send binds it, only the owner can fetch the blob.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "mine.txt"}, "content": "owner content"},
+         "expect": {"status": 200}, "capture": {"aid": "id"}},
+        {"request": {"method": "GET", "path": "/api/attachments/@cap.aid", "as": ["alpha"]},
+         "expect": {"status": 200, "text_contains": ["owner content"],
+                    "header_contains": {"content-type": "application/octet-stream"}}}
+      ]
+    },
+    {
+      "id": "attachments.recipient-may-download-once-a-send-binds-it",
+      "family": "attachments",
+      "intent": "Binding an attachment to a message extends read rights to that message's addressee -- and to nobody else.",
+      "principals": ["alpha", "beta", "stranger"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["stranger"], "json": {"slug": "@stranger.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "shared.txt"}, "content": "shared payload"},
+         "expect": {"status": 200}, "capture": {"aid": "id"}},
+        {"request": {"method": "GET", "path": "/api/attachments/@cap.aid", "as": ["beta"]},
+         "expect": {"status": 403}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "with a file", "attachments": ["@cap.aid"]}},
+         "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/api/attachments/@cap.aid", "as": ["beta"]},
+         "expect": {"status": 200, "text_contains": ["shared payload"]}},
+        {"request": {"method": "GET", "path": "/api/attachments/@cap.aid", "as": ["stranger"]},
+         "expect": {"status": 403}}
+      ]
+    },
+    {
+      "id": "attachments.metadata-rides-the-envelope",
+      "family": "attachments",
+      "intent": "The recipient learns id/name/bytes with the message itself, so it never has to be told out of band that files exist.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "report.pdf"}, "content": "0123456789"},
+         "expect": {"status": 200}, "capture": {"aid": "id"}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "see attached", "attachments": ["@cap.aid"]}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200,
+                    "json": {"messages": [{"attachments": [{"id": "@cap.aid", "name": "report.pdf", "bytes": 10}]}]}}}
+      ]
+    },
+    {
+      "id": "attachments.download-of-an-unknown-id-is-404",
+      "family": "attachments",
+      "intent": "An id nobody minted is 404 -- distinct from 403 for a real blob you may not read.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/api/attachments/deadbeefdeadbeef", "as": ["alpha"]},
+         "expect": {"status": 404}}
+      ]
+    },
+    {
+      "id": "attachments.download-requires-credentials-401",
+      "family": "attachments",
+      "intent": "Even a correct id is refused without credentials.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "GET", "path": "/api/attachments/deadbeefdeadbeef"},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "attachments.a-row-whose-blob-is-gone-is-410",
+      "family": "attachments",
+      "intent": "Metadata outliving its bytes is reported as 410 gone, not as a 404 or an empty 200. The retention sweep removes file and row together, so this is the torn-state answer.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "vanishing.txt"}, "content": "here for now"},
+         "expect": {"status": 200}, "capture": {"aid": "id"}},
+        {"store": {"op": "remove_blob", "id": "@cap.aid"}},
+        {"request": {"method": "GET", "path": "/api/attachments/@cap.aid", "as": ["alpha"]},
+         "expect": {"status": 410}}
+      ]
+    },
+
+    {
+      "id": "health.reports-identity-counts-and-policy",
+      "family": "health",
+      "intent": "healthz is unauthenticated and is what a host readiness probe consumes: ok, the hub name, the org count, the queued count and the retention policy.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/healthz"},
+         "expect": {"status": 200,
+                    "keys_exactly": ["ok", "name", "orgs", "queued", "retention_days"],
+                    "json": {"ok": true, "name": "@env.hub_name", "retention_days": "@env.retention_days"}}}
+      ]
+    },
+
+    {
+      "id": "operator-ui.index-is-served-unauthenticated",
+      "family": "operator-ui",
+      "intent": "RULED, not a defect: on a closed network hub access IS read access to all mail, so the read-only view at / carries no credential check. A port must keep it unauthenticated AND keep it off the public listener.",
+      "principals": [],
+      "steps": [
+        {"request": {"method": "GET", "path": "/"},
+         "expect": {"status": 200, "header_contains": {"content-type": "text/html"}}}
+      ]
+    },
+    {
+      "id": "operator-ui.data-lists-every-org-with-its-queue-depth",
+      "family": "operator-ui",
+      "intent": "/ui/data is the roster plus a per-org queued count, unauthenticated.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "queued one"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/ui/data"},
+         "expect": {"status": 200, "keys_exactly": ["name", "retention_days", "orgs"]}}
+      ]
+    },
+    {
+      "id": "operator-ui.messages-are-newest-first",
+      "family": "operator-ui",
+      "intent": "The operator page sorts received_at DESC, rowid DESC -- the reverse of delivery order -- and rides `n` (the rowid) out on every row for the cursor.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "older"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "newer"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"org": "@alpha.slug"}},
+         "expect": {"status": 200, "keys_exactly": ["messages"],
+                    "sequence": {"path": "messages", "field": "body", "equals": ["newer", "older"]}}}
+      ]
+    },
+    {
+      "id": "operator-ui.keyset-cursor-pages-strictly-older-rows",
+      "family": "operator-ui",
+      "intent": "(before_at, before_n) is a keyset cursor in the SAME order the page sorts by, so paging stays stable while new mail keeps arriving. An OFFSET would skip or duplicate rows whenever the head moved.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "page-1"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "page-2"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "page-3"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"org": "@alpha.slug", "limit": "1"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "sequence": {"path": "messages", "field": "body", "equals": ["page-3"]}},
+         "capture": {"cursor_at": "messages.0.received_at", "cursor_n": "messages.0.n"}},
+        {"request": {"method": "GET", "path": "/ui/messages",
+                     "params": {"org": "@alpha.slug", "limit": "1",
+                                "before_at": "@cap.cursor_at", "before_n": "@cap.cursor_n"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "sequence": {"path": "messages", "field": "body", "equals": ["page-2"]}},
+         "capture": {"cursor_at": "messages.0.received_at", "cursor_n": "messages.0.n"}},
+        {"request": {"method": "GET", "path": "/ui/messages",
+                     "params": {"org": "@alpha.slug", "limit": "1",
+                                "before_at": "@cap.cursor_at", "before_n": "@cap.cursor_n"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "sequence": {"path": "messages", "field": "body", "equals": ["page-1"]}}}
+      ]
+    },
+    {
+      "id": "operator-ui.limit-is-clamped-between-1-and-500",
+      "family": "operator-ui",
+      "intent": "A caller cannot ask the operator page for an unbounded read, and cannot ask for nothing either.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "clamp"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"org": "@alpha.slug", "limit": "99999"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"org": "@alpha.slug", "limit": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1}}}
+      ]
+    },
+    {
+      "id": "operator-ui.client-filter-folds-case-and-underscores",
+      "family": "operator-ui",
+      "intent": "The UI groups by the REGISTERED username while the slug's middle segment is the sanitized one -- identical for orgs, diverging for chats (raw ncola_k8bx vs slug ncola-k8bx). Neither key is ever rewritten; both are folded on case and _/- for the comparison.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"],
+                     "json": {"slug": "@alpha.slug", "username": "Ncola_K8bx", "kind": "chat"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "from the chat"}}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"client": "ncola-k8bx"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "json": {"messages": [{"body": "from the chat"}]}}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"client": "NCOLA_K8BX"}},
+         "expect": {"status": 200, "length": {"messages": 1}}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"client": "nobody-by-that-name"}},
+         "expect": {"status": 200, "length": {"messages": 0}}}
+      ]
+    },
+    {
+      "id": "operator-ui.message-rows-carry-state-and-the-receipt-stamps",
+      "family": "operator-ui",
+      "intent": "Beyond the envelope, the operator view adds state, delivered_at, read_at and n. `n` is the rowid and is the cursor identity a migration must not lose.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "inspect me"}},
+         "expect": {"status": 200}, "capture": {"mid": "id"}},
+        {"request": {"method": "GET", "path": "/ui/messages", "params": {"org": "@alpha.slug"}},
+         "expect": {"status": 200,
+                    "json": {"messages": [{"id": "@cap.mid", "state": "queued",
+                                           "delivered_at": null, "read_at": null}]}}}
+      ]
+    },
+
+    {
+      "id": "public-split.api-and-health-pass-through",
+      "family": "public-split",
+      "surface": "public",
+      "intent": "FR-10: the public listener is a route split, not a blind tunnel. Every /api/* route is gated on the caller's own secret, so those plus /healthz are exactly what a remote client needs.",
+      "principals": ["alpha"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}},
+         "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/healthz"}, "expect": {"status": 200, "json": {"ok": true}}},
+        {"request": {"method": "GET", "path": "/api/roster", "as": ["alpha"]}, "expect": {"status": 200}},
+        {"request": {"method": "GET", "path": "/api/roster"}, "expect": {"status": 401}}
+      ]
+    },
+    {
+      "id": "public-split.operator-surface-is-404-on-the-public-listener",
+      "family": "public-split",
+      "surface": "public",
+      "intent": "Tunnelling the full port would publish the unauthenticated all-mail UI. The public face must 404 the operator routes -- this is the security boundary, not cosmetics.",
+      "principals": [],
+      "steps": [
+        {"request": {"method": "GET", "path": "/"}, "expect": {"status": 404}},
+        {"request": {"method": "GET", "path": "/ui/data"}, "expect": {"status": 404}},
+        {"request": {"method": "GET", "path": "/ui/messages"}, "expect": {"status": 404}},
+        {"request": {"method": "GET", "path": "/openapi.json"}, "expect": {"status": 404}},
+        {"request": {"method": "GET", "path": "/docs"}, "expect": {"status": 404}}
+      ]
+    },
+
+    {
+      "id": "retention.sweep-takes-the-aged-message-metadata-and-blob-together",
+      "family": "retention",
+      "intent": "Past HUB_RETENTION_DAYS a message, its attachment row and the blob file all go. Mail inside the window is untouched. Retention is the hub's only forgetting mechanism for messages.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/attachments", "as": ["alpha"],
+                     "params": {"name": "ancient.bin"}, "content": "old bytes"},
+         "expect": {"status": 200}, "capture": {"aid": "id"}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"],
+                     "json": {"to": "@beta.slug", "body": "ancient", "attachments": ["@cap.aid"]}},
+         "expect": {"status": 200}, "capture": {"old_mid": "id"}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "recent"}},
+         "expect": {"status": 200}},
+        {"store": {"op": "backdate", "table": "messages", "column": "received_at",
+                   "key": "id", "value": "@cap.old_mid", "days": 31}},
+        {"store": {"op": "backdate", "table": "attachments", "column": "created_at",
+                   "key": "id", "value": "@cap.aid", "days": 31}},
+        {"store": {"op": "sweep"}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1},
+                    "sequence": {"path": "messages", "field": "body", "equals": ["recent"]}}},
+        {"request": {"method": "GET", "path": "/api/attachments/@cap.aid", "as": ["alpha"]},
+         "expect": {"status": 404}}
+      ]
+    },
+    {
+      "id": "retention.a-silent-client-with-queued-mail-is-never-pruned",
+      "family": "retention",
+      "intent": "Roster hygiene ages out a client unseen for HUB_ORG_RETENTION_DAYS -- EXCEPT one that still holds queued mail. Never strand a delivery.",
+      "principals": ["alpha", "beta"],
+      "steps": [
+        {"request": {"method": "POST", "path": "/api/register", "as": ["alpha"], "json": {"slug": "@alpha.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/register", "as": ["beta"], "json": {"slug": "@beta.slug"}}, "expect": {"status": 200}},
+        {"request": {"method": "POST", "path": "/api/send", "as": ["alpha"], "json": {"to": "@beta.slug", "body": "waiting for you"}},
+         "expect": {"status": 200}},
+        {"store": {"op": "backdate", "table": "orgs", "column": "last_seen",
+                   "key": "slug", "value": "@beta.slug", "days": 200}},
+        {"store": {"op": "sweep"}},
+        {"request": {"method": "POST", "path": "/api/poll", "as": ["beta"], "params": {"wait": "0"}},
+         "expect": {"status": 200, "length": {"messages": 1}}}
+      ]
+    }
+  ]
+}

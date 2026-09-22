@@ -1,0 +1,3685 @@
+{
+  "schema": "orgtree.mailhub-source-inventory/v2",
+  "source_commit": "6e856eec8ccfbcf8d16451123903b9d2ce16450b",
+  "scope": "All 26 baseline files; static census plus extracted route and interpreter-dependency contracts. Not runtime coverage, not execution proof, not migration approval.",
+  "files": [
+    {
+      "path": ".dockerignore",
+      "family": "repository-metadata",
+      "sha256": "9a742814675e865e4236a09c242368c1f37723683d15c971f87aa0279d189015",
+      "bytes": 131
+    },
+    {
+      "path": ".env.example",
+      "family": "packaging-configuration-and-exposure",
+      "sha256": "f615f6e836a361756b0ae956b3201c5d71985df50ae6cb457b1a97317215cfe4",
+      "bytes": 1230
+    },
+    {
+      "path": ".gitattributes",
+      "family": "repository-metadata",
+      "sha256": "1d5d71dcc6ccd28ab46a335349ecc74742ca4b81f4fcad212f8d134f70f1f13e",
+      "bytes": 17
+    },
+    {
+      "path": ".gitignore",
+      "family": "repository-metadata",
+      "sha256": "fffeb9754d6713674761ff6e58f9d0e622083f0e0ca12c681c66933f4a59e393",
+      "bytes": 75
+    },
+    {
+      "path": "Dockerfile",
+      "family": "packaging-configuration-and-exposure",
+      "sha256": "88cef00a5172d09ebbfe47629c44c845dcdbdac9c7d08d599f2efbb8709dea75",
+      "bytes": 347
+    },
+    {
+      "path": "LICENSE",
+      "family": "repository-metadata",
+      "sha256": "5a8d4351ed1f25529da75b48616932277f06ca04c3aafd196aaf646e04053f84",
+      "bytes": 1066
+    },
+    {
+      "path": "README.md",
+      "family": "normative-or-operational-documentation",
+      "sha256": "1cdb2a3b3a49d31b9015c5cfd159eb223f7cd10df9a6bd1d93ecdeb826be904f",
+      "bytes": 4300
+    },
+    {
+      "path": "compose.yaml",
+      "family": "packaging-configuration-and-exposure",
+      "sha256": "bfc168630c445bde7a6b534f2218a1a6f51dc5a45cec906ab63ccc98dd423942",
+      "bytes": 2344
+    },
+    {
+      "path": "docs/OPERATIONS.md",
+      "family": "normative-or-operational-documentation",
+      "sha256": "34f6a3f82ede42d806d4e8f9193a1dfa84d21e4983f309fc32eb0caba56bd705",
+      "bytes": 9513
+    },
+    {
+      "path": "docs/PROVENANCE.md",
+      "family": "normative-or-operational-documentation",
+      "sha256": "b386da78ef2d7bb81af77dc9699fea8ec88e5e0637c57f04bf19bda9360f8330",
+      "bytes": 4861
+    },
+    {
+      "path": "docs/mailserver-spec.md",
+      "family": "normative-or-operational-documentation",
+      "sha256": "0681d6c672a2ec0195f0937b060a93b182cdbe7e7ccd140dcaadb181c9917e7d",
+      "bytes": 57899
+    },
+    {
+      "path": "expose-hub.ps1",
+      "family": "packaging-configuration-and-exposure",
+      "sha256": "ed6b59e779ef9f60fecebc18279719a3ce2f61b432f6adfadc2b926828f23d3f",
+      "bytes": 3415
+    },
+    {
+      "path": "hubtool.py",
+      "family": "chat-client-and-onboarding",
+      "sha256": "91eadcaadc9f4d80ea72612188bc58f60377f85352a7d11562ed4bda5192c831",
+      "bytes": 60079
+    },
+    {
+      "path": "install-hook.py",
+      "family": "chat-client-and-onboarding",
+      "sha256": "a633e18bb9771d8f023a574347f533d6aa8b82b271d2d1c4aba9f405fab38e67",
+      "bytes": 3483
+    },
+    {
+      "path": "mailhub/__init__.py",
+      "family": "hub-runtime-or-operator-view",
+      "sha256": "ca64dcf3cfe1d3928ffe12dcd01060cbc7175a0cff32282928c87fcc19a5ea64",
+      "bytes": 57
+    },
+    {
+      "path": "mailhub/app.py",
+      "family": "hub-runtime-or-operator-view",
+      "sha256": "2dc9a33bd68cb3b6ef1f9bce667f907f2b4cb6d75970011a867c0a6bc99e9548",
+      "bytes": 27533
+    },
+    {
+      "path": "mailhub/db.py",
+      "family": "hub-runtime-or-operator-view",
+      "sha256": "053361977497e30bb334ae25a4c558ec466129808fadd213a5da384b9f6248c1",
+      "bytes": 3916
+    },
+    {
+      "path": "mailhub/public.py",
+      "family": "hub-runtime-or-operator-view",
+      "sha256": "8061b285adb44ce656daaa9c5e70d6138624d236da7d123b9c5222e7be022007",
+      "bytes": 2126
+    },
+    {
+      "path": "mailhub/serve.py",
+      "family": "hub-runtime-or-operator-view",
+      "sha256": "78044a67aba997f78ed89d934708e20b19c7bc7e8d35586f3bcbe0b1c4e800ff",
+      "bytes": 1862
+    },
+    {
+      "path": "mailhub/static/index.html",
+      "family": "hub-runtime-or-operator-view",
+      "sha256": "ace4925a8c4d3f5999bf91ce78fd05ec6a009326744de2d98c14fa7857297931",
+      "bytes": 16916
+    },
+    {
+      "path": "requirements.txt",
+      "family": "packaging-configuration-and-exposure",
+      "sha256": "7ebbfd73a451b754f797b4a597a73a7d57d87430797a26a2c07c00ce2c597066",
+      "bytes": 99
+    },
+    {
+      "path": "session-start.sh",
+      "family": "chat-client-and-onboarding",
+      "sha256": "5cd93611340c27908724aeef71cd0263f1f08c1ae740b0df777cecb8d7b7c567",
+      "bytes": 3212
+    },
+    {
+      "path": "tests/test_hub.py",
+      "family": "legacy-characterization-tests",
+      "sha256": "8b5a9e21c428b702586b41b4fb6ed417ef635a4b7727ef0f45e392faeeadcbd6",
+      "bytes": 61272
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "family": "legacy-characterization-tests",
+      "sha256": "b14323632353c38b5942d1c27e60b736a524a42669f761486f9af56d100fabe7",
+      "bytes": 58201
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "family": "legacy-characterization-tests",
+      "sha256": "70c302e1fefce122a08c843507680eb47539d672dd7b5b2d70049996f0411dd3",
+      "bytes": 9522
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "family": "packaging-configuration-and-exposure",
+      "sha256": "8bc39d6368523f695197a66c7f980c42e4ba310c38cb94c06e8374e1d28591e8",
+      "bytes": 10480
+    }
+  ],
+  "functions": [
+    {
+      "path": "hubtool.py",
+      "name": "_norm_hub",
+      "line": 88,
+      "end": 104
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_hubs",
+      "line": 107,
+      "end": 117
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_local_first",
+      "line": 120,
+      "end": 125
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_user",
+      "line": 131,
+      "end": 132
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_norm_name",
+      "line": 135,
+      "end": 141
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_id_path",
+      "line": 144,
+      "end": 145
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_active_name",
+      "line": 148,
+      "end": 153
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_db",
+      "line": 185,
+      "end": 210
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_now_iso",
+      "line": 213,
+      "end": 214
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_import_ident_tx",
+      "line": 217,
+      "end": 263
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_migrate_json",
+      "line": 266,
+      "end": 308
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_migration_conflicts",
+      "line": 311,
+      "end": 324
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_row_to_ident",
+      "line": 327,
+      "end": 347
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_load_ident",
+      "line": 350,
+      "end": 373
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_save_ident",
+      "line": 376,
+      "end": 408
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_mint_uid",
+      "line": 411,
+      "end": 434
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_known_names",
+      "line": 437,
+      "end": 446
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_ident",
+      "line": 449,
+      "end": 484
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_call",
+      "line": 487,
+      "end": 502
+    },
+    {
+      "path": "hubtool.py",
+      "name": "register",
+      "line": 505,
+      "end": 575
+    },
+    {
+      "path": "hubtool.py",
+      "name": "poll",
+      "line": 578,
+      "end": 579
+    },
+    {
+      "path": "hubtool.py",
+      "name": "ack",
+      "line": 582,
+      "end": 584
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_receipts",
+      "line": 587,
+      "end": 627
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_ring_key",
+      "line": 635,
+      "end": 636
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_rings_of",
+      "line": 639,
+      "end": 645
+    },
+    {
+      "path": "hubtool.py",
+      "name": "peek_fresh",
+      "line": 648,
+      "end": 664
+    },
+    {
+      "path": "hubtool.py",
+      "name": "mark_seen",
+      "line": 667,
+      "end": 688
+    },
+    {
+      "path": "hubtool.py",
+      "name": "take_fresh",
+      "line": 691,
+      "end": 714
+    },
+    {
+      "path": "hubtool.py",
+      "name": "fmt",
+      "line": 717,
+      "end": 734
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_pid_alive",
+      "line": 739,
+      "end": 752
+    },
+    {
+      "path": "hubtool.py",
+      "name": "listen",
+      "line": 755,
+      "end": 868
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_resolve_send_hub",
+      "line": 871,
+      "end": 892
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_send",
+      "line": 895,
+      "end": 908
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_merged_roster",
+      "line": 911,
+      "end": 930
+    },
+    {
+      "path": "hubtool.py",
+      "name": "_hubs_edit",
+      "line": 933,
+      "end": 970
+    },
+    {
+      "path": "hubtool.py",
+      "name": "fetch_attachment",
+      "line": 1049,
+      "end": 1087
+    },
+    {
+      "path": "hubtool.py",
+      "name": "unregister_identity",
+      "line": 1090,
+      "end": 1113
+    },
+    {
+      "path": "hubtool.py",
+      "name": "dispatch",
+      "line": 1116,
+      "end": 1165
+    },
+    {
+      "path": "hubtool.py",
+      "name": "serve",
+      "line": 1168,
+      "end": 1202
+    },
+    {
+      "path": "hubtool.py",
+      "name": "cli",
+      "line": 1213,
+      "end": 1313
+    },
+    {
+      "path": "hubtool.py",
+      "name": "is_local",
+      "line": 123,
+      "end": 124
+    },
+    {
+      "path": "hubtool.py",
+      "name": "pump",
+      "line": 813,
+      "end": 851
+    },
+    {
+      "path": "hubtool.py",
+      "name": "reply",
+      "line": 1170,
+      "end": 1173
+    },
+    {
+      "path": "install-hook.py",
+      "name": "main",
+      "line": 33,
+      "end": 89
+    },
+    {
+      "path": "install-hook.py",
+      "name": "cmd_of",
+      "line": 51,
+      "end": 52
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_lifespan",
+      "line": 48,
+      "end": 54
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_now_iso",
+      "line": 86,
+      "end": 88
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_bump",
+      "line": 91,
+      "end": 92
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_fp",
+      "line": 95,
+      "end": 96
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_mark_seen",
+      "line": 99,
+      "end": 107
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_online",
+      "line": 110,
+      "end": 114
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_auth",
+      "line": 117,
+      "end": 132
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_roster",
+      "line": 135,
+      "end": 143
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "log_requests",
+      "line": 147,
+      "end": 158
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "register",
+      "line": 164,
+      "end": 209
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "unregister",
+      "line": 215,
+      "end": 234
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "poll",
+      "line": 240,
+      "end": 305
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "ack",
+      "line": 311,
+      "end": 333
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "send",
+      "line": 339,
+      "end": 391
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "receipts",
+      "line": 397,
+      "end": 423
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "attachment_upload",
+      "line": 429,
+      "end": 452
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "attachment_download",
+      "line": 456,
+      "end": 480
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "roster",
+      "line": 486,
+      "end": 495
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "healthz",
+      "line": 499,
+      "end": 509
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "ui_index",
+      "line": 518,
+      "end": 521
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "ui_data",
+      "line": 525,
+      "end": 536
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "ui_messages",
+      "line": 540,
+      "end": 612
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_sweep_loop",
+      "line": 617,
+      "end": 664
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_fold",
+      "line": 575,
+      "end": 576
+    },
+    {
+      "path": "mailhub/app.py",
+      "name": "_seg",
+      "line": 578,
+      "end": 580
+    },
+    {
+      "path": "mailhub/db.py",
+      "name": "connect",
+      "line": 71,
+      "end": 87
+    },
+    {
+      "path": "mailhub/db.py",
+      "name": "blob_path",
+      "line": 90,
+      "end": 93
+    },
+    {
+      "path": "mailhub/db.py",
+      "name": "row_to_envelope",
+      "line": 96,
+      "end": 103
+    },
+    {
+      "path": "mailhub/public.py",
+      "name": "__init__",
+      "line": 21,
+      "end": 22
+    },
+    {
+      "path": "mailhub/public.py",
+      "name": "__call__",
+      "line": 24,
+      "end": 46
+    },
+    {
+      "path": "mailhub/serve.py",
+      "name": "main",
+      "line": 31,
+      "end": 47
+    },
+    {
+      "path": "mailhub/serve.py",
+      "name": "serve_all",
+      "line": 41,
+      "end": 42
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "check",
+      "line": 79,
+      "end": 88
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "fixture",
+      "line": 91,
+      "end": 106
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "gap",
+      "line": 109,
+      "end": 124
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "req",
+      "line": 137,
+      "end": 148
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "preq",
+      "line": 151,
+      "end": 161
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "pair",
+      "line": 164,
+      "end": 165
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "new_org",
+      "line": 171,
+      "end": 180
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "send",
+      "line": 183,
+      "end": 187
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "poll",
+      "line": 190,
+      "end": 194
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "rows",
+      "line": 197,
+      "end": 202
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "backdate",
+      "line": 205,
+      "end": 211
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "old_stamp",
+      "line": 214,
+      "end": 216
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_register",
+      "line": 220,
+      "end": 299
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_suffix_attack",
+      "line": 303,
+      "end": 356
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_poll",
+      "line": 360,
+      "end": 422
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_custody",
+      "line": 426,
+      "end": 465
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_receipts",
+      "line": 469,
+      "end": 547
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_send",
+      "line": 551,
+      "end": 605
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_attachments",
+      "line": 609,
+      "end": 728
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_retention",
+      "line": 732,
+      "end": 786
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_ui",
+      "line": 790,
+      "end": 856
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_public_face",
+      "line": 861,
+      "end": 967
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_client_filter",
+      "line": 971,
+      "end": 1038
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_client_filter_paging",
+      "line": 1042,
+      "end": 1121
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "sec_group_key",
+      "line": 1125,
+      "end": 1240
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "main",
+      "line": 1245,
+      "end": 1274
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "go",
+      "line": 141,
+      "end": 147
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "go",
+      "line": 154,
+      "end": 160
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_first_write_wins",
+      "line": 223,
+      "end": 230
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_reregister_refreshes",
+      "line": 233,
+      "end": 242
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_response_shape",
+      "line": 246,
+      "end": 254
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_no_secret",
+      "line": 258,
+      "end": 262
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_header_for_another_slug",
+      "line": 265,
+      "end": 274
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_malformed",
+      "line": 278,
+      "end": 290
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_long_slug_boundary",
+      "line": 293,
+      "end": 297
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_collide",
+      "line": 306,
+      "end": 317
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_attack",
+      "line": 319,
+      "end": 343
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_full_digest_compare",
+      "line": 347,
+      "end": 354
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_multiplex",
+      "line": 363,
+      "end": 370
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_partial_credentials",
+      "line": 373,
+      "end": 384
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_all_invalid",
+      "line": 387,
+      "end": 392
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ordering",
+      "line": 395,
+      "end": 401
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_envelope_shape",
+      "line": 404,
+      "end": 413
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_roster_rides_along",
+      "line": 417,
+      "end": 421
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_redelivery",
+      "line": 429,
+      "end": 439
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ack_only_by_recipient",
+      "line": 442,
+      "end": 451
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ack_unknown_and_double",
+      "line": 454,
+      "end": 463
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_lifecycle",
+      "line": 472,
+      "end": 488
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_monotonic",
+      "line": 491,
+      "end": 504
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_wrong_side",
+      "line": 507,
+      "end": 519
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_bad_states",
+      "line": 523,
+      "end": 532
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_pushed_flag",
+      "line": 535,
+      "end": 545
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_idempotent",
+      "line": 554,
+      "end": 565
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_unknown_recipient",
+      "line": 569,
+      "end": 572
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_sender_must_own_the_from",
+      "line": 576,
+      "end": 581
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_no_credentials",
+      "line": 585,
+      "end": 588
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_body_truncated",
+      "line": 591,
+      "end": 595
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_attachment_cap",
+      "line": 598,
+      "end": 603
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "upload",
+      "line": 612,
+      "end": 616
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_upload_writes_a_blob",
+      "line": 618,
+      "end": 625
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_name_is_basenamed",
+      "line": 629,
+      "end": 633
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_blob_path_strips_traversal",
+      "line": 636,
+      "end": 642
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_blob_path_degenerate",
+      "line": 646,
+      "end": 654
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_binding_and_ownership",
+      "line": 665,
+      "end": 680
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_download_rights",
+      "line": 684,
+      "end": 700
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_unknown_and_missing_blob",
+      "line": 703,
+      "end": 710
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_oversize",
+      "line": 714,
+      "end": 721
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_upload_needs_credentials",
+      "line": 725,
+      "end": 727
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "run_sweep",
+      "line": 735,
+      "end": 749
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_sweeps_old_and_keeps_fresh",
+      "line": 751,
+      "end": 773
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_boundary",
+      "line": 777,
+      "end": 784
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_healthz",
+      "line": 793,
+      "end": 801
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ui_data",
+      "line": 804,
+      "end": 812
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ui_messages",
+      "line": 815,
+      "end": 827
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ui_limit_clamped",
+      "line": 830,
+      "end": 836
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_index_served",
+      "line": 839,
+      "end": 845
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ui_is_unauthenticated_by_design",
+      "line": 849,
+      "end": 854
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_ui_is_gone",
+      "line": 869,
+      "end": 875
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_api_and_health_pass",
+      "line": 879,
+      "end": 883
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_every_api_route_still_needs_credentials",
+      "line": 886,
+      "end": 899
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_path_tricks_do_not_reach_the_ui",
+      "line": 904,
+      "end": 911
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_attachment_rights_hold_through_the_public_face",
+      "line": 915,
+      "end": 925
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_non_http_scopes_are_rejected",
+      "line": 929,
+      "end": 964
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_filters_by_client_segment",
+      "line": 977,
+      "end": 983
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_substring_does_not_match",
+      "line": 987,
+      "end": 992
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_the_narrowing_read_is_bounded",
+      "line": 996,
+      "end": 1031
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_pages_past_a_full_page_of_misses",
+      "line": 1048,
+      "end": 1067
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_newest_first_across_pages",
+      "line": 1071,
+      "end": 1081
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_wildcard_name_cannot_force_a_full_walk",
+      "line": 1084,
+      "end": 1114
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_chat_shaped",
+      "line": 1143,
+      "end": 1152
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_the_two_keys_agree_for_chats",
+      "line": 1154,
+      "end": 1164
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_the_traffic_is_there_under_the_other_key",
+      "line": 1174,
+      "end": 1180
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_orgs_are_unaffected",
+      "line": 1185,
+      "end": 1189
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_the_hub_can_forget_a_client",
+      "line": 1202,
+      "end": 1227
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "stop",
+      "line": 740,
+      "end": 741
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "inner",
+      "line": 943,
+      "end": 944
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_send",
+      "line": 949,
+      "end": 950
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "_recv",
+      "line": 952,
+      "end": 953
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "drive",
+      "line": 955,
+      "end": 959
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "__init__",
+      "line": 1007,
+      "end": 1007
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "execute",
+      "line": 1009,
+      "end": 1011
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "__getattr__",
+      "line": 1013,
+      "end": 1014
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "__init__",
+      "line": 1094,
+      "end": 1094
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "execute",
+      "line": 1096,
+      "end": 1100
+    },
+    {
+      "path": "tests/test_hub.py",
+      "name": "__getattr__",
+      "line": 1102,
+      "end": 1103
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "check",
+      "line": 73,
+      "end": 82
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "fixture",
+      "line": 85,
+      "end": 100
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "gap",
+      "line": 103,
+      "end": 116
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_urlopen",
+      "line": 137,
+      "end": 170
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "fresh_ident",
+      "line": 176,
+      "end": 184
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "ident_file",
+      "line": 187,
+      "end": 196
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "become",
+      "line": 199,
+      "end": 206
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "hub_rows",
+      "line": 209,
+      "end": 214
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_identity",
+      "line": 218,
+      "end": 288
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_race",
+      "line": 292,
+      "end": 345
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_names",
+      "line": 349,
+      "end": 474
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_crash",
+      "line": 478,
+      "end": 561
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "io_read",
+      "line": 564,
+      "end": 568
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_mint_durability",
+      "line": 572,
+      "end": 633
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_secret",
+      "line": 637,
+      "end": 693
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_listen",
+      "line": 697,
+      "end": 744
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_second_consumer",
+      "line": 748,
+      "end": 836
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_chat_receipts",
+      "line": 840,
+      "end": 1024
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_kind",
+      "line": 1028,
+      "end": 1081
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "sec_migration",
+      "line": 1085,
+      "end": 1122
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "main",
+      "line": 1125,
+      "end": 1152
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "__init__",
+      "line": 121,
+      "end": 122
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "read",
+      "line": 124,
+      "end": 125
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "__enter__",
+      "line": 127,
+      "end": 128
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "__exit__",
+      "line": 130,
+      "end": 131
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "receive",
+      "line": 151,
+      "end": 152
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "send",
+      "line": 154,
+      "end": 158
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_mint_and_shape",
+      "line": 221,
+      "end": 229
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_minted_once_per_name",
+      "line": 233,
+      "end": 247
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_unnamed_refuses_rather_than_guesses",
+      "line": 251,
+      "end": 257
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_hostile_names",
+      "line": 261,
+      "end": 272
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_long_name_is_capped",
+      "line": 275,
+      "end": 283
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_concurrent_first_registration",
+      "line": 295,
+      "end": 311
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_returning_session_resumes_its_identity",
+      "line": 315,
+      "end": 323
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_legacy_single_identity_is_adopted",
+      "line": 327,
+      "end": 343
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_taken_name_is_visibly_resumed",
+      "line": 357,
+      "end": 373
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_second_live_listener_is_refused",
+      "line": 378,
+      "end": 410
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_typo_listener_refuses_and_names_the_known",
+      "line": 414,
+      "end": 435
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_name_cannot_escape_the_identity_dir",
+      "line": 439,
+      "end": 445
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_split_is_disclosed_not_prevented",
+      "line": 446,
+      "end": 466
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_corrupt_file_is_loud_and_preserved",
+      "line": 495,
+      "end": 518
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_an_interrupted_save_does_not_destroy_the_old_identity",
+      "line": 523,
+      "end": 542
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_stale_listener_lock_is_recoverable",
+      "line": 549,
+      "end": 558
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_store_is_full_synchronous",
+      "line": 581,
+      "end": 594
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_mint_is_committed_before_return",
+      "line": 598,
+      "end": 612
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_wreck_is_preserved_in_place",
+      "line": 616,
+      "end": 630
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_header_only",
+      "line": 640,
+      "end": 656
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_register_result_is_clean",
+      "line": 660,
+      "end": 666
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_the_identity_store_is_not_world_readable",
+      "line": 670,
+      "end": 691
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_read_acks_what_it_printed",
+      "line": 700,
+      "end": 709
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_failed_ack_redelivers_with_no_dedupe",
+      "line": 713,
+      "end": 738
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_stale_ring_causes_repeats_not_silence",
+      "line": 763,
+      "end": 779
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_a_second_reader_takes_it_off_the_hub",
+      "line": 785,
+      "end": 805
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_the_listener_lock_does_not_cover_readers",
+      "line": 822,
+      "end": 833
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_a_chat_reports_delivery_like_an_org_does",
+      "line": 856,
+      "end": 873
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_a_refused_receipt_is_retried_not_dropped",
+      "line": 894,
+      "end": 923
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_the_retry_queue_is_bounded",
+      "line": 927,
+      "end": 942
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_every_cli_verb_is_advertised",
+      "line": 956,
+      "end": 982
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_the_hub_would_accept_them_today",
+      "line": 994,
+      "end": 1021
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_chat_registers_as_chat",
+      "line": 1031,
+      "end": 1036
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_unspecified_is_an_org",
+      "line": 1039,
+      "end": 1046
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_kind_cannot_be_flipped_later",
+      "line": 1049,
+      "end": 1061
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_kind_is_cosmetic_for_delivery",
+      "line": 1065,
+      "end": 1079
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "_alter_adds_the_column_and_keeps_the_rows",
+      "line": 1088,
+      "end": 1120
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "flaky",
+      "line": 899,
+      "end": 905
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "name": "items",
+      "line": 530,
+      "end": 531
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "check",
+      "line": 59,
+      "end": 68
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "wipe",
+      "line": 71,
+      "end": 77
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "plant",
+      "line": 80,
+      "end": 85
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "raw",
+      "line": 88,
+      "end": 89
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "rows",
+      "line": 92,
+      "end": 97
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_survives_complete",
+      "line": 106,
+      "end": 130
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_flat_ring_migrates_under_bootstrap",
+      "line": 133,
+      "end": 139
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_idempotent_and_recorded",
+      "line": 142,
+      "end": 155
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_deterministic_rebuild",
+      "line": 158,
+      "end": 169
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_conflict_is_loud_and_lossless",
+      "line": 172,
+      "end": 185
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_legacy_single_profile",
+      "line": 188,
+      "end": 197
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "name": "_non_identity_and_corrupt_left_alone",
+      "line": 200,
+      "end": 215
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "name": "check",
+      "line": 36,
+      "end": 43
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "name": "run",
+      "line": 46,
+      "end": 51
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "name": "req",
+      "line": 54,
+      "end": 78
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "name": "wait_health",
+      "line": 81,
+      "end": 91
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "name": "slug_for",
+      "line": 94,
+      "end": 95
+    },
+    {
+      "path": "tools/verify-docker.py",
+      "name": "main",
+      "line": 98,
+      "end": 241
+    }
+  ],
+  "registrations": [
+    {
+      "path": "mailhub/app.py",
+      "line": 146,
+      "kind": "middleware",
+      "argument": "http",
+      "handler": "log_requests"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 163,
+      "kind": "post",
+      "argument": "/api/register",
+      "handler": "register"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 214,
+      "kind": "post",
+      "argument": "/api/unregister",
+      "handler": "unregister"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 239,
+      "kind": "post",
+      "argument": "/api/poll",
+      "handler": "poll"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 310,
+      "kind": "post",
+      "argument": "/api/ack",
+      "handler": "ack"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 338,
+      "kind": "post",
+      "argument": "/api/send",
+      "handler": "send"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 396,
+      "kind": "post",
+      "argument": "/api/receipts",
+      "handler": "receipts"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 428,
+      "kind": "post",
+      "argument": "/api/attachments",
+      "handler": "attachment_upload"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 455,
+      "kind": "get",
+      "argument": "/api/attachments/{aid}",
+      "handler": "attachment_download"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 485,
+      "kind": "get",
+      "argument": "/api/roster",
+      "handler": "roster"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 498,
+      "kind": "get",
+      "argument": "/healthz",
+      "handler": "healthz"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 517,
+      "kind": "get",
+      "argument": "/",
+      "handler": "ui_index"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 524,
+      "kind": "get",
+      "argument": "/ui/data",
+      "handler": "ui_data"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 539,
+      "kind": "get",
+      "argument": "/ui/messages",
+      "handler": "ui_messages"
+    }
+  ],
+  "framework_routes": [
+    "GET,HEAD /openapi.json",
+    "GET,HEAD /docs",
+    "GET,HEAD /docs/oauth2-redirect",
+    "GET,HEAD /redoc"
+  ],
+  "mcp_tools": [
+    {
+      "name": "hub_register",
+      "description": "Join the mail hub as THIS SESSION. Choose a UNIQUE, semantically appropriate `name` that reflects this session's own context / directive / purpose (e.g. 'orgtree-redteam', 'terrain-pipeline') — every session has its own identity, and the name is the key. REMEMBER the name you chose: registering with it again later resumes the SAME address (<name>.<user>.<fingerprint>); a different name is a different identity. Immutable once minted. Returns your address and the roster — ⚠ if the result carries `resumed` and YOU did not register this name earlier, another session owns it: pick a different name.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "this session's self-chosen identity name — unique, purpose-describing, reused on every later register"
+          }
+        }
+      }
+    },
+    {
+      "name": "hub_list",
+      "description": "Everyone on your hubs — orgs and chats — with kind, presence and last_seen. On a multi-hub identity the rosters are MERGED, one row per slug, each row's `hubs` naming where it lives.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hub_send",
+      "description": "Send mail to any hub client (org or chat) by its slug from hub_list. On a multi-hub identity the hub is resolved by roster (several hold the target → the local one wins; none → refused naming the hubs searched — never guessed).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "body"
+        ]
+      }
+    },
+    {
+      "name": "hub_fetch",
+      "description": "Download a mail attachment by its id (the listener and hub_read surface ids beside filenames). Saves into `dir` (default: the current directory) and returns the written path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dir": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "hub_unregister",
+      "description": "The polite exit: remove this identity's row from every hub on its list (queued mail for you ages out on the hub's retention). Your local identity is KEPT — registering again later resumes the identical address.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hub_read",
+      "description": "Fetch (and consume) any mail waiting for you right now — across ALL your hubs; each message carries `hub` so you know where to reply (acks go back to the hub each message came from automatically).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "hub_wait",
+      "description": "Wait up to `timeout` seconds (max 55) for new mail — polls every hub on your list (the window is split across them); each message carries `hub`; empty result on timeout.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "timeout": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "hub_hubs",
+      "description": "This identity's mailserver list. No args = show it. `add` joins another hub (registers there immediately; same address everywhere — the fingerprint derives from your uid, not the hub). `remove` drops one (its polling stops; the others' cursors are untouched). Addresses accept bare host / host:port (http + :7370 assumed).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "add": {
+            "type": "string"
+          },
+          "remove": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "cli_dispatch": [
+    {
+      "value": "listen",
+      "line": 1215
+    },
+    {
+      "value": "register",
+      "line": 1218
+    },
+    {
+      "value": "send",
+      "line": 1235
+    },
+    {
+      "value": "list",
+      "line": 1253
+    },
+    {
+      "value": "unregister",
+      "line": 1270
+    },
+    {
+      "value": "fetch",
+      "line": 1277
+    },
+    {
+      "value": "addhub",
+      "line": 1290
+    },
+    {
+      "value": "drophub",
+      "line": 1290
+    },
+    {
+      "value": "addhub",
+      "line": 1295
+    },
+    {
+      "value": "drophub",
+      "line": 1296
+    },
+    {
+      "value": "hubs",
+      "line": 1299
+    }
+  ],
+  "rpc_dispatch": [
+    {
+      "value": "initialize",
+      "line": 1184
+    },
+    {
+      "value": "tools/list",
+      "line": 1188
+    },
+    {
+      "value": "tools/call",
+      "line": 1190
+    }
+  ],
+  "literal_schemas": [
+    {
+      "path": "hubtool.py",
+      "line": 156,
+      "sql": "\nCREATE TABLE IF NOT EXISTS identities (\n  name       TEXT PRIMARY KEY,\n  uid        TEXT NOT NULL,             -- the secret: sha256(uid) is the hub fingerprint\n  slug       TEXT,\n  created_at TEXT NOT NULL\n);\nCREATE TABLE IF NOT EXISTS identity_hubs (\n  name     TEXT NOT NULL,\n  position INTEGER NOT NULL,            -- list order is meaningful (send resolution)\n  address  TEXT NOT NULL,\n  PRIMARY KEY (name, address)\n);\nCREATE TABLE IF NOT EXISTS seen_ids (\n  name TEXT NOT NULL,\n  hub  TEXT NOT NULL,                   -- ring is PER HUB: ids unique per hub only\n  seq  INTEGER NOT NULL,                -- ring order; trimmed to the newest 200\n  id   TEXT NOT NULL,\n  PRIMARY KEY (name, hub, id)\n);\nCREATE TABLE IF NOT EXISTS migrations (\n  source_path TEXT PRIMARY KEY,         -- the JSON file this row accounts for\n  sha256      TEXT NOT NULL,\n  state       TEXT NOT NULL,            -- imported | duplicate | conflict\n  migrated_at TEXT NOT NULL\n);\n",
+      "tables": {
+        "identities": [
+          {
+            "cid": 0,
+            "name": "name",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "uid",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 2,
+            "name": "slug",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 3,
+            "name": "created_at",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          }
+        ],
+        "identity_hubs": [
+          {
+            "cid": 0,
+            "name": "name",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "position",
+            "type": "INTEGER",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 2,
+            "name": "address",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 2
+          }
+        ],
+        "migrations": [
+          {
+            "cid": 0,
+            "name": "source_path",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "sha256",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 2,
+            "name": "state",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 3,
+            "name": "migrated_at",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          }
+        ],
+        "seen_ids": [
+          {
+            "cid": 0,
+            "name": "name",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "hub",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 2
+          },
+          {
+            "cid": 2,
+            "name": "seq",
+            "type": "INTEGER",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 3,
+            "name": "id",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 3
+          }
+        ]
+      }
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 29,
+      "sql": "\nCREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);\nCREATE TABLE IF NOT EXISTS orgs (\n  slug          TEXT PRIMARY KEY,\n  fingerprint   TEXT NOT NULL,\n  org_name      TEXT,\n  username      TEXT,\n  blurb         TEXT,\n  registered_at TEXT NOT NULL,\n  last_seen     TEXT,\n  kind          TEXT NOT NULL DEFAULT 'org'   -- org | chat (FR-06: independent\n                                              -- Claude Code chats are clients)\n);\nCREATE TABLE IF NOT EXISTS messages (\n  id              TEXT PRIMARY KEY,          -- client-minted: idempotent send\n  from_slug       TEXT NOT NULL,\n  to_slug         TEXT NOT NULL,\n  body            TEXT NOT NULL,\n  kind            TEXT,\n  thread_id       TEXT,                      -- reserved (spec §11№2), unused v1\n  sent_at         TEXT,                      -- claimed by sender, display only\n  received_at     TEXT NOT NULL,             -- hub clock: the ordering authority\n  state           TEXT NOT NULL DEFAULT 'queued',   -- queued | fetched\n  fetched_at      TEXT,\n  delivered_at    TEXT,\n  read_at         TEXT,\n  receipts_pushed INTEGER NOT NULL DEFAULT 1,       -- 0 = sender owed an update\n  attachments     TEXT NOT NULL DEFAULT '[]'        -- [{id,name,bytes}] json\n);\nCREATE INDEX IF NOT EXISTS idx_msg_to   ON messages(to_slug, state);\nCREATE INDEX IF NOT EXISTS idx_msg_from ON messages(from_slug, receipts_pushed);\nCREATE TABLE IF NOT EXISTS attachments (\n  id         TEXT PRIMARY KEY,\n  owner_slug TEXT NOT NULL,\n  name       TEXT NOT NULL,\n  bytes      INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  message_id TEXT                            -- NULL until a send binds it\n);\n",
+      "tables": {
+        "attachments": [
+          {
+            "cid": 0,
+            "name": "id",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "owner_slug",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 2,
+            "name": "name",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 3,
+            "name": "bytes",
+            "type": "INTEGER",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 4,
+            "name": "created_at",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 5,
+            "name": "message_id",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          }
+        ],
+        "messages": [
+          {
+            "cid": 0,
+            "name": "id",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "from_slug",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 2,
+            "name": "to_slug",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 3,
+            "name": "body",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 4,
+            "name": "kind",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 5,
+            "name": "thread_id",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 6,
+            "name": "sent_at",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 7,
+            "name": "received_at",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 8,
+            "name": "state",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": "'queued'",
+            "pk": 0
+          },
+          {
+            "cid": 9,
+            "name": "fetched_at",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 10,
+            "name": "delivered_at",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 11,
+            "name": "read_at",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 12,
+            "name": "receipts_pushed",
+            "type": "INTEGER",
+            "notnull": 1,
+            "default": "1",
+            "pk": 0
+          },
+          {
+            "cid": 13,
+            "name": "attachments",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": "'[]'",
+            "pk": 0
+          }
+        ],
+        "meta": [
+          {
+            "cid": 0,
+            "name": "k",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "v",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          }
+        ],
+        "orgs": [
+          {
+            "cid": 0,
+            "name": "slug",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 1
+          },
+          {
+            "cid": 1,
+            "name": "fingerprint",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 2,
+            "name": "org_name",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 3,
+            "name": "username",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 4,
+            "name": "blurb",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 5,
+            "name": "registered_at",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 6,
+            "name": "last_seen",
+            "type": "TEXT",
+            "notnull": 0,
+            "default": null,
+            "pk": 0
+          },
+          {
+            "cid": 7,
+            "name": "kind",
+            "type": "TEXT",
+            "notnull": 1,
+            "default": "'org'",
+            "pk": 0
+          }
+        ]
+      }
+    }
+  ],
+  "sql_sites": [
+    {
+      "path": "hubtool.py",
+      "line": 200,
+      "call": "execute",
+      "expression": "'PRAGMA journal_mode=WAL'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 201,
+      "call": "execute",
+      "expression": "'PRAGMA busy_timeout=10000'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 202,
+      "call": "execute",
+      "expression": "'PRAGMA synchronous=FULL'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 203,
+      "call": "executescript",
+      "expression": "_DB_SCHEMA",
+      "dynamic": true
+    },
+    {
+      "path": "hubtool.py",
+      "line": 224,
+      "call": "execute",
+      "expression": "'BEGIN IMMEDIATE'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 257,
+      "call": "execute",
+      "expression": "'INSERT OR REPLACE INTO migrations (source_path, sha256, state, migrated_at) VALUES (?,?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 382,
+      "call": "execute",
+      "expression": "'BEGIN IMMEDIATE'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 383,
+      "call": "execute",
+      "expression": "'INSERT INTO identities (name, uid, slug, created_at) VALUES (?,?,?,?) ON CONFLICT(name) DO UPDATE SET uid=excluded.uid, slug=excluded.slug'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 389,
+      "call": "execute",
+      "expression": "'DELETE FROM identity_hubs WHERE name=?'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 394,
+      "call": "execute",
+      "expression": "'DELETE FROM seen_ids WHERE name=?'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 421,
+      "call": "execute",
+      "expression": "'BEGIN IMMEDIATE'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 422,
+      "call": "execute",
+      "expression": "'INSERT INTO identities (name, uid, created_at) VALUES (?,?,?) ON CONFLICT(name) DO NOTHING'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 328,
+      "call": "execute",
+      "expression": "'SELECT uid, slug FROM identities WHERE name=?'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 341,
+      "call": "execute",
+      "expression": "'SELECT hub, id FROM seen_ids WHERE name=? ORDER BY seq'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 392,
+      "call": "execute",
+      "expression": "'INSERT OR IGNORE INTO identity_hubs (name, position, address) VALUES (?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 226,
+      "call": "execute",
+      "expression": "'SELECT uid FROM identities WHERE name=?'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 234,
+      "call": "execute",
+      "expression": "'INSERT INTO identities (name, uid, slug, created_at) VALUES (?,?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 241,
+      "call": "execute",
+      "expression": "'INSERT OR IGNORE INTO identity_hubs (name, position, address) VALUES (?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 288,
+      "call": "execute",
+      "expression": "'SELECT sha256 FROM migrations WHERE source_path=?'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 399,
+      "call": "execute",
+      "expression": "'INSERT OR IGNORE INTO seen_ids (name, hub, seq, id) VALUES (?,?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 251,
+      "call": "execute",
+      "expression": "'INSERT OR IGNORE INTO seen_ids (name, hub, seq, id) VALUES (?, ?, COALESCE((SELECT MAX(seq)+1 FROM seen_ids WHERE name=? AND hub=?), 0), ?)'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 335,
+      "call": "execute",
+      "expression": "'SELECT address FROM identity_hubs WHERE name=? ORDER BY position'",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 320,
+      "call": "execute",
+      "expression": "\"SELECT source_path FROM migrations WHERE state='conflict'\"",
+      "dynamic": false
+    },
+    {
+      "path": "hubtool.py",
+      "line": 444,
+      "call": "execute",
+      "expression": "'SELECT name FROM identities'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 106,
+      "call": "execute",
+      "expression": "'UPDATE orgs SET last_seen=? WHERE slug=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 368,
+      "call": "execute",
+      "expression": "'INSERT OR IGNORE INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments) VALUES (?,?,?,?,?,?,?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 443,
+      "call": "execute",
+      "expression": "'INSERT INTO attachments (id, owner_slug, name, bytes, created_at) VALUES (?,?,?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 136,
+      "call": "execute",
+      "expression": "'SELECT slug, org_name, username, blurb, last_seen, kind FROM orgs ORDER BY slug'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 187,
+      "call": "execute",
+      "expression": "'INSERT INTO orgs (slug, fingerprint, org_name, username, blurb, registered_at, last_seen, kind) VALUES (?,?,?,?,?,?,?,?)'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 227,
+      "call": "execute",
+      "expression": "'DELETE FROM orgs WHERE slug=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 321,
+      "call": "execute",
+      "expression": "f\"UPDATE messages SET state='fetched', fetched_at=?, receipts_pushed=0 WHERE id=? AND state='queued' AND to_slug IN ({','.join('?' * len(slugs))})\"",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 411,
+      "call": "execute",
+      "expression": "f\"UPDATE messages SET {col}=?, receipts_pushed=0 WHERE id=? AND {col} IS NULL AND to_slug IN ({','.join('?' * len(slugs))})\"",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 128,
+      "call": "execute",
+      "expression": "'SELECT fingerprint FROM orgs WHERE slug=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 180,
+      "call": "execute",
+      "expression": "'SELECT fingerprint FROM orgs WHERE slug=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 198,
+      "call": "execute",
+      "expression": "'UPDATE orgs SET org_name=?, username=?, blurb=? WHERE slug=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 378,
+      "call": "execute",
+      "expression": "'UPDATE attachments SET message_id=? WHERE id=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 462,
+      "call": "execute",
+      "expression": "'SELECT owner_slug, name, message_id FROM attachments WHERE id=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 633,
+      "call": "execute",
+      "expression": "'DELETE FROM attachments WHERE created_at < ?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 348,
+      "call": "execute",
+      "expression": "'SELECT 1 FROM orgs WHERE slug=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 358,
+      "call": "execute",
+      "expression": "'SELECT id, name, bytes, owner_slug, message_id FROM attachments WHERE id=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 469,
+      "call": "execute",
+      "expression": "'SELECT to_slug FROM messages WHERE id=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 502,
+      "call": "execute",
+      "expression": "'SELECT COUNT(*) c FROM orgs'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 503,
+      "call": "execute",
+      "expression": "\"SELECT COUNT(*) c FROM messages WHERE state='queued'\"",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 558,
+      "call": "execute",
+      "expression": "f'SELECT *, rowid AS n FROM messages WHERE (from_slug=? OR to_slug=?) {cur_sql}ORDER BY received_at DESC, rowid DESC LIMIT ?'",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 635,
+      "call": "execute",
+      "expression": "'DELETE FROM messages WHERE received_at < ?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 652,
+      "call": "execute",
+      "expression": "f'DELETE FROM orgs WHERE slug IN ({ph})'",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 530,
+      "call": "execute",
+      "expression": "\"SELECT COUNT(*) c FROM messages WHERE state='queued' AND to_slug=?\"",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 597,
+      "call": "execute",
+      "expression": "f'SELECT *, rowid AS n FROM messages WHERE 1=1 {cur_sql}ORDER BY received_at DESC, rowid DESC LIMIT ?'",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 625,
+      "call": "execute",
+      "expression": "'SELECT id FROM attachments WHERE created_at < ?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 259,
+      "call": "execute",
+      "expression": "f\"SELECT * FROM messages WHERE state='queued' AND to_slug IN ({qmarks}) ORDER BY received_at, rowid\"",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 263,
+      "call": "execute",
+      "expression": "f'SELECT id, state, fetched_at, delivered_at, read_at FROM messages WHERE receipts_pushed=0 AND from_slug IN ({qmarks})'",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 282,
+      "call": "execute",
+      "expression": "f\"UPDATE messages SET receipts_pushed=1 WHERE id IN ({','.join('?' * len(ids))})\"",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 381,
+      "call": "execute",
+      "expression": "'SELECT received_at FROM messages WHERE id=?'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 588,
+      "call": "execute",
+      "expression": "f'SELECT *, rowid AS n FROM messages WHERE (from_slug IN ({ph}) OR to_slug IN ({ph})) {cur_sql}ORDER BY received_at DESC, rowid DESC LIMIT ?'",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 582,
+      "call": "execute",
+      "expression": "'SELECT slug, username FROM orgs'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 645,
+      "call": "execute",
+      "expression": "\"SELECT slug FROM orgs WHERE COALESCE(last_seen, registered_at) < ? AND slug NOT IN (SELECT DISTINCT to_slug FROM messages  WHERE state='queued')\"",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 76,
+      "call": "execute",
+      "expression": "'PRAGMA journal_mode=WAL'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 77,
+      "call": "execute",
+      "expression": "'PRAGMA busy_timeout=5000'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 78,
+      "call": "execute",
+      "expression": "'PRAGMA synchronous=NORMAL'",
+      "dynamic": false
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 79,
+      "call": "executescript",
+      "expression": "_SCHEMA",
+      "dynamic": true
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 82,
+      "call": "execute",
+      "expression": "\"ALTER TABLE orgs ADD COLUMN kind TEXT NOT NULL DEFAULT 'org'\"",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hub.py",
+      "line": 208,
+      "call": "execute",
+      "expression": "sql",
+      "dynamic": true
+    },
+    {
+      "path": "tests/test_hub.py",
+      "line": 1011,
+      "call": "execute",
+      "expression": "sql",
+      "dynamic": true
+    },
+    {
+      "path": "tests/test_hub.py",
+      "line": 1097,
+      "call": "execute",
+      "expression": "sql",
+      "dynamic": true
+    },
+    {
+      "path": "tests/test_hub.py",
+      "line": 200,
+      "call": "execute",
+      "expression": "sql",
+      "dynamic": true
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 1093,
+      "call": "executescript",
+      "expression": "'\\n            CREATE TABLE orgs (slug TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,\\n              org_name TEXT, username TEXT, blurb TEXT,\\n              registered_at TEXT NOT NULL, last_seen TEXT);\\n        '",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 1098,
+      "call": "execute",
+      "expression": "\"INSERT INTO orgs (slug, fingerprint, org_name, registered_at) VALUES ('legacy.user.abc123','fp','Legacy','2026-01-01')\"",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 604,
+      "call": "execute",
+      "expression": "'SELECT uid FROM identities WHERE name=?'",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 212,
+      "call": "execute",
+      "expression": "sql",
+      "dynamic": true
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 585,
+      "call": "execute",
+      "expression": "'PRAGMA synchronous'",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 586,
+      "call": "execute",
+      "expression": "'PRAGMA journal_mode'",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hubtool.py",
+      "line": 1109,
+      "call": "execute",
+      "expression": "'SELECT slug, org_name, kind FROM orgs'",
+      "dynamic": false
+    },
+    {
+      "path": "tests/test_hubtool_migration.py",
+      "line": 95,
+      "call": "execute",
+      "expression": "sql",
+      "dynamic": true
+    }
+  ],
+  "environment_reads": [
+    {
+      "path": "hubtool.py",
+      "line": 83,
+      "expression": "os.environ.get('MAILHUB_URL', 'http://127.0.0.1:7370')"
+    },
+    {
+      "path": "hubtool.py",
+      "line": 153,
+      "expression": "os.environ.get('MAILHUB_NAME')"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 60,
+      "expression": "os.environ.get('HUB_RETENTION_DAYS', '30')"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 67,
+      "expression": "os.environ.get('HUB_ORG_RETENTION_DAYS', '45')"
+    },
+    {
+      "path": "mailhub/app.py",
+      "line": 59,
+      "expression": "os.environ.get('HUB_NAME')"
+    },
+    {
+      "path": "mailhub/db.py",
+      "line": 25,
+      "expression": "os.environ.get('HUB_DATA', '/data')"
+    },
+    {
+      "path": "mailhub/serve.py",
+      "line": 32,
+      "expression": "os.environ.get('HUB_PORT', '7370')"
+    },
+    {
+      "path": "mailhub/serve.py",
+      "line": 35,
+      "expression": "os.environ.get('HUB_PUBLIC')"
+    },
+    {
+      "path": "mailhub/serve.py",
+      "line": 33,
+      "expression": "os.environ.get('HUB_BIND')"
+    },
+    {
+      "path": "mailhub/serve.py",
+      "line": 36,
+      "expression": "os.environ.get('HUB_PUBLIC_BIND')"
+    }
+  ],
+  "http_contract": [
+    {
+      "method": "GET",
+      "path": "/",
+      "handler": "ui_index",
+      "line": 517,
+      "credential_check": "none",
+      "refusal_statuses": [],
+      "response_keys": [],
+      "query_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/ack",
+      "handler": "ack",
+      "line": 310,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401
+      ],
+      "response_keys": [
+        "acked"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/attachments",
+      "handler": "attachment_upload",
+      "line": 428,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401,
+        413
+      ],
+      "response_keys": [
+        "bytes",
+        "id"
+      ],
+      "query_params": [
+        {
+          "name": "name",
+          "annotation": "str"
+        }
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/attachments/{aid}",
+      "handler": "attachment_download",
+      "line": 455,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401,
+        403,
+        404,
+        410
+      ],
+      "response_keys": [],
+      "query_params": [
+        {
+          "name": "aid",
+          "annotation": "str"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/poll",
+      "handler": "poll",
+      "line": 239,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401
+      ],
+      "response_keys": [
+        "messages",
+        "name",
+        "receipts",
+        "roster"
+      ],
+      "query_params": [
+        {
+          "name": "wait",
+          "annotation": "float"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/receipts",
+      "handler": "receipts",
+      "line": 396,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401
+      ],
+      "response_keys": [
+        "recorded"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/register",
+      "handler": "register",
+      "line": 163,
+      "credential_check": "inline-header",
+      "refusal_statuses": [
+        401,
+        403,
+        422
+      ],
+      "response_keys": [
+        "name",
+        "ok",
+        "retention_days",
+        "roster"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/roster",
+      "handler": "roster",
+      "line": 485,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401
+      ],
+      "response_keys": [
+        "name",
+        "roster"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/send",
+      "handler": "send",
+      "line": 338,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401,
+        422
+      ],
+      "response_keys": [
+        "duplicate",
+        "id",
+        "received_at"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/api/unregister",
+      "handler": "unregister",
+      "line": 214,
+      "credential_check": "auth-helper",
+      "refusal_statuses": [
+        401
+      ],
+      "response_keys": [
+        "unregistered"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "handler": "healthz",
+      "line": 498,
+      "credential_check": "none",
+      "refusal_statuses": [],
+      "response_keys": [
+        "name",
+        "ok",
+        "orgs",
+        "queued",
+        "retention_days"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "GET",
+      "path": "/ui/data",
+      "handler": "ui_data",
+      "line": 524,
+      "credential_check": "none",
+      "refusal_statuses": [],
+      "response_keys": [
+        "name",
+        "orgs",
+        "retention_days"
+      ],
+      "query_params": []
+    },
+    {
+      "method": "GET",
+      "path": "/ui/messages",
+      "handler": "ui_messages",
+      "line": 539,
+      "credential_check": "none",
+      "refusal_statuses": [],
+      "response_keys": [
+        "messages"
+      ],
+      "query_params": [
+        {
+          "name": "org",
+          "annotation": "str"
+        },
+        {
+          "name": "client",
+          "annotation": "str"
+        },
+        {
+          "name": "limit",
+          "annotation": "int"
+        },
+        {
+          "name": "before_at",
+          "annotation": "str"
+        },
+        {
+          "name": "before_n",
+          "annotation": "int"
+        }
+      ]
+    }
+  ],
+  "python_dependencies": {
+    "witness_pattern": "\\bpython[0-9.]*\\b|\\bpip\\b|sys\\.executable|\\buvicorn\\b|\\bfastapi\\b",
+    "backend_families": [
+      "chat-client-and-onboarding",
+      "hub-runtime-or-operator-view",
+      "packaging-configuration-and-exposure"
+    ],
+    "witnesses": [
+      {
+        "path": "Dockerfile",
+        "line": 1,
+        "family": "packaging-configuration-and-exposure",
+        "text": "FROM python:3.12-slim"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 4,
+        "family": "packaging-configuration-and-exposure",
+        "text": "RUN pip install --no-cache-dir -r requirements.txt"
+      },
+      {
+        "path": "Dockerfile",
+        "line": 11,
+        "family": "packaging-configuration-and-exposure",
+        "text": "CMD [\"python\", \"-m\", \"mailhub.serve\"]"
+      },
+      {
+        "path": "README.md",
+        "line": 33,
+        "family": "normative-or-operational-documentation",
+        "text": "python install-hook.py"
+      },
+      {
+        "path": "README.md",
+        "line": 41,
+        "family": "normative-or-operational-documentation",
+        "text": "(`python hubtool.py register <name>` + `listen <name>`) — the hook is what"
+      },
+      {
+        "path": "compose.yaml",
+        "line": 38,
+        "family": "packaging-configuration-and-exposure",
+        "text": "test: [\"CMD\", \"python\", \"-c\","
+      },
+      {
+        "path": "docs/OPERATIONS.md",
+        "line": 147,
+        "family": "normative-or-operational-documentation",
+        "text": "- `python tests/test_hub.py` — the hermetic protocol suite (no sockets)."
+      },
+      {
+        "path": "docs/OPERATIONS.md",
+        "line": 148,
+        "family": "normative-or-operational-documentation",
+        "text": "- `python tests/test_hubtool.py` / `tests/test_hubtool_migration.py` — the"
+      },
+      {
+        "path": "docs/OPERATIONS.md",
+        "line": 150,
+        "family": "normative-or-operational-documentation",
+        "text": "- `python tools/verify-docker.py` — builds an isolated image/container/volume"
+      },
+      {
+        "path": "docs/mailserver-spec.md",
+        "line": 529,
+        "family": "normative-or-operational-documentation",
+        "text": "the same script rather than invoke Python directly, so that logic is not duplicated into a third"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 8,
+        "family": "chat-client-and-onboarding",
+        "text": "claude mcp add mailhub -- python <repo>\\\\hub\\\\hubtool.py"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 14,
+        "family": "chat-client-and-onboarding",
+        "text": "python hub/hubtool.py listen <name>       (or MAILHUB_NAME=<name>)"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 47,
+        "family": "chat-client-and-onboarding",
+        "text": "python hub/hubtool.py addhub <name> <address>"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 48,
+        "family": "chat-client-and-onboarding",
+        "text": "python hub/hubtool.py drophub <name> <address>"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 756,
+        "family": "chat-client-and-onboarding",
+        "text": "\"\"\"python hub/hubtool.py listen <name>   (or MAILHUB_NAME) — the name"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 1208,
+        "family": "chat-client-and-onboarding",
+        "text": "#     python hubtool.py register <name>"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 1209,
+        "family": "chat-client-and-onboarding",
+        "text": "#     python hubtool.py send <name> <to-slug> <message…>"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 1210,
+        "family": "chat-client-and-onboarding",
+        "text": "#     python hubtool.py list <name>"
+      },
+      {
+        "path": "hubtool.py",
+        "line": 1211,
+        "family": "chat-client-and-onboarding",
+        "text": "#     python hubtool.py listen <name>"
+      },
+      {
+        "path": "install-hook.py",
+        "line": 6,
+        "family": "chat-client-and-onboarding",
+        "text": "python hub/install-hook.py            (idempotent; backs up settings)"
+      },
+      {
+        "path": "mailhub/app.py",
+        "line": 40,
+        "family": "hub-runtime-or-operator-view",
+        "text": "from fastapi import FastAPI, HTTPException, Request"
+      },
+      {
+        "path": "mailhub/app.py",
+        "line": 41,
+        "family": "hub-runtime-or-operator-view",
+        "text": "from fastapi.responses import FileResponse, HTMLResponse"
+      },
+      {
+        "path": "mailhub/app.py",
+        "line": 48,
+        "family": "hub-runtime-or-operator-view",
+        "text": "async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:"
+      },
+      {
+        "path": "mailhub/app.py",
+        "line": 57,
+        "family": "hub-runtime-or-operator-view",
+        "text": "app = FastAPI(title=\"orgtree mail hub\", lifespan=_lifespan)"
+      },
+      {
+        "path": "mailhub/serve.py",
+        "line": 17,
+        "family": "hub-runtime-or-operator-view",
+        "text": "python -m mailhub.serve"
+      },
+      {
+        "path": "mailhub/serve.py",
+        "line": 25,
+        "family": "hub-runtime-or-operator-view",
+        "text": "import uvicorn"
+      },
+      {
+        "path": "mailhub/serve.py",
+        "line": 34,
+        "family": "hub-runtime-or-operator-view",
+        "text": "servers = [uvicorn.Server(uvicorn.Config(app, host=bind, port=port))]"
+      },
+      {
+        "path": "mailhub/serve.py",
+        "line": 38,
+        "family": "hub-runtime-or-operator-view",
+        "text": "servers.append(uvicorn.Server(uvicorn.Config("
+      },
+      {
+        "path": "mailhub/serve.py",
+        "line": 45,
+        "family": "hub-runtime-or-operator-view",
+        "text": "uvicorn.run(app, host=bind, port=port)"
+      },
+      {
+        "path": "requirements.txt",
+        "line": 1,
+        "family": "packaging-configuration-and-exposure",
+        "text": "# the hub is deliberately tiny: FastAPI + a server. SQLite is stdlib."
+      },
+      {
+        "path": "requirements.txt",
+        "line": 2,
+        "family": "packaging-configuration-and-exposure",
+        "text": "fastapi>=0.110"
+      },
+      {
+        "path": "requirements.txt",
+        "line": 3,
+        "family": "packaging-configuration-and-exposure",
+        "text": "uvicorn>=0.27"
+      },
+      {
+        "path": "session-start.sh",
+        "line": 24,
+        "family": "chat-client-and-onboarding",
+        "text": "# git-bash spelling that yields a Windows drive path python.exe can open"
+      },
+      {
+        "path": "session-start.sh",
+        "line": 41,
+        "family": "chat-client-and-onboarding",
+        "text": "ctx=\"mailhub: cross-session mail on this machine runs through the orgtree mail hub. Do this now, at the start of this session and before other work. Step 1: pick this session's hub identity name -- unique, semantically derived from your own purpose or directive (like orgtree-redteam or terrain-pipeline); if you registered in an earlier session REUSE that exact name. Identities already on this mach"
+      },
+      {
+        "path": "tests/test_hub.py",
+        "line": 34,
+        "family": "legacy-characterization-tests",
+        "text": "python backend/tests/test_hub.py [-v]"
+      },
+      {
+        "path": "tests/test_hub.py",
+        "line": 73,
+        "family": "legacy-characterization-tests",
+        "text": "# module (Python resolves globals before builtins) and nothing else. `-v`"
+      },
+      {
+        "path": "tests/test_hub.py",
+        "line": 1031,
+        "family": "legacy-characterization-tests",
+        "text": "f\"Python: {selects[-1]!r}\")"
+      },
+      {
+        "path": "tests/test_hub.py",
+        "line": 1034,
+        "family": "legacy-characterization-tests",
+        "text": "# exact segment match in Python — both suggested shapes at once, so the"
+      },
+      {
+        "path": "tests/test_hub.py",
+        "line": 1086,
+        "family": "legacy-characterization-tests",
+        "text": "everything while the exact Python check matches nothing — so the loop"
+      },
+      {
+        "path": "tests/test_hubtool.py",
+        "line": 28,
+        "family": "legacy-characterization-tests",
+        "text": "python backend/tests/test_hubtool.py [-v]"
+      },
+      {
+        "path": "tests/test_hubtool.py",
+        "line": 394,
+        "family": "legacy-characterization-tests",
+        "text": "[sys.executable, \"-c\", \"import time; time.sleep(60)\"])"
+      },
+      {
+        "path": "tests/test_hubtool_migration.py",
+        "line": 23,
+        "family": "legacy-characterization-tests",
+        "text": "python tests/test_hubtool_migration.py [-v]"
+      },
+      {
+        "path": "tools/verify-docker.py",
+        "line": 13,
+        "family": "packaging-configuration-and-exposure",
+        "text": "python tools/verify-docker.py [--keep]"
+      }
+    ],
+    "roles": [
+      {
+        "role": "hub-base-interpreter-image",
+        "path": "Dockerfile",
+        "marker": "FROM python:3.12-slim",
+        "disposition": "must-be-replaced",
+        "obligation": "The image must stop being an interpreter distribution; a Python base image leaves a usable Python inside the delivered backend, which is the precise thing R10 tests for.",
+        "lines": [
+          1
+        ]
+      },
+      {
+        "role": "hub-dependency-install",
+        "path": "Dockerfile",
+        "marker": "RUN pip install --no-cache-dir",
+        "disposition": "must-be-removed",
+        "obligation": "No package-manager install step may remain in the hub image build.",
+        "lines": [
+          4
+        ]
+      },
+      {
+        "role": "hub-service-entrypoint",
+        "path": "Dockerfile",
+        "marker": "CMD [\"python\", \"-m\", \"mailhub.serve\"]",
+        "disposition": "must-be-replaced",
+        "obligation": "The packaged hub service must start from a native executable, not an interpreter module launch.",
+        "lines": [
+          11
+        ]
+      },
+      {
+        "role": "hub-container-healthcheck",
+        "path": "compose.yaml",
+        "marker": "\"CMD\", \"python\", \"-c\"",
+        "disposition": "must-be-replaced",
+        "obligation": "A SECOND, easily-missed interpreter launch: the 30s container healthcheck shells out to Python. Replacing the service binary and stripping Python from the image without replacing this turns every healthy hub unhealthy.",
+        "lines": [
+          38
+        ]
+      },
+      {
+        "role": "chat-client-cli",
+        "path": "hubtool.py",
+        "marker": "python hub/hubtool.py",
+        "disposition": "must-be-replaced",
+        "obligation": "The CLI verbs are charter-preserved observable behaviour and are invoked through an interpreter today.",
+        "lines": [
+          14,
+          47,
+          48,
+          756
+        ]
+      },
+      {
+        "role": "chat-client-cli-parity-block",
+        "path": "hubtool.py",
+        "marker": "python hubtool.py",
+        "disposition": "must-be-replaced",
+        "obligation": "The same CLI surface, documented in the FR-09 cutover block; both spellings must move together or the advertised verbs diverge from the real ones.",
+        "lines": [
+          1208,
+          1209,
+          1210,
+          1211
+        ]
+      },
+      {
+        "role": "chat-client-mcp-registration",
+        "path": "hubtool.py",
+        "marker": "claude mcp add mailhub",
+        "disposition": "must-be-replaced",
+        "obligation": "The MCP server is registered as an interpreter command line; a native client changes the registration operators must run.",
+        "lines": [
+          8
+        ]
+      },
+      {
+        "role": "onboarding-installer",
+        "path": "install-hook.py",
+        "marker": "python hub/install-hook.py",
+        "disposition": "must-be-replaced",
+        "obligation": "Hook installation is a Python script; packaged onboarding cannot depend on an interpreter.",
+        "lines": [
+          6
+        ]
+      },
+      {
+        "role": "hub-asgi-framework",
+        "path": "mailhub/app.py",
+        "marker": "fastapi",
+        "disposition": "must-be-replaced",
+        "obligation": "Routing, query validation and the HTTPException status surface are FastAPI behaviour today; the port must reproduce the frozen statuses without it.",
+        "lines": [
+          40,
+          41,
+          48,
+          57
+        ]
+      },
+      {
+        "role": "hub-schema-initialization",
+        "path": "mailhub/db.py",
+        "marker": "con.executescript(_SCHEMA)",
+        "disposition": "must-be-replaced",
+        "obligation": "Every hub schema create and upgrade runs through this Python function today, including the FR-06 ALTER TABLE fallback immediately below it. The port owns schema creation and migration natively.",
+        "lines": [
+          79
+        ]
+      },
+      {
+        "role": "hub-asgi-server",
+        "path": "mailhub/serve.py",
+        "marker": "uvicorn",
+        "disposition": "must-be-replaced",
+        "obligation": "Both listeners -- the full app and the FR-10 public split -- must be served by the Rust binary.",
+        "lines": [
+          25,
+          34,
+          38,
+          45
+        ]
+      },
+      {
+        "role": "hub-service-entrypoint-doc",
+        "path": "mailhub/serve.py",
+        "marker": "python -m mailhub.serve",
+        "disposition": "must-be-replaced",
+        "obligation": "The documented start command changes with the entrypoint; leaving it stale misdirects operators and R10 tracing.",
+        "lines": [
+          17
+        ]
+      },
+      {
+        "role": "hub-dependency-manifest",
+        "path": "requirements.txt",
+        "marker": "",
+        "disposition": "must-be-replaced",
+        "obligation": "fastapi/uvicorn become Rust crate dependencies; the manifest must not survive as a runtime requirement.",
+        "lines": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "role": "session-bootstrap-commentary",
+        "path": "session-start.sh",
+        "marker": "python.exe can open",
+        "disposition": "commentary-only",
+        "obligation": "Explanatory comment about path spelling. It launches nothing; recorded so the census stays fully dispositioned rather than carrying an unexplained hit.",
+        "lines": [
+          24
+        ]
+      },
+      {
+        "role": "session-bootstrap-hook",
+        "path": "session-start.sh",
+        "marker": "python $HUBTOOL",
+        "disposition": "must-be-replaced",
+        "obligation": "The SessionStart hook hands every new session interpreter command lines for register/listen/list/send.",
+        "lines": [
+          41
+        ]
+      },
+      {
+        "role": "docker-verification-tooling",
+        "path": "tools/verify-docker.py",
+        "marker": "python tools/verify-docker.py",
+        "disposition": "test-tooling-not-a-backend-dependency",
+        "obligation": "Explicitly OUT of the R10 assertion: the docket rules that Python used by test tooling is not reclassified as an Orgtree backend dependency. It must not be counted as a remaining backend requirement, and it must not be used to launch the product under test.",
+        "lines": [
+          13
+        ]
+      }
+    ],
+    "external_witnesses": [
+      {
+        "role": "parent-schema-initialization-subprocess",
+        "repository": "orgtree (parent)",
+        "witness": "engine/mailhub_runtime.py:169",
+        "verified_here": false,
+        "claim": "_migrate_store invokes sys.executable -c 'import mailhub.db ...' to initialize the schema before import.",
+        "attributed_to": "rust-program-astra, mailhub-parent-boundary-20260922.md, parent commit 24c03bd4992ff331ca87be3e62f298aaa5c53835",
+        "disposition": "must-be-replaced-by-parent-slice",
+        "obligation": "R09/R10 own this one; MH cannot close it from inside the product repository."
+      },
+      {
+        "role": "parent-service-launch-subprocess",
+        "repository": "orgtree (parent)",
+        "witness": "engine/mailhub_runtime.py:335",
+        "verified_here": false,
+        "claim": "start() launches sys.executable -m mailhub.serve in the product checkout.",
+        "attributed_to": "rust-program-astra, mailhub-parent-boundary-20260922.md, parent commit 24c03bd4992ff331ca87be3e62f298aaa5c53835",
+        "disposition": "must-be-replaced-by-parent-slice",
+        "obligation": "Replacing the product binary is not enough; the parent launcher must stop spawning an interpreter."
+      }
+    ],
+    "uncovered_backend_witnesses": []
+  }
+}
