@@ -46,6 +46,12 @@ if hasattr(sys.stdout, "reconfigure"):
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.normpath(os.path.join(_HERE, ".."))
 sys.path.insert(0, _REPO)
+# the in-process hub these client tests talk to is the v1 Python hub, which
+# left the tree in v2.0.0: it comes from git history (tests/v1_reference.py)
+sys.path.insert(0, _HERE)
+from v1_reference import v1_root                                 # noqa: E402
+
+sys.path.insert(0, v1_root())
 
 _TMP = tempfile.mkdtemp(prefix="orgtree-hubtool-")
 os.environ["HUB_DATA"] = os.path.join(_TMP, "hub")

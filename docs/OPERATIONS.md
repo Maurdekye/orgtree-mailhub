@@ -24,8 +24,8 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_RETENTION_DAYS` | `30` | hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state** |
 | `HUB_ORG_RETENTION_DAYS` | `45` | roster rows silent this long are pruned, except rows still holding queued mail; a pruned client re-registers itself on its next 401 |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
-| `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker `mailhub.serve` honors it directly (an embedding desktop process sets `127.0.0.1`) |
-| `HUB_PUBLIC_BIND` | `0.0.0.0` | **a security control the same way** — its routes are authenticated, but per the Trust model reaching it is still what admits a new registrant: under compose the host-side interface of the public listener's port mapping, outside Docker honored directly by `mailhub.serve`. Set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy, or a specific interface address to pin it to one network (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
+| `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker the hub honors it directly (an embedding desktop process sets `127.0.0.1`) |
+| `HUB_PUBLIC_BIND` | `0.0.0.0` | **a security control the same way** — its routes are authenticated, but per the Trust model reaching it is still what admits a new registrant: under compose the host-side interface of the public listener's port mapping, outside Docker honored directly by the hub. Set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy, or a specific interface address to pin it to one network (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
 | `HUB_PUBLIC_HOST_PORT` | `7378` | compose only: the host PORT mapped to the public listener's internal 7371. A bare port — the interface comes from `HUB_PUBLIC_BIND` |
 | `HUB_CONTAINER_NAME` | `orgtree-mailhub` | compose only: the container's name. Container names are host-global (volumes are compose-project-prefixed, names are not), so a second instance on one host must override it |
 
@@ -179,9 +179,12 @@ v2 (see `docs/v2.md` for what each proves; all on throwaway databases):
 - `python tools/verify-docker.py [--upgrade]` — the image, its PostgreSQL
   container and the in-place upgrade from a v1 volume, end to end.
 
-v1 (the Python server, kept as the reference during Phase 1):
+v1's Python server left the tree in v2.0.0: its protocol suite lives on
+as `hub/tests/hub_suite.rs`, and the tests that still run v1 (the
+side-by-side comparisons, hubtool's suite) take it from git history
+(`tests/v1_reference.py`, commit 79a7c51; `pip install -r
+tests/requirements.txt`).
 
-- `python tests/test_hub.py` — the hermetic protocol suite (no sockets).
 - `python tests/test_hubtool.py` / `tests/test_hubtool_migration.py` — the
   session-client tool and its identity-store migration.
 - `python tools/verify-docker.py` — builds an isolated image/container/volume

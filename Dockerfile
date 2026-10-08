@@ -10,8 +10,6 @@ WORKDIR /src
 ARG CARGO_BUILD_JOBS=2
 COPY Cargo.toml Cargo.lock ./
 COPY hub/ hub/
-# the read-only operator page is compiled into the binary
-COPY mailhub/static/index.html mailhub/static/index.html
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p orgtree-mailhub \

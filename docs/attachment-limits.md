@@ -19,6 +19,6 @@ default without restarting the hub. Each upload snapshots the limit when it
 starts; a change applies to subsequent uploads. A missing file uses the startup
 default; an invalid file returns 503 instead of silently widening the limit.
 
-`python tests/test_hub.py` covers the environment override, public advertisement,
+`cargo test --test hub_suite` (v1's `tests/test_hub.py`, ported) covers the environment override, public advertisement,
 live updates, oversize and interrupted cleanup, and a 32 MiB streamed upload with
 less than 8 MiB of traced Python allocation at peak.

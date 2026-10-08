@@ -1,0 +1,6 @@
+# Test-only: the v1 Python hub that tests/v1_reference.py takes from git history
+# (the side-by-side comparisons and hubtool's suite run it) and the driver's client.
+# The hub itself is the Rust binary; hubtool.py needs only the standard library.
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27

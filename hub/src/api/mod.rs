@@ -26,7 +26,7 @@ use crate::presence::Presence;
 use crate::wire;
 
 /// The read-only operator page, unchanged from v1.
-pub const INDEX_HTML: &str = include_str!("../../../mailhub/static/index.html");
+pub const INDEX_HTML: &str = include_str!("../../static/index.html");
 
 /// Largest JSON request body read (v1 read any size; a body this large is
 /// refused 413 rather than buffered).

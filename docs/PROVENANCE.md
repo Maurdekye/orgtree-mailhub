@@ -69,6 +69,17 @@ listed is meant to be byte-identical or behavior-identical to V1.
    container names are host-global, so a fixed one blocked a second
    instance per host; the default is unchanged.
 
+8. **v2.0.0: the hub rewritten in Rust with PostgreSQL storage** (2026-10-08,
+   user ruling; docket item `mail-hub-v2-0-rewrite-in-rust-with-postgres-stor`).
+   The server is the `hub/` crate (binary `orgtree-mailhub`); the Python
+   server (`mailhub/`) and its suite (`tests/test_hub.py`) left the tree after
+   the Phase 1 review, the suite ported check for check to
+   `hub/tests/hub_suite.rs`. The protocol is unchanged; the deliberate
+   differences are listed with their reasons in `docs/v2.md`. The last v1
+   server (79a7c51, with the 1 GiB limit) stays reachable through git
+   history: `tests/v1_reference.py` extracts it for the side-by-side
+   comparisons and for hubtool's suite. `hubtool.py` is unchanged.
+
 ## Known V1 gaps carried across deliberately
 
 The V1 suites assert these as *known gaps/findings* and this import does not

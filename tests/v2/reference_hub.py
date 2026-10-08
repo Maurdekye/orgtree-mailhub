@@ -1,6 +1,9 @@
 """Run the v1 Python hub (the reference for the v2 port) on chosen ports.
 
-`python -m mailhub.serve` fixes the public listener at 7371; this launcher
+The v1 server left the tree in v2.0.0; it is taken from git history at
+tests/v1_reference.py's V1_COMMIT.
+
+v1's `python -m mailhub.serve` fixed the public listener at 7371; this launcher
 serves the same two ASGI apps (the full app and the FR-10 PublicHub around
 it) on any two loopback ports, so a comparison never touches a real hub's
 ports. Configuration is v1's own: HUB_* variables set before the import.
@@ -15,7 +18,7 @@ import asyncio
 import os
 import sys
 
-_REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+_TESTS = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
 def main() -> None:
@@ -31,7 +34,10 @@ def main() -> None:
     os.environ.setdefault("HUB_RETENTION_DAYS", "30")
     if args.max_file_bytes:
         os.environ["HUB_MAX_FILE_BYTES"] = args.max_file_bytes
-    sys.path.insert(0, _REPO)
+    sys.path.insert(0, _TESTS)
+    from v1_reference import v1_root
+
+    sys.path.insert(0, v1_root())
     import uvicorn
 
     from mailhub.app import app
