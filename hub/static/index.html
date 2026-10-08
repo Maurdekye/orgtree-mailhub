@@ -214,7 +214,7 @@ function renderMail () {
 async function refresh () {
   try {
     const d = await (await fetch('/ui/data')).json()
-    el('hubname').textContent = d.name + ' · mail hub'
+    el('hubname').textContent = d.name + ' · mail hub' + (d.version ? ' ' + d.version : '')
     document.title = d.name + ' · orgtree mail hub'
     const total = d.orgs.reduce((a, o) => a + o.queued, 0)
     el('stats').textContent = d.orgs.length + ' orgs · ' + total + ' queued · '

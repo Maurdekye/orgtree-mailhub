@@ -383,6 +383,7 @@ async fn sync_answer(hub: &Hub, slug: &str, cur: Cursor, b: Batch) -> ApiResult 
     let print = online_print(&online);
     let mut out = json!({
         "name": hub.cfg.hub_name,
+        "version": crate::VERSION,
         "cursor": b.to.render(print),
         "changes": b.changes,
         "roster": b.roster,

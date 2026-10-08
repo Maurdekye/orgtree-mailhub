@@ -50,7 +50,7 @@ EXPECTED = {
     "log-startup": "v1 printed its startup line once per listener (the public listener ran the app's lifespan again); v2 prints it once",
     "u7-bad-cursor": "a before_at that is not a timestamp: v1 compared it as a string, v2 refuses it (422)",
     "log-500": "v2 also writes a request line for a 500 (v1's middleware never saw the crash)",
-    "h2-index": "the operator page also tags the person kind and can say mail is kept until deleted (docs/v2-additions.md)",
+    "h2-index": "the operator page also tags the person kind, can say mail is kept until deleted, and shows the hub's version (docs/v2-additions.md)",
 }
 
 
@@ -237,15 +237,20 @@ class Diff:
 
     def set_aside_additions(self, va: dict[str, Any], vb: dict[str, Any]) -> None:
         """v2's /healthz also says what it supports (`version`, `features`:
-        docs/v2-additions.md). Present on v2 and absent on v1, they are set
-        aside so the rest of the answer still compares exactly."""
+        docs/v2-additions.md), and every other answer that names the hub
+        (`name`) also gives its `version`. Present on v2 and absent on v1,
+        they are set aside so the rest of the answer still compares exactly."""
         ba, bb = va.get("body"), vb.get("body")
-        if not (isinstance(ba, dict) and isinstance(bb, dict) and "max_attachment_bytes" in bb):
+        if not (isinstance(ba, dict) and isinstance(bb, dict)):
             return
-        if all(k in bb and k not in ba for k in HEALTHZ_ADDITIONS) and isinstance(bb["features"], list):
+        if "max_attachment_bytes" in bb and all(k in bb and k not in ba for k in HEALTHZ_ADDITIONS) and isinstance(bb["features"], list):
             assert bb["max_message_bytes"] == bb["max_attachment_bytes"], bb
             for k in HEALTHZ_ADDITIONS:
                 bb.pop(k)
+            self.additions += 1
+        elif "name" in bb and "name" in ba and "version" in bb and "version" not in ba:
+            assert isinstance(bb["version"], str) and bb["version"], bb
+            bb.pop("version")
             self.additions += 1
 
     def set_aside_continuations(self, a: Any, b: Any) -> Any:
@@ -772,7 +777,7 @@ def main() -> int:
                 s.proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\nagree: {d.same} · deliberate differences seen: {len(d.expected_seen)} · UNEXPECTED: {len(d.unexpected)}"
-          f" · v2 additions set aside in {d.additions} answers (/healthz version, features, max_message_bytes)"
+          f" · v2 additions set aside in {d.additions} answers (the hub's version beside its name; /healthz features, max_message_bytes)"
           f" and {d.continuations} bodies (the \"message continues\" line)")
     for u in d.unexpected:
         print(f"\n✗ {u}")

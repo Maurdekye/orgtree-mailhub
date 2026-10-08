@@ -38,7 +38,7 @@ pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
         // G8: the same limit, named for what it bounds now: one message,
         // its body and files together
         "max_message_bytes": limit,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "features": FEATURES,
     }))
 }
@@ -70,7 +70,7 @@ pub async fn ui_data(hub: &Arc<Hub>) -> ApiResult {
             o.insert("queued".into(), json!(counts.get(&slug).copied().unwrap_or(0)));
         }
     }
-    ok(json!({ "name": hub.cfg.hub_name, "retention_days": hub.cfg.retention_days, "orgs": rows }))
+    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "orgs": rows }))
 }
 
 /// Newest first, `limit` clamped to 1..500, keyset-paged by

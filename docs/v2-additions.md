@@ -416,3 +416,23 @@ that only syncs with the shared secret) and `signed_out_at`.
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
 `devices`, `history`, `delete`, `long_messages`, `message_limit`,
 `directory`, `uploads`, `link`, `device_keys`. A v1 hub reports neither.
+
+## The hub's version, to every client
+
+Every answer that names the hub (its `"name"`) also carries
+`"version"`: the hub's own version as a string (`"2.0.0"`), the same value
+`/healthz` and `orgtree-mailhub --version` report. So a client sees it on
+the paths it already uses, without a separate call:
+
+| Answer | Route |
+|---|---|
+| registration | `POST /api/register` |
+| poll (the v1 long poll) | `POST /api/poll` (and `GET`) |
+| sync (every device gets everything) | `POST /api/sync` |
+| roster | `GET /api/roster` |
+| directory | `GET /api/directory` |
+| the operator page's data | `GET /ui/data` (the page shows it beside the hub's name) |
+| health | `GET /healthz` |
+
+The key sits beside `"name"` at the top level of each answer. A v1 hub sends
+no `"version"` anywhere: a client shows its version as unknown.

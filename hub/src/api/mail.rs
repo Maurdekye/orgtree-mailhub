@@ -316,7 +316,7 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let roster = roster(hub, &c).await?;
-    ok(json!({ "ok": true, "name": hub.cfg.hub_name, "retention_days": hub.cfg.retention_days, "roster": roster }))
+    ok(json!({ "ok": true, "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "roster": roster }))
 }
 
 // ---------------------------------------------------------------- unregister
@@ -433,7 +433,7 @@ async fn poll_answer(hub: &Hub, slugs: &[String], messages: Vec<Value>, receipts
     let c = hub.db.get().await?;
     mark_seen(hub, &c, slugs).await?;
     let roster = roster(hub, &c).await?;
-    ok(json!({ "name": hub.cfg.hub_name, "messages": messages, "receipts": receipts, "roster": roster }))
+    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "messages": messages, "receipts": receipts, "roster": roster }))
 }
 
 // ----------------------------------------------------------------------- ack
@@ -793,7 +793,7 @@ pub async fn roster_route(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, &slugs).await?;
     let roster = roster(hub, &c).await?;
-    ok(json!({ "name": hub.cfg.hub_name, "roster": roster }))
+    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "roster": roster }))
 }
 
 // ----------------------------------------------------------------- directory
@@ -838,7 +838,7 @@ pub async fn directory(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let more = rows.len() as i64 > limit;
     let entries: Vec<Value> = rows.iter().take(limit as usize).map(|r| roster_entry(hub, r)).collect();
     let next = if more { entries.last().and_then(|e| e["slug"].as_str()).map(str::to_string) } else { None };
-    ok(json!({ "name": hub.cfg.hub_name, "entries": entries, "after": next }))
+    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "entries": entries, "after": next }))
 }
 
 // ------------------------------------------------------------------- profile
