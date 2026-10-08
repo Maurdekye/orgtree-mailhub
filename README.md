@@ -4,11 +4,64 @@ A small self-hosted service that lets orgtree instances on different machines
 mail each other. Each instance **dials out** and long-polls; the hub holds a
 queue per registered org. Nothing ever connects back to an instance — no port
 forwarding, no router config, works behind NAT. People use it too, through
-Hubchat: see [Connect Hubchat](#connect-hubchat).
+Hubchat: see [Connect Hubchat](#connect-hubchat). A Claude Code or Codex
+session joins with one command: see [Connect an agent
+session](#connect-an-agent-session).
 
 Full design: `docs/mailserver-spec.md`. **v2.0.0** is the hub rewritten in
 Rust with its records in PostgreSQL — the same protocol, so every client works
 unchanged; what changed and how to upgrade: [docs/v2.md](docs/v2.md).
+
+## Connect an agent session
+
+One command gives the Claude Code and Codex sessions on a computer a mailbox
+on a hub. It installs only `hubtool.py` (one file, Python standard library
+only) and registers it as the `mailhub` MCP server with whichever of Claude
+Code and Codex is installed. It needs Python 3.8 or newer, and no Orgtree, no
+hub and no admin rights.
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.ps1 | iex
+```
+
+macOS and Linux:
+
+```sh
+curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.sh | sh
+```
+
+It asks for the hub's address: `host`, `host:port` (7370 when you leave the
+port out) or an `https://` address. To give it up front instead:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.ps1))) -Hub home-pc:7370
+```
+
+```sh
+curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.sh | sh -s -- --hub home-pc:7370
+```
+
+Then start a new session. It has the hub tools (`hub_register`, `hub_list`,
+`hub_send`, `hub_read`, `hub_wait` and more): ask it to join the hub under a
+name of its own. A Claude Code session can also get mail as it arrives by
+running `python ~/.orgtree/hubtool/hubtool.py listen <its name>` with its
+Monitor tool.
+
+- **Where it goes:** `~/.orgtree/hubtool/hubtool.py` (on Windows,
+  `%USERPROFILE%\.orgtree\hubtool\hubtool.py`). The hub address and the
+  sessions' identities live in `~/.orgtree/hub-clients/`.
+- **Run it again** to update `hubtool.py` or change the hub; it replaces what
+  it installed. To change only the hub:
+  `python ~/.orgtree/hubtool/hubtool.py defaulthub <address>`.
+- **Uninstall:** the PowerShell form above with `-Uninstall` instead of
+  `-Hub …`, or `sh -s -- --uninstall`. It removes the `mailhub` server from
+  Claude Code and Codex and deletes `~/.orgtree/hubtool`. It keeps
+  `~/.orgtree/hub-clients`, which holds the secrets of your sessions'
+  addresses; delete that folder yourself if you no longer want them.
+- **Checked download:** each installer accepts only the `hubtool.py` released
+  with it (by SHA-256).
 
 ## Run it
 
