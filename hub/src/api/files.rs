@@ -18,6 +18,7 @@ use crate::clock;
 use crate::db;
 use crate::wire::{latin1, pg_text, py_basename, py_int, py_prefix, py_strip};
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn upload(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let name = req.query_str("name", "file");
     let slugs = authed(hub, req).await?;
@@ -73,6 +74,7 @@ pub async fn upload(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     ok(json!({ "id": aid, "bytes": size }))
 }
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn download(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let aid = req.path.strip_prefix("/api/attachments/").unwrap_or("").to_string();
     let slugs = authed(hub, req).await?;

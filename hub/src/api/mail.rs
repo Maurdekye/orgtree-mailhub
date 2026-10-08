@@ -52,6 +52,7 @@ pub fn envelope(r: &tokio_postgres::Row) -> serde_json::Map<String, Value> {
 }
 
 /// The roster every client is sent: all registered addresses with presence.
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn roster(hub: &Hub, c: &impl GenericClient) -> ApiResult<Vec<Value>> {
     let rows = db::query(c, "SELECT slug, org_name, username, blurb, last_seen, kind FROM identities ORDER BY slug", &[]).await?;
     Ok(rows
@@ -74,6 +75,7 @@ pub async fn roster(hub: &Hub, c: &impl GenericClient) -> ApiResult<Vec<Value>> 
 
 /// v1 `_mark_seen`: the last authenticated call, in memory (presence) and
 /// in the roster's `last_seen`.
+#[tracing::instrument(level = "debug", skip(hub, c), ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn mark_seen(hub: &Hub, c: &impl GenericClient, slugs: &[String]) -> ApiResult<()> {
     if slugs.is_empty() {
         return Ok(());
@@ -110,6 +112,7 @@ fn crash<T>(what: &str) -> ApiResult<T> {
 
 // ------------------------------------------------------------------ register
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let body = req.json_object().await?;
     let slug = py_strip(&str_field(&body, "slug")).to_string();
@@ -169,6 +172,7 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 /// The polite exit: an authenticated client removes its own roster row(s).
 /// Queued mail ages out through retention; the same secret re-mints the same
 /// address later.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let slugs = authed(hub, req).await?;
     if slugs.is_empty() {
@@ -187,6 +191,7 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 /// One long poll carries, for every org whose credentials it presents: the
 /// queued mail (until acked), the receipts its senders are owed (each pushed
 /// once), and the roster.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn poll(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // query parameters are validated before the handler body, as in FastAPI
     let wait = req.query_float("wait", 25.0)?;
@@ -212,6 +217,7 @@ pub async fn poll(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
 }
 
+#[tracing::instrument(level = "debug", skip(hub))]
 async fn poll_check(hub: &Hub, slugs: &[String]) -> ApiResult<(Vec<Value>, Vec<Value>)> {
     let c = hub.db.get().await?;
     let msgs = db::query(
@@ -264,6 +270,7 @@ async fn poll_check(hub: &Hub, slugs: &[String]) -> ApiResult<(Vec<Value>, Vec<V
     Ok((messages, receipts))
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 async fn poll_answer(hub: &Hub, slugs: &[String], messages: Vec<Value>, receipts: Vec<Value>) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, slugs).await?;
@@ -275,6 +282,7 @@ async fn poll_answer(hub: &Hub, slugs: &[String], messages: Vec<Value>, receipts
 
 /// Custody transfer: the recipient persisted the mail. Only the addressee may
 /// ack; a second ack is a no-op.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn ack(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let body = req.json_object().await?;
     let Ok(items) = py_iter(body.get("ids")) else { return crash("ack: `ids` is not iterable") };
@@ -304,6 +312,7 @@ pub async fn ack(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 /// Idempotent on the client-minted id: a retry answers `duplicate: true`
 /// with the ORIGINAL `received_at`, and the first payload wins. The 200 IS
 /// the "received" receipt.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let body = req.json_object().await?;
     let to = py_strip(&str_field(&body, "to")).to_string();
@@ -393,6 +402,7 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 /// `delivered` and `read` from the recipient's side. Each is written only
 /// while unset (the ladder never moves backwards) and only by the addressee;
 /// other states are ignored, not refused.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn receipts(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let body = req.json_object().await?;
     let slugs = authed(hub, req).await?;
@@ -434,6 +444,7 @@ pub async fn receipts(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 
 // -------------------------------------------------------------------- roster
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn roster_route(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let slugs = authed(hub, req).await?;
     if slugs.is_empty() {

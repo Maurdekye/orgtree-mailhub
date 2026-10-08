@@ -68,6 +68,8 @@ pub fn init_tracing(verbose: bool) {
     let env = tracing_subscriber::EnvFilter::try_from_env("HUB_LOG_FILTER").unwrap_or_else(|_| filter.into());
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        // colour only on a terminal: `docker logs` and a host's log file get plain text
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(env)
         .with_span_events(if verbose { FmtSpan::NEW } else { FmtSpan::NONE })
         .with_target(true)

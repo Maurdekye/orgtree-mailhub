@@ -16,6 +16,7 @@ use crate::clock;
 use crate::db;
 use crate::wire::{self, pg_text};
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
     let c = hub.db.get().await?;
     let row = db::query_one(
@@ -47,6 +48,7 @@ pub fn index() -> Resp {
     r
 }
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn ui_data(hub: &Arc<Hub>) -> ApiResult {
     let c = hub.db.get().await?;
     let mut rows = roster(hub, &c).await?;
@@ -84,6 +86,7 @@ fn ui_params(req: &Req) -> ApiResult<(i64, i64, String, String, String)> {
     Ok((limit, before_n, pg_text(req.query_str("org", "")), req.query_str("client", ""), req.query_str("before_at", "")))
 }
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn ui_messages(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // FastAPI validated every declared parameter and reported all failures
     let (limit, before_n, org, client, before_at) = ui_params(req)?;

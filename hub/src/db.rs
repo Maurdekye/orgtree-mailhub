@@ -70,6 +70,7 @@ impl Db {
 
     /// Bring the schema up to date (idempotent; serialized by an advisory
     /// transaction lock so two starting hubs cannot both apply a migration).
+    #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"))]
     pub async fn migrate(&self) -> Result<i64> {
         let mut c = self.get().await?;
         let tx = c.transaction().await?;
@@ -107,6 +108,7 @@ impl Db {
     /// Claim this database for one hub process. Presence and long-poll
     /// wake-ups live in the process, so two hubs on one database would each
     /// see half the picture. The returned client holds the claim open.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn claim_instance(cfg: &Config) -> Result<tokio_postgres::Client> {
         let pg = Self::pg_config(cfg.database_url())?;
         let (client, conn) = pg.connect(NoTls).await.context("could not connect to the database")?;

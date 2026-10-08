@@ -238,12 +238,14 @@ impl Tally {
     }
 }
 
+#[derive(Debug)]
 pub struct Report {
     pub json: Value,
 }
 
 /// Import the v1 store at `sqlite` into `db`; blob files land in
 /// `blob_dir`.
+#[tracing::instrument(level = "info", skip(db), ret(level = "info"), err(level = "warn"))]
 pub async fn import(db: &Db, sqlite: &Path, blob_dir: &Path, mode: Mode) -> Result<Report> {
     if !sqlite.is_file() {
         bail!("no v1 store at {}", sqlite.display());
@@ -476,6 +478,7 @@ fn strip_nul_json(v: Value) -> Value {
 /// At startup: a v1 store in `HUB_DATA` is imported once, into an empty
 /// database (upgrading in place is "replace the image and restart", as it
 /// was for v1). A database that already holds records is left alone.
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn auto_import(cfg: &Config, db: &Db) -> Result<Option<Report>> {
     let path = cfg.sqlite_path();
     if !cfg.import_sqlite || !path.is_file() {

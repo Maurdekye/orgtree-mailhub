@@ -24,6 +24,7 @@ pub struct InvalidLimit;
 /// configured and present, the startup default otherwise. Read once per
 /// upload (and per /healthz), so a change never alters an upload already in
 /// flight.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"))]
 pub fn attachment_limit(cfg: &Config) -> Result<u64, InvalidLimit> {
     let Some(path) = &cfg.runtime_config_file else { return Ok(cfg.max_file_bytes) };
     let text = match std::fs::read(path) {

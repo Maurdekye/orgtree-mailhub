@@ -20,6 +20,7 @@ use crate::db;
 const BATCH: i64 = 1000;
 pub const INTERVAL: Duration = Duration::from_secs(3600);
 
+#[derive(Debug)]
 pub struct Swept {
     pub messages: u64,
     pub attachments: u64,
@@ -31,6 +32,7 @@ fn cutoff(days: i64) -> Result<chrono::DateTime<Utc>> {
     Utc::now().checked_sub_signed(span).ok_or_else(|| anyhow!("retention of {days} days is out of range"))
 }
 
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "warn"))]
 pub async fn run_once(hub: &Hub) -> Result<Swept> {
     let cut = cutoff(hub.cfg.retention_days)?;
     let dir = hub.cfg.blob_dir();

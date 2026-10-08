@@ -219,6 +219,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
 }
 
 /// The full app (port 7370): API, health and the operator UI.
+#[tracing::instrument(level = "debug", skip_all, fields(method = %req.method(), path = %req.uri().path()))]
 pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
     if is_websocket(req.headers()) {
         return websocket_refused();
@@ -244,6 +245,7 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
 /// `/api/*` and `/healthz` pass to the app; every other path is a plain-text
 /// 404 that never reaches it (the operator UI is an unauthenticated view of
 /// all mail).
+#[tracing::instrument(level = "debug", skip_all, fields(listener = "public"))]
 pub async fn dispatch_public(hub: Arc<Hub>, req: Request<Body>) -> Resp {
     if is_websocket(req.headers()) {
         return websocket_refused();

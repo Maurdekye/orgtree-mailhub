@@ -56,6 +56,7 @@ pub fn pairs(header: Option<&http::HeaderValue>) -> Vec<Pair> {
 /// header order (a slug presented twice counts twice, as in v1). Unknown
 /// slugs and wrong secrets simply drop out: a multiplexed call proceeds for
 /// the valid ones.
+#[tracing::instrument(level = "debug", skip_all, fields(slugs = ?pairs.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>()), ret(level = "debug"))]
 pub async fn authenticate(c: &impl GenericClient, pairs: &[Pair]) -> Result<Vec<String>, tokio_postgres::Error> {
     if pairs.is_empty() {
         return Ok(Vec::new());

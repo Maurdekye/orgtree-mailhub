@@ -20,6 +20,7 @@ use crate::{blobs, clock, import, log, sweep};
 
 /// Everything up to (not including) the listeners: database, schema, the
 /// one-time v1 import, leftover partial uploads.
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn prepare(cfg: Config) -> Result<Arc<Hub>> {
     std::fs::create_dir_all(cfg.blob_dir()).with_context(|| format!("could not create {}", cfg.blob_dir().display()))?;
     let db = Db::new(&cfg)?;
