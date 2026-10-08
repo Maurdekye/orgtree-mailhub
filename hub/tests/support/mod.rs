@@ -81,6 +81,31 @@ fn kill_with_us(child: &Child) {
 #[cfg(not(windows))]
 fn kill_with_us(_child: &Child) {}
 
+/// Is the test process that made a run folder still running? (Its server
+/// lives exactly as long as it does.)
+fn alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE as u32
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+    }
+}
+
 impl TestPg {
     pub fn start() -> TestPg {
         if let Ok(url) = std::env::var("HUB_TEST_DATABASE_URL") {
@@ -93,9 +118,14 @@ impl TestPg {
         let bin = root.join("bin");
         let password = std::fs::read_to_string(root.join("template").join("password.txt")).expect("template/password.txt");
         let runs = root.join("runs");
-        // runs a killed test left behind (their server died with the job)
+        // runs a killed test left behind (their server died with the job);
+        // a live process's runs are left alone: tests run side by side
         if let Ok(rd) = std::fs::read_dir(&runs) {
             for e in rd.flatten() {
+                let pid = e.file_name().to_str().and_then(|n| n.split('-').next()?.parse::<u32>().ok());
+                if pid.is_some_and(alive) {
+                    continue;
+                }
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
