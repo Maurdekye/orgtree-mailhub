@@ -13,3 +13,4 @@ install-hook.py
 session-start.sh
 hubtool.py
 tools/
+native/**/target/
