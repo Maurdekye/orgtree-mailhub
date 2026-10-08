@@ -21,7 +21,7 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_IMPORT_SQLITE` | on | import `HUB_DATA/hub.sqlite3` into an EMPTY database at startup (once) |
 | `HUB_LOG_VERBOSE` | off | `1`: every handler call/return and SQL statement on stderr |
 | `HUB_PUBLIC_PORT` | `7371` | the public listener's port inside the container/host process (v1 fixed it) |
-| `HUB_RETENTION_DAYS` | `30` | hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state** |
+| `HUB_RETENTION_DAYS` | unset | unset or empty: mail and files are kept until their owners delete them (`retention_days: null`). A number: the hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state, and overriding the kept history** (v1's default was 30). Uploads no send ever bound go after 7 days either way |
 | `HUB_ORG_RETENTION_DAYS` | `45` | roster rows silent this long are pruned, except rows still holding queued mail; a pruned client re-registers itself on its next 401 |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
 | `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker the hub honors it directly (an embedding desktop process sets `127.0.0.1`) |
@@ -38,7 +38,7 @@ host ports. Nothing else collides.
 ## Health and logs
 
 - `GET /healthz` → `{ok, name, orgs, queued, retention_days,
-  max_attachment_bytes}`; the compose file wires `orgtree-mailhub healthcheck`
+  max_attachment_bytes, version, features}`; the compose file wires `orgtree-mailhub healthcheck`
   (which asks it) as the container healthcheck.
 - One structured JSON line per request on stdout (`docker logs
   orgtree-mailhub`), plus one line per retention sweep. Slugs are logged,

@@ -1,6 +1,8 @@
-//! Retention, as v1: at startup and then hourly, messages and attachments
-//! older than `HUB_RETENTION_DAYS` go (the attachment's file first, then its
-//! row), and roster rows silent longer than `HUB_ORG_RETENTION_DAYS` go —
+//! Retention: at startup and then hourly. Mail and files are kept until
+//! their owners delete them (G4) unless `HUB_RETENTION_DAYS` is set; then,
+//! as v1, messages and attachments older than that go (the attachment's file
+//! first, then its row). Uploads never bound to a message go after a week
+//! either way. Roster rows silent longer than `HUB_ORG_RETENTION_DAYS` go —
 //! except an address still holding queued mail, so a delivery is never
 //! stranded. Work happens in bounded batches, each its own short
 //! transaction.
@@ -32,54 +34,61 @@ fn cutoff(days: i64) -> Result<chrono::DateTime<Utc>> {
     Utc::now().checked_sub_signed(span).ok_or_else(|| anyhow!("retention of {days} days is out of range"))
 }
 
-#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "warn"))]
-pub async fn run_once(hub: &Hub) -> Result<Swept> {
-    let cut = cutoff(hub.cfg.retention_days)?;
-    let dir = hub.cfg.blob_dir();
-    let c = hub.db.get().await?;
-    let mut attachments = 0u64;
+/// Uploads that no send ever bound are kept this long at most.
+pub const UNBOUND_UPLOAD_DAYS: i64 = 7;
+
+/// Attachments matching `cond` (with `$1` the cutoff): files first, then rows.
+async fn sweep_files(c: &impl deadpool_postgres::GenericClient, dir: &std::path::Path, cond: &str, cut: chrono::DateTime<Utc>) -> Result<u64> {
+    let mut swept = 0u64;
     loop {
-        let rows = db::query(
-            &c,
-            &format!("SELECT id FROM attachments WHERE created_at < $1 ORDER BY created_at LIMIT {BATCH}"),
-            &[&cut],
-        )
-        .await?;
+        let rows = db::query(c, &format!("SELECT id FROM attachments WHERE {cond} ORDER BY created_at LIMIT {BATCH}"), &[&cut]).await?;
         if rows.is_empty() {
             break;
         }
         let ids: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
         for id in &ids {
-            if let Some(p) = blob_path(&dir, id) {
+            if let Some(p) = blob_path(dir, id) {
                 let _ = tokio::fs::remove_file(p).await;
             }
         }
-        attachments += db::execute(&c, "DELETE FROM attachments WHERE id = ANY($1)", &[&ids]).await?;
+        swept += db::execute(c, "DELETE FROM attachments WHERE id = ANY($1)", &[&ids]).await?;
         if (ids.len() as i64) < BATCH {
             break;
         }
     }
+    Ok(swept)
+}
+
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "warn"))]
+pub async fn run_once(hub: &Hub) -> Result<Swept> {
+    let dir = hub.cfg.blob_dir();
+    let c = hub.db.get().await?;
+    let mut attachments = sweep_files(&c, &dir, "message_id IS NULL AND created_at < $1", cutoff(UNBOUND_UPLOAD_DAYS)?).await?;
     let mut messages = 0u64;
-    loop {
-        // their change-log entries go with them (a device that has a swept
-        // message keeps its copy; one that has not never hears of it)
-        let n: i64 = db::query_one(
-            &c,
-            &format!(
-                "WITH gone AS (
-                    DELETE FROM messages WHERE n IN
-                      (SELECT n FROM messages WHERE received_at < $1 ORDER BY received_at, n LIMIT {BATCH})
-                    RETURNING n),
-                 logs AS (DELETE FROM mailbox_log WHERE message_n IN (SELECT n FROM gone))
-                 SELECT count(*) FROM gone"
-            ),
-            &[&cut],
-        )
-        .await?
-        .get(0);
-        messages += n as u64;
-        if n < BATCH {
-            break;
+    if let Some(days) = hub.cfg.retention_days {
+        let cut = cutoff(days)?;
+        attachments += sweep_files(&c, &dir, "created_at < $1", cut).await?;
+        loop {
+            // their change-log entries go with them (a device that has a
+            // swept message keeps its copy; one that has not never hears of it)
+            let n: i64 = db::query_one(
+                &c,
+                &format!(
+                    "WITH gone AS (
+                        DELETE FROM messages WHERE n IN
+                          (SELECT n FROM messages WHERE received_at < $1 ORDER BY received_at, n LIMIT {BATCH})
+                        RETURNING n),
+                     logs AS (DELETE FROM mailbox_log WHERE message_n IN (SELECT n FROM gone) AND deleted_id IS NULL)
+                     SELECT count(*) FROM gone"
+                ),
+                &[&cut],
+            )
+            .await?
+            .get(0);
+            messages += n as u64;
+            if n < BATCH {
+                break;
+            }
         }
     }
     let org_cut = cutoff(hub.cfg.org_retention_days)?;

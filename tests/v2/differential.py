@@ -48,7 +48,7 @@ EXPECTED = {
     "log-startup": "v1 printed its startup line once per listener (the public listener ran the app's lifespan again); v2 prints it once",
     "u7-bad-cursor": "a before_at that is not a timestamp: v1 compared it as a string, v2 refuses it (422)",
     "log-500": "v2 also writes a request line for a 500 (v1's middleware never saw the crash)",
-    "h2-index": "the operator page also tags the person kind (an addition: docs/v2-additions.md)",
+    "h2-index": "the operator page also tags the person kind and can say mail is kept until deleted (docs/v2-additions.md)",
 }
 
 

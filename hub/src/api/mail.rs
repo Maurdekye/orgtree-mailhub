@@ -378,11 +378,14 @@ pub async fn ack(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
     let c = hub.db.get().await?;
+    // rows locked in message order, as every writer of message rows does
     let rows = db::query(
         &c,
-        "UPDATE messages SET state = 'fetched', fetched_at = $1, receipts_pushed = false
-          WHERE id = ANY($2) AND state = 'queued' AND to_slug = ANY($3)
-          RETURNING from_slug",
+        "WITH due AS (
+            SELECT n FROM messages WHERE id = ANY($2) AND state = 'queued' AND to_slug = ANY($3) ORDER BY n FOR UPDATE)
+         UPDATE messages m SET state = 'fetched', fetched_at = $1, receipts_pushed = false
+           FROM due WHERE m.n = due.n AND m.state = 'queued'
+         RETURNING m.from_slug",
         &[&clock::now(), &ids, &slugs],
     )
     .await?;
@@ -527,28 +530,36 @@ pub async fn receipts(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         let sql = match str_field(r, "state").as_str() {
             "delivered" => {
                 "UPDATE messages SET delivered_at = $1, receipts_pushed = false
-                  WHERE id = $2 AND delivered_at IS NULL AND to_slug = ANY($3) RETURNING from_slug, to_slug, n"
+                  WHERE id = $2 AND delivered_at IS NULL AND to_slug = ANY($3)
+                  RETURNING from_slug, to_slug, n, sender_deleted_at IS NULL, recipient_deleted_at IS NULL"
             }
             "read" => {
                 "UPDATE messages SET read_at = $1, receipts_pushed = false
-                  WHERE id = $2 AND read_at IS NULL AND to_slug = ANY($3) RETURNING from_slug, to_slug, n"
+                  WHERE id = $2 AND read_at IS NULL AND to_slug = ANY($3)
+                  RETURNING from_slug, to_slug, n, sender_deleted_at IS NULL, recipient_deleted_at IS NULL"
             }
             _ => continue,
         };
         let at = pg_text(get_or(r, "at").map(py_str).unwrap_or_else(clock::now_iso));
         todo.push((mid, sql, at));
     }
-    // one lock order for every writer, so two devices of one reader sending
-    // the same receipts in different orders cannot deadlock (stable: a
-    // message's own receipts keep their order, and the first still wins)
-    todo.sort_by(|a, b| a.0.cmp(&b.0));
+    // every row these receipts can touch is locked first, in message order
+    // (the order every writer of message rows takes them in), so two devices
+    // of one reader, or a receipt and a delete, cannot deadlock
+    let ids: Vec<&str> = todo.iter().map(|t| t.0.as_str()).collect();
+    db::query(&tx, "SELECT n FROM messages WHERE id = ANY($1) AND to_slug = ANY($2) ORDER BY n FOR UPDATE", &[&ids, &slugs]).await?;
     for (mid, sql, at) in &todo {
         let rows = db::query(&tx, sql, &[at, mid, &slugs]).await?;
         recorded += rows.len();
         for row in &rows {
             let (from, to, n): (String, String, i64) = (row.get(0), row.get(1), row.get(2));
-            changed.push((from.clone(), n));
-            changed.push((to.clone(), n));
+            // a copy its owner deleted stays deleted (G4)
+            if row.get::<_, bool>(3) {
+                changed.push((from.clone(), n));
+            }
+            if row.get::<_, bool>(4) {
+                changed.push((to.clone(), n));
+            }
             senders.push(from);
             recipients.push(to);
         }

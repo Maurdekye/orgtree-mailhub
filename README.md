@@ -29,8 +29,9 @@ docker compose up -d --build
 - `HUB_NAME` is the hub's display name — clients discover it on connect and
   show it beside the address; it also titles the hub's own web UI. Defaults
   to the container hostname.
-- `HUB_RETENTION_DAYS` (default 30): undelivered mail and attachment blobs
-  older than this are swept hourly.
+- `HUB_RETENTION_DAYS` (default: unset): mail and files are kept until their
+  owners delete them. Set a number of days to sweep older mail and files
+  hourly, as v1 did (this overrides the kept-until-deleted history).
 - `HUB_MAX_FILE_BYTES` (default 1073741824, 1 GiB): maximum streamed attachment
   upload. `/healthz.max_attachment_bytes` advertises the current limit. Embedded
   hosts can apply live changes; see [attachment limits](docs/attachment-limits.md).
@@ -96,6 +97,8 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/profile` | `{name?, about?, slug?}` — change your display name (≤ 48) and about line (≤ 200) |
 | `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online |
 | `GET /api/devices` | the devices an address syncs from |
+| `GET /api/conversations` · `GET /api/history?with=` | who you have mail with (last message, unread) · one conversation, newest first, paged |
+| `DELETE /api/messages/{id}` · `DELETE /api/conversations/{address}` | delete your copy (the other side keeps theirs) |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).

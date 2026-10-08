@@ -7,6 +7,7 @@
 //! differs by its trailing slash.
 
 pub mod files;
+pub mod history;
 pub mod mail;
 pub mod ops;
 pub mod sync;
@@ -202,6 +203,10 @@ enum Route {
     Profile,
     Sync,
     Devices,
+    Conversations,
+    History,
+    DeleteMessage,
+    DeleteConversation,
     Health,
     Index,
     UiData,
@@ -224,16 +229,42 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/profile" => (Profile, Method::POST),
         "/api/sync" => (Sync, Method::POST),
         "/api/devices" => (Devices, Method::GET),
+        "/api/conversations" => (Conversations, Method::GET),
+        "/api/history" => (History, Method::GET),
         "/healthz" => (Health, Method::GET),
         "/" => (Index, Method::GET),
         "/ui/data" => (UiData, Method::GET),
         "/ui/messages" => (UiMessages, Method::GET),
-        p => match p.strip_prefix("/api/attachments/") {
-            Some(aid) if !aid.is_empty() && !aid.contains('/') => (Download, Method::GET),
-            _ => return None,
-        },
+        p => {
+            if let Some(aid) = p.strip_prefix("/api/attachments/") {
+                if aid.is_empty() || aid.contains('/') {
+                    return None;
+                }
+                (Download, Method::GET)
+            } else if let Some(id) = p.strip_prefix("/api/messages/") {
+                // a message id is the client's: everything after the prefix
+                if id.is_empty() {
+                    return None;
+                }
+                (DeleteMessage, Method::DELETE)
+            } else if let Some(with) = p.strip_prefix("/api/conversations/") {
+                if with.is_empty() || with.contains('/') {
+                    return None;
+                }
+                (DeleteConversation, Method::DELETE)
+            } else {
+                return None;
+            }
+        }
     };
-    Some(if *method == m { Ok(r) } else { Err(if m == Method::GET { "GET" } else { "POST" }) })
+    let allow = if m == Method::GET {
+        "GET"
+    } else if m == Method::DELETE {
+        "DELETE"
+    } else {
+        "POST"
+    };
+    Some(if *method == m { Ok(r) } else { Err(allow) })
 }
 
 /// The full app (port 7370): API, health and the operator UI.
@@ -332,6 +363,16 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Profile => mail::profile(hub, req).await,
         Route::Sync => sync::sync(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
+        Route::Conversations => history::conversations(hub, req).await,
+        Route::History => history::history(hub, req).await,
+        Route::DeleteMessage => {
+            let id = req.path.strip_prefix("/api/messages/").unwrap_or_default().to_string();
+            history::delete_message(hub, req, &id).await
+        }
+        Route::DeleteConversation => {
+            let with = req.path.strip_prefix("/api/conversations/").unwrap_or_default().to_string();
+            history::delete_conversation(hub, req, &with).await
+        }
         Route::Upload => files::upload(hub, req).await,
         Route::Download => files::download(hub, req).await,
         Route::Health => ops::healthz(hub).await,

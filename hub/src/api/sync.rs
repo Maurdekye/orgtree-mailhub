@@ -66,6 +66,33 @@ pub async fn log_changes(tx: &impl GenericClient, mut entries: Vec<(String, i64)
     Ok(())
 }
 
+/// This address deleted its copies of these messages (`(n, id)`): their
+/// entries in its change log move to the end as tombstones that keep the
+/// id, so its devices learn of it even after the rows are gone. Call it
+/// LAST in the transaction, as `log_changes`.
+#[tracing::instrument(level = "debug", skip(tx, gone), fields(count = gone.len()), err(level = "debug", Debug))]
+pub async fn log_deletions(tx: &impl GenericClient, slug: &str, gone: &[(i64, String)]) -> Result<(), tokio_postgres::Error> {
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let ns: Vec<i64> = gone.iter().map(|g| g.0).collect();
+    let ids: Vec<&str> = gone.iter().map(|g| g.1.as_str()).collect();
+    db::execute(
+        tx,
+        "WITH head AS (
+            INSERT INTO mailbox_heads (slug, seq) VALUES ($1, $4)
+            ON CONFLICT (slug) DO UPDATE SET seq = mailbox_heads.seq + EXCLUDED.seq
+            RETURNING seq)
+         INSERT INTO mailbox_log (slug, seq, message_n, deleted_id)
+         SELECT $1, (SELECT seq FROM head) - $4 + u.ord, u.n, u.id
+           FROM unnest($2::bigint[], $3::text[]) WITH ORDINALITY AS u(n, id, ord)
+         ON CONFLICT (slug, message_n) DO UPDATE SET seq = EXCLUDED.seq, deleted_id = EXCLUDED.deleted_id",
+        &[&slug, &ns, &ids, &(gone.len() as i64)],
+    )
+    .await?;
+    Ok(())
+}
+
 /// The roster is about to change: order this transaction's change after
 /// every earlier one (see `db::ROSTER_LOCK`).
 pub async fn roster_lock(tx: &impl GenericClient) -> Result<(), tokio_postgres::Error> {
@@ -250,7 +277,8 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     let rows = db::query(
         &c,
         &format!(
-            "SELECT l.seq AS log_seq, {ENVELOPE_COLS} FROM mailbox_log l LEFT JOIN messages m ON m.n = l.message_n
+            "SELECT l.seq AS log_seq, l.deleted_id, m.sender_deleted_at, m.recipient_deleted_at, {ENVELOPE_COLS}
+               FROM mailbox_log l LEFT JOIN messages m ON m.n = l.message_n
               WHERE l.slug = $1 AND l.seq > $2 ORDER BY l.seq LIMIT {}",
             SYNC_BATCH + 1
         ),
@@ -262,8 +290,19 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     let mut changes = Vec::new();
     for r in rows.iter().take(SYNC_BATCH) {
         to.mail = r.get("log_seq");
+        // G4: this address deleted its copy (the row may be gone by now)
+        if let Some(id) = r.get::<_, Option<String>>("deleted_id") {
+            changes.push(json!({ "type": "deleted", "id": id }));
+            continue;
+        }
         // a message the retention sweep took between the two reads
         if r.get::<_, Option<i64>>("n").is_none() {
+            continue;
+        }
+        let mine_gone = (r.get::<_, String>("from_slug") == slug && r.get::<_, Option<chrono::DateTime<chrono::Utc>>>("sender_deleted_at").is_some())
+            || (r.get::<_, String>("to_slug") == slug && r.get::<_, Option<chrono::DateTime<chrono::Utc>>>("recipient_deleted_at").is_some());
+        if mine_gone {
+            changes.push(json!({ "type": "deleted", "id": r.get::<_, String>("id") }));
             continue;
         }
         let mut m = envelope(r);

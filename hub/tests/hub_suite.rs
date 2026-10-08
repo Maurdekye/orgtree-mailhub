@@ -840,7 +840,7 @@ async fn sec_retention(t: &mut Tally, c: &Ctx) {
         let old_id = c.send(&s, &me.0, "ancient", json!({})).await.json()["id"].as_str().unwrap().to_string();
         let aid = c.upload(&s, b"old blob", "old.bin").await;
         let fresh_id = c.send(&s, &me.0, "recent", json!({})).await.json()["id"].as_str().unwrap().to_string();
-        let stamp = old_stamp(c.hub.cfg.retention_days + 1);
+        let stamp = old_stamp(c.hub.cfg.retention_days.expect("the suite runs with v1's 30 days") + 1);
         c.db.execute("UPDATE messages SET received_at = $1 WHERE id = $2", &[&stamp, &old_id]).await.unwrap();
         c.db.execute("UPDATE attachments SET created_at = $1 WHERE id = $2", &[&stamp, &aid]).await.unwrap();
         let blob = c.blob_dir().join(&aid);
@@ -857,7 +857,7 @@ async fn sec_retention(t: &mut Tally, c: &Ctx) {
     t.check("the cutoff is the retention window, not a day either side", async {
         let (me, s) = (c.org().await, c.org().await);
         let mid = c.send(&s, &me.0, "just inside", json!({})).await.json()["id"].as_str().unwrap().to_string();
-        c.db.execute("UPDATE messages SET received_at = $1 WHERE id = $2", &[&old_stamp(c.hub.cfg.retention_days - 1), &mid]).await.unwrap();
+        c.db.execute("UPDATE messages SET received_at = $1 WHERE id = $2", &[&old_stamp(c.hub.cfg.retention_days.expect("the suite runs with v1's 30 days") - 1), &mid]).await.unwrap();
         mailhub::sweep::run_once(&c.hub).await.map_err(|e| e.to_string())?;
         ensure!(!c.rows("SELECT 1 FROM messages WHERE id = $1", &[&mid]).await.is_empty(), "a message one day INSIDE the window was swept");
         Ok(())

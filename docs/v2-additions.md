@@ -93,8 +93,8 @@ X-Org-Auth: <slug>:<secret>
   `delivered` or `read` receipt), so a device that syncs after a change sees
   the message once, current. The envelope is poll's (v1 keys, `reply_to`
   when set) plus `delivered_at` and `read_at` (the receipts' times, or null).
-  Deletions (G4) will arrive as `{"type": "deleted", ...}` changes; clients
-  should ignore change types they do not know.
+  A copy the address deleted arrives as `{"type": "deleted", "id": ...}`
+  (G4). Clients should ignore change types they do not know.
 - **Receipts**: `POST /api/receipts` is unchanged and counts for the whole
   address: read on one device is read on all (the first `read` wins, as in
   v1), and the sender's devices see it. v1 senders still get receipts by poll.
@@ -144,8 +144,65 @@ Oldest first. `online`: synced within the last 90 seconds. Unregistering an
 address removes its devices (its mail and change log stay, as v1 kept its
 mail: back with the same key, a device continues from its cursor).
 
+## History kept until deleted (G4)
+
+Mail and files stay on the hub until their owners delete them. An operator
+who sets `HUB_RETENTION_DAYS` still has older mail and files swept, as v1
+did, and that overrides the kept history; `retention_days` is `null` when
+nothing ages out. Uploads that no send ever bound go after 7 days.
+
+Each message has two copies, the sender's and the recipient's (one, for a
+message to oneself). History, conversations and sync show the caller's
+copies; deleting removes the caller's copy only. A message's row, and its
+files, go when neither side has a copy any more, so a file stays
+downloadable for the recipient after the sender deletes their copy.
+
+```
+GET /api/conversations[?slug=]
+→ 200 {"slug": "...", "conversations": [{"with": "<address>", "unread": 2, "last": <message>}, ...]}
+```
+
+One row per address the caller has mail with, newest first (at most 1000);
+`unread` counts mail from that address the caller has not marked `read`.
+
+```
+GET /api/history?with=<address>[&before=<cursor>][&limit=50][&slug=]
+→ 200 {"slug": "...", "with": "...", "messages": [<message>, ...], "before": "<cursor>" | null}
+```
+
+One conversation, newest first: `limit` messages a page (default 50, at
+most 200); `before` from an answer fetches the next older page, and is
+`null` once the conversation's start is reached. Each message is poll's
+envelope (with `reply_to` when set and its `attachments`) plus its receipt
+ladder: `received_at` (the hub took it), `fetched_at` (a client of the
+recipient took custody, hub time), `delivered_at` and `read_at` (the
+recipient's receipts, as it sent them), each `null` until it happens.
+Refusals (422): `with is required: the address of the conversation`,
+`limit must be a whole number`, `before is not a history cursor from this
+hub`.
+
+```
+DELETE /api/messages/{id}[?slug=]             → 200 {"deleted": 1}   (0: already deleted)
+DELETE /api/conversations/{address}[?slug=]   → 200 {"deleted": N}
+```
+
+- Only the caller's copy goes: the other side keeps theirs, in history and
+  in sync. A message the caller neither sent nor received is 404 `no such
+  message` (as is an unknown id).
+- The caller's devices learn of it through sync as `{"type": "deleted",
+  "id": "<message id>"}`, even after the row itself is gone; a receipt
+  arriving later does not bring a deleted copy back.
+- Deleting a conversation deletes it as it stands when the request arrives,
+  in steps of 1000 messages (each its own transaction); mail arriving
+  meanwhile stays.
+- Mail the recipient deletes while it is still in v1's queue counts as
+  handed over: v1 polls stop returning it and a v1 sender gets `fetched`.
+- After both copies are gone, the same message id may be sent again; a
+  device then sees the deletion and then the new message, in that order.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
-`devices` (more as later parts land). A v1 hub reports neither.
+`devices`, `history`, `delete` (more as later parts land). A v1 hub reports
+neither.

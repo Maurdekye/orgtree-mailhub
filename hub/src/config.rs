@@ -21,7 +21,9 @@ pub struct Config {
     pub public_bind: String,
     pub public_port: u16,
     pub data_dir: PathBuf,
-    pub retention_days: i64,
+    /// days mail and files are kept (`HUB_RETENTION_DAYS`); None, the v2
+    /// default, keeps them until their owners delete them (G4)
+    pub retention_days: Option<i64>,
     pub org_retention_days: i64,
     /// the startup default for one attachment upload (`HUB_MAX_FILE_BYTES`)
     pub max_file_bytes: u64,
@@ -124,7 +126,10 @@ impl Config {
             public_bind: stripped_or("HUB_PUBLIC_BIND", "0.0.0.0"),
             public_port,
             data_dir,
-            retention_days: clamp_days(int("HUB_RETENTION_DAYS", 30)?),
+            retention_days: match get("HUB_RETENTION_DAYS").map(py_strip) {
+                None | Some("") => None,
+                Some(_) => Some(clamp_days(int("HUB_RETENTION_DAYS", 0)?)),
+            },
             org_retention_days: clamp_days(int("HUB_ORG_RETENTION_DAYS", 45)?),
             max_file_bytes: u64::try_from(max_file_bytes).unwrap_or(u64::MAX),
             runtime_config_file: get("HUB_RUNTIME_CONFIG_FILE").filter(|v| !v.is_empty()).map(PathBuf::from),
@@ -194,14 +199,14 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_v1() {
+    fn defaults() {
         let c = Config::from_vars(&vars(&[])).unwrap();
         assert_eq!(c.port, 7370);
         assert_eq!(c.bind, "0.0.0.0");
         assert!(!c.public);
         assert_eq!(c.public_port, 7371);
         assert_eq!(c.data_dir, PathBuf::from("/data"));
-        assert_eq!(c.retention_days, 30);
+        assert_eq!(c.retention_days, None, "v2 keeps mail until it is deleted (G4)");
         assert_eq!(c.org_retention_days, 45);
         assert_eq!(c.max_file_bytes, 1024 * 1024 * 1024);
         assert!(c.runtime_config_file.is_none());
@@ -219,6 +224,8 @@ mod tests {
         assert!(Config::from_vars(&vars(&[("HUB_MAX_FILE_BYTES", "0")])).is_err());
         assert!(Config::from_vars(&vars(&[("HUB_MAX_FILE_BYTES", "-1")])).is_err());
         assert!(Config::from_vars(&vars(&[("HUB_RETENTION_DAYS", "abc")])).is_err());
+        assert_eq!(Config::from_vars(&vars(&[("HUB_RETENTION_DAYS", " 30 ")])).unwrap().retention_days, Some(30));
+        assert_eq!(Config::from_vars(&vars(&[("HUB_RETENTION_DAYS", "  ")])).unwrap().retention_days, None);
         let mut no_db = vars(&[]);
         no_db.remove("HUB_DATABASE_URL");
         assert!(Config::from_vars(&no_db).is_err());

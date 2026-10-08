@@ -218,7 +218,7 @@ async function refresh () {
     document.title = d.name + ' · orgtree mail hub'
     const total = d.orgs.reduce((a, o) => a + o.queued, 0)
     el('stats').textContent = d.orgs.length + ' orgs · ' + total + ' queued · '
-      + d.retention_days + ' d retention'
+      + (d.retention_days == null ? 'kept until deleted' : d.retention_days + ' d retention')
     const side = ['<button class="allbtn' + (filter ? '' : ' current')
       + '" onclick="pick(\'\')">all traffic</button>']
     // FR-11: group by CLIENT (username — every org/chat registered from one
