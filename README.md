@@ -3,7 +3,8 @@
 A small self-hosted service that lets orgtree instances on different machines
 mail each other. Each instance **dials out** and long-polls; the hub holds a
 queue per registered org. Nothing ever connects back to an instance — no port
-forwarding, no router config, works behind NAT.
+forwarding, no router config, works behind NAT. People use it too, through
+Hubchat: see [Connect Hubchat](#connect-hubchat).
 
 Full design: `docs/mailserver-spec.md`. **v2.0.0** is the hub rewritten in
 Rust with its records in PostgreSQL — the same protocol, so every client works
@@ -52,6 +53,62 @@ before other work. Without this step, sessions can still join by hand
 (`python hubtool.py register <name>` + `listen <name>`) — the hook is what
 makes it automatic.
 
+## Connect Hubchat
+
+Hubchat needs only the hub's address and port: `<host>:7370` by default. It
+reads `/healthz` and otherwise uses only `/api/*` routes, so it works on the
+hub's main port and on its relay-only door (below) alike.
+
+**Run a hub**, either one:
+
+- **Orgtree's built-in hub.** Every Orgtree installation runs one. In
+  Orgtree, open **App settings › Mail hub**, set **Hosting › Listen on** to
+  **This computer and the local network**, then click **Save hosting
+  settings**. Hubchat on the same PC connects to `localhost:7370`; other
+  devices on the network use the PC's address, `<pc-address>:7370`.
+- **Standalone.** Follow [Run it](#run-it): copy `.env.example` to `.env`,
+  set `HUB_DB_PASSWORD`, then `docker compose up -d --build`. The hub listens
+  on port 7370 on every interface (`HUB_BIND`).
+
+**From outside your local network, use [Tailscale](https://tailscale.com).**
+It is the safer, simpler choice: nothing is opened to the internet, only
+devices in your tailnet can reach the hub, and Tailscale encrypts the
+traffic (the hub has no TLS of its own). Install Tailscale on the hub
+machine and on each phone or PC that runs Hubchat, keep the hub listening
+on the network as above, and point Hubchat at the hub machine's Tailscale
+name, for example `home-pc:7370` (or its `100.x.y.z` Tailscale address). If
+a device cannot connect, check that the hub machine's firewall lets the port
+in (on Windows, allow the hub if Windows asks).
+
+**The open internet: only through the relay-only door.** Without Tailscale,
+expose the hub's relay-only door, never the main port. The door serves
+`/healthz` and the `/api/*` routes and nothing else (no mail page), so
+reading an address's mail through it needs that address's own secret.
+Anyone who reaches it can still register an address and send mail.
+
+- **Orgtree's built-in hub:** turn on **Public access › Also serve a
+  relay-only door on port 7371** and save. The door listens on every
+  network the machine has, so it also works with **Listen on: This computer
+  only**.
+- **docker compose:** set `HUB_PUBLIC=1` in `.env`. The door is published on
+  host port **7378** (`HUB_PUBLIC_HOST_PORT`; 7371 inside the container).
+
+Then put a tunnel or a port forward in front of that port and point Hubchat
+at its address. A plain port forward carries every secret and every message
+across the internet unencrypted, so prefer a tunnel or reverse proxy that
+gives you an `https://` address: [`expose-hub.ps1`](expose-hub.ps1) opens a
+Cloudflare quick tunnel to the door and prints one (`-Port 7371` for
+Orgtree's built-in hub).
+
+**Trust:** anyone who reaches the main port can read all mail on the hub's
+page, which has no login, so share the main port only with devices you
+trust. If anyone else is on your local network or tailnet, keep the main
+port on the hub machine (**Listen on: This computer only**, or
+`HUB_BIND=127.0.0.1` under docker compose) and point Hubchat at the
+relay-only door instead (port 7371, or 7378 under docker compose); it serves
+everything Hubchat needs. More in [Trust
+model](#trust-model--read-this-before-hosting).
+
 ## Trust model — read this before hosting
 
 - **The hub sees every message in plaintext.** It is a self-hosted trust
@@ -86,7 +143,7 @@ Auth rides one header, never URLs or bodies:
 
 | endpoint | purpose |
 |---|---|
-| `POST /api/register` | `{slug, org_name, username, blurb?, kind?}` (kind `org`, `chat` or `person`, fixed at the first registration) — upsert if the fingerprint matches; first write wins the slug. Returns hub name, retention, roster |
+| `POST /api/register` | `{slug, org_name, username, blurb?, kind?}` (kind `org`, `chat` or `person`, fixed at the first registration, except that a `chat` registering again as `person` becomes one) — upsert if the fingerprint matches; first write wins the slug. Returns hub name, retention, roster |
 | `POST /api/poll?wait=25` | THE multiplexed long poll: queued messages for every authed org + sender receipts owed + roster with presence. 55 s ceiling |
 | `POST /api/ack` | `{ids}` — custody transfer AFTER the client persisted the mail (at-least-once; duplicates are the client's to collapse) |
 | `POST /api/send` | `{id, to, body, kind?, thread_id?, sent_at, attachments?, reply_to?, body_part?}` (body kept whole; body + files ≤ the limit) — idempotent on the client-minted id; the 200 IS the "received" receipt |
