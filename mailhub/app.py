@@ -65,7 +65,12 @@ RETENTION_DAYS = int(os.environ.get("HUB_RETENTION_DAYS", "30"))
 # first-write-wins is satisfied by its own hash) and the org side re-registers
 # on any 401 (net.py self-heal, same wave).
 ORG_RETENTION_DAYS = int(os.environ.get("HUB_ORG_RETENTION_DAYS", "45"))
-MAX_FILE_BYTES = 25 * 1024 * 1024      # mirror the orgtree caps
+MAX_FILE_BYTES = int(os.environ.get("HUB_MAX_FILE_BYTES", str(1024 ** 3)))
+if MAX_FILE_BYTES <= 0:
+    raise ValueError("HUB_MAX_FILE_BYTES must be a positive integer")
+# An embedding host writes this small file atomically. Read once per upload:
+# changing the limit never changes the contract of an upload already in flight.
+RUNTIME_CONFIG_FILE = os.environ.get("HUB_RUNTIME_CONFIG_FILE", "")
 MAX_FILES_PER_MESSAGE = 10
 BODY_MAX = 20000                       # mirror the org-inbox truncation
 PRESENCE_WINDOW = 90.0                 # s since last authed call = online
@@ -425,6 +430,21 @@ async def receipts(request: Request) -> dict[str, Any]:
 
 # --------------------------------------------------------------- attachments
 
+def attachment_limit() -> int:
+    if not RUNTIME_CONFIG_FILE:
+        return MAX_FILE_BYTES
+    try:
+        with open(RUNTIME_CONFIG_FILE, encoding="utf-8") as config:
+            limit = json.load(config)["max_attachment_bytes"]
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("invalid limit")
+        return limit
+    except FileNotFoundError:
+        return MAX_FILE_BYTES
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(503, "attachment limit configuration is invalid") from exc
+
+
 @app.post("/api/attachments")
 async def attachment_upload(request: Request, name: str = "file") -> dict[str, Any]:
     con = db.connect()
@@ -433,23 +453,53 @@ async def attachment_upload(request: Request, name: str = "file") -> dict[str, A
         if not slugs:
             raise HTTPException(401, "no valid org credentials")
         owner = slugs[0]
-        data = await request.body()
-        if len(data) > MAX_FILE_BYTES:
-            raise HTTPException(413, f"attachment exceeds "
-                                     f"{MAX_FILE_BYTES // (1024 * 1024)} MB")
-        aid = uuid.uuid4().hex
-        with open(db.blob_path(aid), "wb") as f:
-            f.write(data)
-        con.execute(
-            "INSERT INTO attachments (id, owner_slug, name, bytes, created_at)"
-            " VALUES (?,?,?,?,?)",
-            (aid, owner, os.path.basename(name)[:255] or "file", len(data),
-             _now_iso()))
-        con.commit()
-        _mark_seen(con, [owner])
-        return {"id": aid, "bytes": len(data)}
     finally:
         con.close()
+    limit = attachment_limit()
+    too_large = f"attachment exceeds hub limit of {limit} bytes"
+    length = request.headers.get("content-length")
+    if length is not None:
+        try:
+            declared = int(length)
+            if declared < 0:
+                raise ValueError("negative length")
+        except ValueError as exc:
+            raise HTTPException(400, "invalid Content-Length") from exc
+        if declared > limit:
+            raise HTTPException(413, too_large)
+    aid = uuid.uuid4().hex
+    path = db.blob_path(aid)
+    partial = path + ".part"
+    size = 0
+    committed = False
+    try:
+        with open(partial, "xb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, too_large)
+                # Each ASGI chunk is released before the next one is requested.
+                await asyncio.to_thread(f.write, chunk)
+        os.replace(partial, path)
+        con = db.connect()
+        try:
+            con.execute(
+                "INSERT INTO attachments (id, owner_slug, name, bytes, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (aid, owner, os.path.basename(name)[:255] or "file", size,
+                 _now_iso()))
+            con.commit()
+            committed = True
+            _mark_seen(con, [owner])
+        finally:
+            con.close()
+        return {"id": aid, "bytes": size}
+    finally:
+        for leftover in [partial] + ([] if committed else [path]):
+            try:
+                os.remove(leftover)
+            except FileNotFoundError:
+                pass
 
 
 @app.get("/api/attachments/{aid}")
@@ -504,7 +554,8 @@ async def healthz() -> dict[str, Any]:
             "SELECT COUNT(*) c FROM messages WHERE state='queued'"
         ).fetchone()["c"]
         return {"ok": True, "name": HUB_NAME, "orgs": orgs, "queued": queued,
-                "retention_days": RETENTION_DAYS}
+                "retention_days": RETENTION_DAYS,
+                "max_attachment_bytes": attachment_limit()}
     finally:
         con.close()
 

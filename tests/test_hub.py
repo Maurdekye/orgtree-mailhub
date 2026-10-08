@@ -712,15 +712,80 @@ def sec_attachments() -> None:
           _unknown_and_missing_blob)
 
     def _oversize():
+        from unittest.mock import patch
         who = new_org()
-        big = b"\0" * (hubapp.MAX_FILE_BYTES + 1)
-        r = req("POST", "/api/attachments", auth=pair(*who), content=big,
-                params={"name": "big.bin"})
+        with patch.object(hubapp, "MAX_FILE_BYTES", 1024):
+            r = req("POST", "/api/attachments", auth=pair(*who), content=b"x" * 1025,
+                    params={"name": "oversize-proof.bin"})
         assert r.status_code == 413, r.status_code
-        assert not rows("SELECT 1 FROM attachments WHERE bytes>?",
-                        (hubapp.MAX_FILE_BYTES,)), "an oversize row was written"
-    check(f"an upload over {hubapp.MAX_FILE_BYTES // 1048576} MB is refused",
-          _oversize)
+        assert not rows("SELECT 1 FROM attachments WHERE name='oversize-proof.bin'")
+    check("an upload over the configured limit is refused", _oversize)
+
+    def _configured_streaming():
+        from unittest.mock import patch
+        import subprocess
+        import tracemalloc
+        assert hubapp.MAX_FILE_BYTES == 1024 ** 3
+        env = dict(os.environ, HUB_MAX_FILE_BYTES="12345")
+        observed = subprocess.check_output([sys.executable, "-c",
+            "from mailhub.app import MAX_FILE_BYTES; print(MAX_FILE_BYTES)"],
+            cwd=_REPO, env=env, text=True)
+        assert observed.strip() == "12345", observed
+        who = new_org()
+        config = os.path.join(_TMP, "upload-limit.json")
+        def set_limit(n):
+            with open(config + ".tmp", "w", encoding="utf-8") as f:
+                json.dump({"max_attachment_bytes": n}, f)
+            os.replace(config + ".tmp", config)
+        async def exercise():
+            async with httpx.AsyncClient(transport=_transport, base_url="http://hub") as c:
+                headers = {"x-org-auth": pair(*who)}
+                set_limit(32 * 1024 ** 2)
+                assert (await c.get('/healthz')).json()['max_attachment_bytes'] == 32 * 1024 ** 2
+                async def chunks():
+                    for _ in range(512):
+                        yield b"x" * 65536
+                tracemalloc.start()
+                try:
+                    r = await c.post('/api/attachments?name=streamed.bin', headers=headers, content=chunks())
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                assert r.status_code == 200, r.text
+                assert r.json()['bytes'] == 32 * 1024 ** 2
+                assert os.path.getsize(db.blob_path(r.json()['id'])) == 32 * 1024 ** 2
+                assert peak < 8 * 1024 ** 2, peak
+                before = set(os.listdir(db.BLOB_DIR))
+                set_limit(8)
+                assert (await c.get('/healthz')).json()['max_attachment_bytes'] == 8
+                consumed = []
+                async def oversize():
+                    for i in range(20):
+                        consumed.append(i)
+                        yield b"1234"
+                r = await c.post('/api/attachments', headers=headers, content=oversize())
+                assert r.status_code == 413 and len(consumed) == 3, (r.status_code, consumed)
+                assert set(os.listdir(db.BLOB_DIR)) == before, 'partial blob survived'
+                async def interrupted():
+                    yield b"1234"
+                    raise RuntimeError('upload disconnected')
+                try:
+                    await c.post('/api/attachments', headers=headers, content=interrupted())
+                except Exception:
+                    pass
+                assert set(os.listdir(db.BLOB_DIR)) == before, 'interrupted blob survived'
+                set_limit(16)
+                async def changing():
+                    yield b"12345678"
+                    set_limit(4)
+                    yield b"12345678"
+                r = await c.post('/api/attachments', headers=headers, content=changing())
+                assert r.status_code == 200 and r.json()['bytes'] == 16, r.text
+                r = await c.post('/api/attachments', headers=headers, content=b'12345')
+                assert r.status_code == 413, r.text
+        with patch.object(hubapp, "RUNTIME_CONFIG_FILE", config):
+            asyncio.run(exercise())
+    check("env default, live advertised override, bounded streaming, cleanup and per-upload snapshot", _configured_streaming)
 
     def _upload_needs_credentials():
         r = req("POST", "/api/attachments", content=b"x", params={"name": "f"})
