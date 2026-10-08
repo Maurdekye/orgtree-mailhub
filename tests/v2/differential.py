@@ -122,7 +122,10 @@ class Side:
             r.content = body
         return r
 
-    def norm(self, v: Any, keep_nul: bool = False) -> Any:
+    def norm(self, v: Any, keep_nul: bool = False, exact: bool = False, key: str = "") -> Any:
+        """Symbols for per-hub ids; `<ts>` for hub-clock times — except in
+        EXACT comparisons, where only a roster's `last_seen` (stamped by the
+        very call being compared) is replaced."""
         if isinstance(v, str):
             for name, val in sorted(self.vars.items(), key=lambda kv: -len(kv[1])):
                 if val and len(val) >= 6 and val in v:
@@ -132,11 +135,11 @@ class Side:
                 # U+0000); its own step keeps it visible, later views do not
                 # count it again
                 v = v.replace("\u0000", "")
-            return TS.sub("<ts>", v)
+            return TS.sub("<ts>", v) if (not exact or key == "last_seen") else v
         if isinstance(v, list):
-            return [self.norm(x, keep_nul) for x in v]
+            return [self.norm(x, keep_nul, exact, key) for x in v]
         if isinstance(v, dict):
-            return {k: self.norm(x, keep_nul) for k, x in v.items()}
+            return {k: self.norm(x, keep_nul, exact, k) for k, x in v.items()}
         return v
 
 
@@ -160,7 +163,7 @@ class Diff:
 
     def step(self, sid: str, method: str, path: Arg, *, auth: Arg = None, body: Arg = None, content: Arg = None,
              headers: Arg = None, public: bool = False, raw: bool = False,
-             compare_headers: tuple[str, ...] = (), capture: dict[str, Callable[[Any], str]] | None = None) -> tuple[Any, Any]:
+             compare_headers: tuple[str, ...] = (), capture: dict[str, Callable[[Any], str]] | None = None, exact: bool = False) -> tuple[Any, Any]:
         """Send one request to both hubs and compare the answers. `capture`
         names values a hub minted (ids) so later steps and comparisons
         refer to them symbolically."""
@@ -188,13 +191,13 @@ class Diff:
                     s.set(name, fn(r))
                 except Exception:  # noqa: BLE001 — a failed answer simply has nothing to capture
                     pass
-        self.compare(sid, out[0], out[1], compare_headers)
+        self.compare(sid, out[0], out[1], compare_headers, exact)
         if sid in EXPECTED and out[0].status_code != out[1].status_code:
             p = urllib.parse.unquote(str(resolve(path, self.sides[0])).split("?")[0])
             self.divergent.add((p, out[0].status_code, out[1].status_code))
         return out[0], out[1]
 
-    def view(self, side: Side, r: Any, extra: tuple[str, ...], keep_nul: bool) -> dict[str, Any]:
+    def view(self, side: Side, r: Any, extra: tuple[str, ...], keep_nul: bool, exact: bool = False) -> dict[str, Any]:
         ctype = r.headers.get("content-type", "")
         body = r.content.decode("utf-8", "replace")
         m = re.match(r"multipart/byteranges; boundary=(\w+)$", ctype)
@@ -208,20 +211,20 @@ class Diff:
                 val = val.replace(side.base(False), "<base>").replace(side.base(True), "<base>")
             if m and val is not None and h == "content-type":
                 val = ctype
-            v[h] = side.norm(val, keep_nul) if isinstance(val, str) else val
+            v[h] = side.norm(val, keep_nul, exact) if isinstance(val, str) else val
         if ctype.startswith("application/json"):
             try:
-                v["body"] = side.norm(json.loads(r.content), keep_nul)
+                v["body"] = side.norm(json.loads(r.content), keep_nul, exact)
             except ValueError:
                 v["body"] = body
         else:
             v["body"] = body
         return v
 
-    def compare(self, sid: str, a: Any, b: Any, extra: tuple[str, ...]) -> None:
+    def compare(self, sid: str, a: Any, b: Any, extra: tuple[str, ...], exact: bool = False) -> None:
         keep_nul = sid.startswith("s19")
-        va = self.view(self.sides[0], a, extra, keep_nul)
-        vb = self.view(self.sides[1], b, extra, keep_nul)
+        va = self.view(self.sides[0], a, extra, keep_nul, exact)
+        vb = self.view(self.sides[1], b, extra, keep_nul, exact)
         ja, jb = json.dumps(va, ensure_ascii=False), json.dumps(vb, ensure_ascii=False)
         same = ja == jb
         if not same:
@@ -248,37 +251,56 @@ class Diff:
             print(f"  ✗  {sid}\n      {detail}")
 
 
+def clean_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if not k.startswith("HUB_")}
+
+
+def start_python(data: str) -> Side:
+    port, public = free_port(), free_port()
+    proc = subprocess.Popen([sys.executable, os.path.join(_HERE, "reference_hub.py"), "--port", str(port), "--public-port", str(public),
+                             "--data", data, "--max-file-bytes", str(LIMIT)], env=clean_env(), stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
+    return wait_healthy(Side("python", port, public, data, proc))
+
+
+def start_rust(rust_bin: str, data: str, database_url: str) -> Side:
+    port, public = free_port(), free_port()
+    env = dict(clean_env(), HUB_DATABASE_URL=database_url, HUB_DATA=data, HUB_PORT=str(port), HUB_BIND="127.0.0.1", HUB_PUBLIC="1",
+               HUB_PUBLIC_BIND="127.0.0.1", HUB_PUBLIC_PORT=str(public), HUB_NAME="diff-hub", HUB_RETENTION_DAYS="30",
+               HUB_MAX_FILE_BYTES=str(LIMIT))
+    proc = subprocess.Popen([rust_bin], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return wait_healthy(Side("rust", port, public, data, proc))
+
+
+def wait_healthy(s: Side) -> Side:
+    threading.Thread(target=read_lines, args=(s,), daemon=True).start()
+    deadline = time.time() + 120
+    while True:
+        try:
+            if httpx.get(s.base() + "/healthz", timeout=2).status_code == 200:
+                return s
+        except httpx.HTTPError:
+            pass
+        if s.proc.poll() is not None or time.time() > deadline:
+            raise SystemExit(f"the {s.name} hub did not start")
+        time.sleep(0.2)
+
+
+def stop(s: Side) -> None:
+    s.proc.terminate()
+    try:
+        s.proc.wait(10)
+    except subprocess.TimeoutExpired:
+        s.proc.kill()
+        s.proc.wait(10)
+
+
 def start_hubs(rust_bin: str, database_url: str) -> tuple[Side, Side, str]:
     tmp = tempfile.mkdtemp(prefix="hub-diff-")
     pd, rd = os.path.join(tmp, "py"), os.path.join(tmp, "rs")
     os.makedirs(pd)
     os.makedirs(rd)
-    pp, ppub, rp, rpub = free_port(), free_port(), free_port(), free_port()
-    env = dict(os.environ)
-    for k in list(env):
-        if k.startswith("HUB_"):
-            del env[k]
-    py = subprocess.Popen([sys.executable, os.path.join(_HERE, "reference_hub.py"), "--port", str(pp), "--public-port", str(ppub),
-                           "--data", pd, "--max-file-bytes", str(LIMIT)], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    renv = dict(env, HUB_DATABASE_URL=database_url, HUB_DATA=rd, HUB_PORT=str(rp), HUB_BIND="127.0.0.1", HUB_PUBLIC="1",
-                HUB_PUBLIC_BIND="127.0.0.1", HUB_PUBLIC_PORT=str(rpub), HUB_NAME="diff-hub", HUB_RETENTION_DAYS="30",
-                HUB_MAX_FILE_BYTES=str(LIMIT))
-    rs = subprocess.Popen([rust_bin], env=renv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    sides = (Side("python", pp, ppub, pd, py), Side("rust", rp, rpub, rd, rs))
-    for s in sides:
-        threading.Thread(target=read_lines, args=(s,), daemon=True).start()
-    deadline = time.time() + 60
-    for s in sides:
-        while True:
-            try:
-                if httpx.get(s.base() + "/healthz", timeout=2).status_code == 200:
-                    break
-            except httpx.HTTPError:
-                pass
-            if s.proc.poll() is not None or time.time() > deadline:
-                raise SystemExit(f"the {s.name} hub did not start")
-            time.sleep(0.2)
-    return sides[0], sides[1], tmp
+    return start_python(pd), start_rust(rust_bin, rd, database_url), tmp
 
 
 def read_lines(side: Side) -> None:
@@ -557,19 +579,141 @@ def compare_logs(d: Diff) -> None:
         print(f"  ~  log-500  (deliberate: {EXPECTED['log-500']}; {extra} lines)")
 
 
+IMPORT_IDS: dict[str, tuple[str, str]] = {}
+
+
+def populate(s: Side) -> None:
+    """Give a v1 hub a store worth importing: every kind of row and state
+    a running hub accumulates (queued, fetched, delivered, read, receipts
+    owed and pushed, bound/unbound/missing attachments, an address that left
+    with mail still queued, a duplicate, a truncated body, a NUL)."""
+    def me(name: str, kind: str = "org", user: str = "tester") -> tuple[str, str]:
+        secret = f"import-secret-{name}"
+        slug = f"{name}.{user.replace('_', '-')}.{fp6(secret)}"
+        IMPORT_IDS[name] = (slug, secret)
+        r = s.client.post(s.base() + "/api/register", headers={"x-org-auth": f"{slug}:{secret}"},
+                          json={"slug": slug, "org_name": name.title(), "username": user, "blurb": f"{name} blurb", "kind": kind})
+        assert r.status_code == 200, r.text
+        return slug, secret
+
+    def call(path: str, who: tuple[str, str] | None, **kw: Any) -> httpx.Response:
+        h = {"x-org-auth": f"{who[0]}:{who[1]}"} if who else {}
+        return s.client.post(s.base() + path, headers=h, **kw)
+
+    people = [me(n) for n in ("ann", "ben", "cat", "dan", "gone")] + [me("chat-one", "chat", "ncola_k8bx"), me("pers", "person")]
+    ann, ben, cat, dan, gone, chat, pers = people
+    bodies = ["hello", "", "é ✓ 漢字 😀", "x" * 25000, "line\nbreak\ttab", "a\u0000b"]
+    n = 0
+    for rnd in range(4):
+        for i, frm in enumerate(people):
+            to = people[(i + 1 + rnd) % len(people)]
+            if to == frm:
+                continue
+            n += 1
+            payload: dict[str, Any] = {"to": to[0], "body": bodies[n % len(bodies)], "kind": ["message", "status", None, 5][n % 4],
+                                       "thread_id": [None, "th-1"][n % 2], "sent_at": [None, "2020-01-01T00:00:00Z", 12][n % 3]}
+            if n % 3 == 0:
+                payload["id"] = f"given-{n}"
+            assert call("/api/send", frm, json=payload).status_code == 200
+    call("/api/send", ann, json={"id": "given-3", "to": ben[0], "body": "duplicate"})
+    up = {}
+    for name, who, data in (("bound1", ann, b"first file"), ("bound2", ben, b"second"), ("loose", cat, b"never sent"),
+                            ("lost", dan, b"blob removed"), ("weird", ann, b"w")):
+        nm = {"weird": "my file é.txt"}.get(name, f"{name}.bin")
+        r = s.client.post(s.base() + "/api/attachments", params={"name": nm}, headers={"x-org-auth": f"{who[0]}:{who[1]}"}, content=data)
+        up[name] = r.json()["id"]
+    for name, frm, to in (("bound1", ann, ben), ("bound2", ben, cat), ("lost", dan, ann), ("weird", ann, cat)):
+        assert call("/api/send", frm, json={"id": f"att-{name}", "to": to[0], "body": "with a file", "attachments": [up[name]]}).status_code == 200
+    os.remove(os.path.join(s.data, "blobs", up["lost"]))
+    for name, v in up.items():
+        IMPORT_IDS[f"att-{name}"] = (v, "")
+    # custody and receipts in every state
+    for who in (ben, cat):
+        polled = call("/api/poll?wait=0", who, json={}).json()["messages"]
+        ids = [m["id"] for m in polled]
+        call("/api/ack", who, json={"ids": ids[: len(ids) // 2]})
+        call("/api/receipts", who, json={"receipts": [{"id": i, "state": "delivered", "at": "2026-05-05T05:05:05Z"} for i in ids[:2]]
+                                         + [{"id": ids[0], "state": "read", "at": 1234}]})
+    call("/api/poll?wait=0", ann, json={})          # some receipts pushed, later ones owed
+    call("/api/receipts", ben, json={"receipts": [{"id": "given-3", "state": "read"}]})
+    call("/api/unregister", gone)                   # left with mail still queued
+
+
+def import_scenarios(d: Diff) -> None:
+    ids = IMPORT_IDS
+
+    def pair(name: str) -> str:
+        return f"{ids[name][0]}:{ids[name][1]}"
+
+    names = ("ann", "ben", "cat", "dan", "chat-one", "pers")
+    print("\nthe imported records, read back")
+    d.step("im1-healthz", "GET", "/healthz")
+    d.step("im2-ui-data", "GET", "/ui/data")
+    d.step("im3-all-messages", "GET", "/ui/messages?limit=500", exact=True)
+    a, _ = d.step("im4-page", "GET", "/ui/messages?limit=7", exact=True)
+    m = a.json()["messages"][-1]
+    d.step("im4-page2", "GET", f"/ui/messages?limit=7&before_at={m['received_at']}&before_n={m['n']}", exact=True)
+    d.step("im5-org", "GET", f"/ui/messages?org={ids['ben'][0]}", exact=True)
+    d.step("im5-client-chat", "GET", "/ui/messages?client=ncola_k8bx", exact=True)
+    d.step("im6-roster", "GET", "/api/roster", auth=pair("ann"), exact=True)
+    for nm in names:
+        d.step(f"im7-poll-{nm}", "POST", "/api/poll?wait=0", auth=pair(nm), exact=True)
+    print("\nattachments after the import")
+    hdrs = ("content-disposition", "content-length", "content-type")
+    for att, owner, rcpt in (("bound1", "ann", "ben"), ("bound2", "ben", "cat"), ("loose", "cat", "ann"), ("lost", "dan", "ann"),
+                             ("weird", "ann", "cat")):
+        path = f"/api/attachments/{ids['att-' + att][0]}"
+        d.step(f"im8-{att}-owner", "GET", path, auth=pair(owner), compare_headers=hdrs)
+        d.step(f"im8-{att}-recipient", "GET", path, auth=pair(rcpt), compare_headers=hdrs)
+    print("\nlife goes on after the import")
+    d.step("im9-reregister", "POST", "/api/register", auth=pair("ann"), body={"slug": ids["ann"][0], "org_name": "Ann"})
+    d.step("im9-stolen", "POST", "/api/register", auth=f"{ids['ann'][0]}:wrong", body={"slug": ids["ann"][0]})
+    d.step("im9-gone-is-gone", "POST", "/api/send", auth=pair("ann"), body={"to": ids["gone"][0], "body": "x"})
+    d.step("im10-new-send", "POST", "/api/send", auth=pair("ann"), body={"id": "after-import", "to": ids["ben"][0], "body": "new"})
+    d.step("im10-new-numbered", "GET", "/ui/messages?limit=2", exact=False)
+    d.step("im11-ack", "POST", "/api/ack", auth=pair("ben"), body={"ids": ["after-import", "given-3"]})
+    d.step("im11-receipts", "POST", "/api/receipts", auth=pair("ben"), body={"receipts": [{"id": "after-import", "state": "read"}]})
+    d.step("im11-sender-hears", "POST", "/api/poll?wait=0", auth=pair("ann"))
+    report = os.path.join(d.sides[1].data, "v2-import-report.json")
+    try:
+        with open(report, encoding="utf-8") as f:
+            rep = json.load(f)
+        print(f"     import report: {rep['orgs']} addresses, {rep['messages']} messages, {rep['attachments']} attachments, "
+              f"anomalies {rep['anomalies']}")
+        if set(rep["anomalies"]) != {"NUL removed from body"}:
+            d.unexpected.append(f"import report anomalies: {rep['anomalies']} (expected only the NUL the store was given)")
+    except (OSError, ValueError, KeyError) as e:
+        d.unexpected.append(f"import report unreadable: {e}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rust-bin", required=True)
     ap.add_argument("--database-url", required=True)
+    ap.add_argument("--mode", choices=("protocol", "import"), default="protocol")
     ap.add_argument("-v", action="store_true")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    py, rs, tmp = start_hubs(args.rust_bin, args.database_url)
+    if args.mode == "import":
+        tmp = tempfile.mkdtemp(prefix="hub-import-")
+        pd, rd = os.path.join(tmp, "py"), os.path.join(tmp, "rs")
+        os.makedirs(pd)
+        first = start_python(pd)
+        populate(first)
+        stop(first)
+        shutil.copytree(pd, rd)                     # the v1 data folder, as an upgrade finds it
+        rs = start_rust(args.rust_bin, rd, args.database_url)   # imports at startup
+        py = start_python(pd)
+    else:
+        py, rs, tmp = start_hubs(args.rust_bin, args.database_url)
     d = Diff(py, rs, args.v)
     try:
-        scenarios(d)
-        compare_logs(d)
+        if args.mode == "import":
+            import_scenarios(d)
+        else:
+            scenarios(d)
+            compare_logs(d)
     finally:
         for s in d.sides:
             s.proc.terminate()

@@ -11,20 +11,32 @@ mod support;
 
 use support::TestPg;
 
-#[tokio::test]
-#[ignore = "needs Python with the v1 hub's requirements; run with --ignored"]
-async fn python_and_rust_hubs_answer_alike() {
+async fn drive(mode: &str) {
     let pg = TestPg::start();
     let url = pg.fresh_db("hubdiff").await;
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let python = std::env::var("HUB_TEST_PYTHON").unwrap_or_else(|_| "python".into());
     let status = tokio::process::Command::new(python)
         .arg(repo.join("tests").join("v2").join("differential.py"))
-        .args(["--rust-bin", env!("CARGO_BIN_EXE_orgtree-mailhub"), "--database-url", &url])
+        .args(["--rust-bin", env!("CARGO_BIN_EXE_orgtree-mailhub"), "--database-url", &url, "--mode", mode])
         .args(std::env::var("HUB_DIFF_VERBOSE").ok().map(|_| "-v"))
         .status()
         .await
         .expect("run the differential driver");
     drop(pg);
     assert!(status.success(), "the hubs answered differently (see the report above)");
+}
+
+/// The same requests to both hubs, fresh.
+#[tokio::test]
+#[ignore = "needs Python with the v1 hub's requirements; run with --ignored"]
+async fn python_and_rust_hubs_answer_alike() {
+    drive("protocol").await;
+}
+
+/// A store the v1 hub built, imported by v2 at startup, read back from both.
+#[tokio::test]
+#[ignore = "needs Python with the v1 hub's requirements; run with --ignored"]
+async fn an_imported_v1_store_reads_back_the_same() {
+    drive("import").await;
 }
