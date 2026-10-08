@@ -24,6 +24,9 @@ HUB_NAME="office" docker compose up -d --build
   to the container hostname.
 - `HUB_RETENTION_DAYS` (default 30): undelivered mail and attachment blobs
   older than this are swept hourly.
+- `HUB_MAX_FILE_BYTES` (default 1073741824, 1 GiB): maximum streamed attachment
+  upload. `/healthz.max_attachment_bytes` advertises the current limit. Embedded
+  hosts can apply live changes; see [attachment limits](docs/attachment-limits.md).
 - `/healthz` for monitoring; one JSON log line per request on stdout
   (`docker logs orgtree-mailhub`).
 
@@ -80,7 +83,7 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/ack` | `{ids}` — custody transfer AFTER the client persisted the mail (at-least-once; duplicates are the client's to collapse) |
 | `POST /api/send` | `{id, to, body, kind?, thread_id?, sent_at, attachments?}` — idempotent on the client-minted id; the 200 IS the "received" receipt |
 | `POST /api/receipts` | `{receipts: [{id, state: delivered\|read, at}]}` from the recipient side |
-| `POST /api/attachments?name=` | raw body ≤ 25 MB → `{id}`; bind ids in a send (≤ 10) |
+| `POST /api/attachments?name=` | streamed raw body ≤ advertised limit (default 1 GiB) → `{id, bytes}`; bind ids in a send (≤ 10) |
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
 | `GET /api/roster` · `GET /healthz` | roster with presence · liveness |
 
