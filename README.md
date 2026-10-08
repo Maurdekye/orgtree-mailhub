@@ -89,7 +89,7 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/register` | `{slug, org_name, username, blurb?, kind?}` (kind `org`, `chat` or `person`, fixed at the first registration) — upsert if the fingerprint matches; first write wins the slug. Returns hub name, retention, roster |
 | `POST /api/poll?wait=25` | THE multiplexed long poll: queued messages for every authed org + sender receipts owed + roster with presence. 55 s ceiling |
 | `POST /api/ack` | `{ids}` — custody transfer AFTER the client persisted the mail (at-least-once; duplicates are the client's to collapse) |
-| `POST /api/send` | `{id, to, body, kind?, thread_id?, sent_at, attachments?, reply_to?}` — idempotent on the client-minted id; the 200 IS the "received" receipt |
+| `POST /api/send` | `{id, to, body, kind?, thread_id?, sent_at, attachments?, reply_to?, body_part?}` (body kept whole; body + files ≤ the limit) — idempotent on the client-minted id; the 200 IS the "received" receipt |
 | `POST /api/receipts` | `{receipts: [{id, state: delivered\|read, at}]}` from the recipient side |
 | `POST /api/attachments?name=` | streamed raw body ≤ advertised limit (default 1 GiB) → `{id, bytes}`; bind ids in a send (≤ 10) |
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
@@ -99,6 +99,7 @@ Auth rides one header, never URLs or bodies:
 | `GET /api/devices` | the devices an address syncs from |
 | `GET /api/conversations` · `GET /api/history?with=` | who you have mail with (last message, unread) · one conversation, newest first, paged |
 | `DELETE /api/messages/{id}` · `DELETE /api/conversations/{address}` | delete your copy (the other side keeps theirs) |
+| `GET /api/messages/{id}/body` | a message's whole body (streamed, ranges) |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).

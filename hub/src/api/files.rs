@@ -104,7 +104,66 @@ pub async fn download(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         return refuse(StatusCode::FORBIDDEN, "not yours");
     }
     let Some(path) = blobs::blob_path(&hub.cfg.blob_dir(), &aid) else { return refuse(StatusCode::GONE, "blob expired") };
-    let meta = match tokio::fs::metadata(&path).await {
+    serve_file(RangeAsk::of(req), &path, Some(&name), "application/octet-stream").await
+}
+
+/// The request's Range and If-Range, read before the response is built (the
+/// request itself is not held across the file's reads).
+struct RangeAsk {
+    range: Option<String>,
+    if_range: Option<String>,
+}
+
+impl RangeAsk {
+    fn of(req: &Req) -> RangeAsk {
+        RangeAsk {
+            range: req.headers.get(header::RANGE).map(|v| latin1(v.as_bytes())),
+            if_range: req.headers.get(header::IF_RANGE).map(|v| latin1(v.as_bytes())),
+        }
+    }
+}
+
+/// G6: `GET /api/messages/{id}/body[?slug=]` — a message's whole body, for
+/// its sender or recipient while their copy exists: from the row, or
+/// streamed from its file (with ranges, so a long one can be resumed).
+#[tracing::instrument(level = "debug", skip(hub, req), ret(level = "debug"), err(level = "debug", Debug))]
+pub async fn message_body(hub: &Arc<Hub>, req: &mut Req, id: &str) -> ApiResult {
+    let me = super::mail::caller(hub, req).await?;
+    let ranges = RangeAsk::of(req);
+    let c = hub.db.get().await?;
+    let row = if id.contains('\0') {
+        None
+    } else {
+        db::query_opt(
+            &c,
+            "SELECT body, body_part FROM messages
+              WHERE id = $1 AND ((from_slug = $2 AND sender_deleted_at IS NULL) OR (to_slug = $2 AND recipient_deleted_at IS NULL))",
+            &[&id, &me],
+        )
+        .await?
+    };
+    let Some(row) = row else { return refuse(StatusCode::NOT_FOUND, "no such message") };
+    mark_seen(hub, &c, std::slice::from_ref(&me)).await?;
+    drop(c);
+    const TEXT: &str = "text/plain; charset=utf-8";
+    match row.get::<_, Option<String>>(1) {
+        None => {
+            let mut r = Response::new(Body::from(row.get::<_, String>(0)));
+            r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(TEXT));
+            Ok(r)
+        }
+        Some(part) => {
+            let Some(path) = blobs::blob_path(&hub.cfg.blob_dir(), &part) else { return refuse(StatusCode::GONE, "blob expired") };
+            serve_file(ranges, &path, None, TEXT).await
+        }
+    }
+}
+
+/// A file as Starlette's FileResponse served it: ETag, Last-Modified,
+/// Accept-Ranges, and Range (one range, several as multipart/byteranges,
+/// 400/416 refusals), streamed, never read whole.
+async fn serve_file(ranges: RangeAsk, path: &std::path::Path, name: Option<&str>, ctype: &'static str) -> ApiResult {
+    let meta = match tokio::fs::metadata(path).await {
         Ok(m) if m.is_file() => m,
         _ => return refuse(StatusCode::GONE, "blob expired"),
     };
@@ -121,8 +180,8 @@ pub async fn download(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     };
     let mut resp = Response::new(Body::empty());
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
-    if let Ok(v) = HeaderValue::from_str(&crate::wire::content_disposition(&name)) {
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ctype));
+    if let Some(Ok(v)) = name.map(|n| HeaderValue::from_str(&crate::wire::content_disposition(n))) {
         h.insert(header::CONTENT_DISPOSITION, v);
     }
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
@@ -134,8 +193,7 @@ pub async fn download(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if let Ok(v) = HeaderValue::from_str(&etag) {
         h.insert(header::ETAG, v);
     }
-    let range = req.headers.get(header::RANGE).map(|v| latin1(v.as_bytes()));
-    let if_range = req.headers.get(header::IF_RANGE).map(|v| latin1(v.as_bytes()));
+    let RangeAsk { range, if_range } = ranges;
     let last_modified = resp.headers().get(header::LAST_MODIFIED).map(|v| latin1(v.as_bytes()));
     let use_range = match (&range, &if_range) {
         (None, _) => false,
@@ -175,7 +233,6 @@ pub async fn download(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         Some(many) => {
             // Starlette draws 13 random bytes as hex for the boundary
             let boundary = uuid::Uuid::new_v4().simple().to_string()[..26].to_string();
-            let ctype = "application/octet-stream";
             let fixed = 49 + boundary.len() as u64 + ctype.len() as u64 + size.to_string().len() as u64;
             let length: u64 = many
                 .iter()

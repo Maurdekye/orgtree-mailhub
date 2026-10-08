@@ -3,7 +3,11 @@
 The default is 1 GiB (1,073,741,824 bytes). Set `HUB_MAX_FILE_BYTES` to a positive
 integer number of bytes to change the standalone hub's startup default.
 
-`GET /healthz` advertises the current `max_attachment_bytes` on both listeners.
+`GET /healthz` advertises the current `max_attachment_bytes` on both listeners, and
+the same value as `max_message_bytes`: v2 applies it to each upload and to each
+message as a whole, its body and attachments together (a send over it is
+refused 413 with `max_message_bytes`, judged against the limit current when the
+send arrives; a retry of a message already accepted stays a duplicate).
 Clients should check it before uploading. Uploads stream to disk; the hub checks
 both Content-Length, when supplied, and bytes actually received. Oversize or
 interrupted uploads remove their partial file and publish no attachment row.

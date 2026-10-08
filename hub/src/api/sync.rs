@@ -20,7 +20,7 @@ use deadpool_postgres::GenericClient;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use super::mail::{authed, envelope, mark_seen, one_address, roster_json, ENVELOPE_COLS, POLL_CEILING};
+use super::mail::{authed, envelope_v2, mark_seen, one_address, roster_json, ENVELOPE_COLS, POLL_CEILING};
 use super::{ok, refuse, ApiResult, Hub, Req};
 use crate::clock;
 use crate::db;
@@ -305,7 +305,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
             changes.push(json!({ "type": "deleted", "id": r.get::<_, String>("id") }));
             continue;
         }
-        let mut m = envelope(r);
+        let mut m = envelope_v2(r);
         m.insert("delivered_at".into(), json!(r.get::<_, Option<String>>("delivered_at")));
         m.insert("read_at".into(), json!(r.get::<_, Option<String>>("read_at")));
         changes.push(json!({ "type": "message", "message": m }));

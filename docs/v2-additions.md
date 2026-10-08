@@ -200,9 +200,41 @@ DELETE /api/conversations/{address}[?slug=]   → 200 {"deleted": N}
 - After both copies are gone, the same message id may be sent again; a
   device then sees the deletion and then the new message, in that order.
 
+## Long messages arrive whole (G6), one limit per message (G8)
+
+A body is kept whole, never cut, up to the hub's limit.
+
+- **Sending**: `body` in the send's JSON, as before (the request body may be
+  up to 32 MiB), or, for a longer body or to avoid escaping it, upload the
+  text first like a file (`POST /api/attachments?name=body.txt`) and send
+  `{"body_part": "<its id>"}` instead of `body`. A body part must be the
+  sender's own upload, not bound to another message, UTF-8 text without NUL.
+  Refusals (422): `give body or body_part, not both`, `body_part must be an
+  upload id (a string)`, `unknown body_part '<id>'`, `body_part '<id>' already
+  bound`, `body_part is not UTF-8 text`, `body_part contains a NUL character`.
+- **Reading (v2 routes)**: sync, history and conversations carry a body up to
+  64 KiB whole. A longer one comes as its first 20,000 characters with
+  `"body_bytes": <the whole body's size>`; fetch the whole body from
+  `GET /api/messages/{id}/body[?slug=]` (sender or recipient while their copy
+  exists; `text/plain; charset=utf-8`, streamed, with `Range` support so a
+  long one can be resumed). 404 `no such message` otherwise.
+- **Reading (v1 routes)**: `/api/poll` and the operator page show a body over
+  20,000 characters as its first 20,000 characters followed by
+  `\n\n[message continues: N bytes — open it in a client that supports long
+  messages]` (N: the whole body's size in bytes). Never a silent cut.
+- **The limit** (`max_attachment_bytes`, also reported as
+  `max_message_bytes`) bounds one message: its body (UTF-8 bytes) and all its
+  attachments together, at most 10 files as before. Over it, 413:
+  `{"detail": "message exceeds hub limit of <limit> bytes (body and
+  attachments come to <total>)", "max_message_bytes": <limit>}`. The limit is
+  the one current when the send arrives (it can change live); a retry of a
+  message the hub already accepted is answered as a duplicate whatever the
+  limit is now. Each upload is still checked against the limit on its own.
+- A long body's file is deleted with the message's last copy (G4).
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
-`devices`, `history`, `delete` (more as later parts land). A v1 hub reports
-neither.
+`devices`, `history`, `delete`, `long_messages`, `message_limit` (more as
+later parts land). A v1 hub reports neither.

@@ -38,7 +38,9 @@ import httpx
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 TS = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z")
-LIMIT = 4096  # both hubs start with HUB_MAX_FILE_BYTES=4096
+# both hubs start with HUB_MAX_FILE_BYTES=LIMIT. v2 applies it to a whole message,
+# body included (G8), so it must hold the longest body a step sends.
+LIMIT = 65536
 
 # step id -> why v2 deliberately differs (docs/v2.md carries the same list)
 EXPECTED = {
@@ -53,7 +55,10 @@ EXPECTED = {
 
 
 # keys v2's /healthz adds beside v1's (checked present, then set aside)
-HEALTHZ_ADDITIONS = ("version", "features")
+HEALTHZ_ADDITIONS = ("version", "features", "max_message_bytes")
+# what a v1 route shows after the first 20,000 characters of a longer body:
+# v1 cut such a body silently, v2 keeps it whole and says so (G6)
+CONTINUES = re.compile(r"\n\n\[message continues: (\d+) bytes — open it in a client that supports long messages\]$")
 
 
 def ID(r: Any) -> str:
@@ -162,6 +167,8 @@ class Diff:
         self.same = 0
         # answers where v2's additive keys were checked and set aside
         self.additions = 0
+        # bodies where v2's "message continues" line was checked and set aside
+        self.continuations = 0
         self.unexpected: list[str] = []
         self.expected_seen: dict[str, str] = {}
         # (path, python status, rust status) of deliberate differences, so
@@ -236,15 +243,34 @@ class Diff:
         if not (isinstance(ba, dict) and isinstance(bb, dict) and "max_attachment_bytes" in bb):
             return
         if all(k in bb and k not in ba for k in HEALTHZ_ADDITIONS) and isinstance(bb["features"], list):
+            assert bb["max_message_bytes"] == bb["max_attachment_bytes"], bb
             for k in HEALTHZ_ADDITIONS:
                 bb.pop(k)
             self.additions += 1
+
+    def set_aside_continuations(self, a: Any, b: Any) -> Any:
+        """Where v1 shows a body cut at 20,000 characters, v2 shows the same
+        20,000 and the line saying it continues (G6). The line is checked
+        (its byte count must be the whole body's) and set aside."""
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in b:
+                if k in a:
+                    b[k] = self.set_aside_continuations(a[k], b[k])
+            if isinstance(a.get("body"), str) and isinstance(b.get("body"), str):
+                m = CONTINUES.search(b["body"])
+                if m and b["body"][:m.start()] == a["body"] and len(a["body"]) == 20000 and int(m.group(1)) > len(a["body"].encode()):
+                    b["body"] = a["body"]
+                    self.continuations += 1
+        elif isinstance(a, list) and isinstance(b, list):
+            return [self.set_aside_continuations(x, y) for x, y in zip(a, b)] + b[len(a):]
+        return b
 
     def compare(self, sid: str, a: Any, b: Any, extra: tuple[str, ...], exact: bool = False) -> None:
         keep_nul = sid.startswith("s19")
         va = self.view(self.sides[0], a, extra, keep_nul, exact)
         vb = self.view(self.sides[1], b, extra, keep_nul, exact)
         self.set_aside_additions(va, vb)
+        vb["body"] = self.set_aside_continuations(va.get("body"), vb.get("body"))
         ja, jb = json.dumps(va, ensure_ascii=False), json.dumps(vb, ensure_ascii=False)
         same = ja == jb
         if not same:
@@ -743,7 +769,8 @@ def main() -> int:
                 s.proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\nagree: {d.same} · deliberate differences seen: {len(d.expected_seen)} · UNEXPECTED: {len(d.unexpected)}"
-          f" · v2 additions set aside in {d.additions} answers (/healthz version, features)")
+          f" · v2 additions set aside in {d.additions} answers (/healthz version, features, max_message_bytes)"
+          f" and {d.continuations} bodies (the \"message continues\" line)")
     for u in d.unexpected:
         print(f"\n✗ {u}")
     return 1 if d.unexpected else 0

@@ -451,6 +451,57 @@ pub fn decoded_path(raw: &str) -> String {
 }
 
 /// A header value read the way Starlette reads it: latin-1.
+/// What reading a file as message text found.
+#[derive(Debug, PartialEq)]
+pub enum TextCheck {
+    /// UTF-8 without NUL; its first characters, up to the number asked for
+    Text(String),
+    NotUtf8,
+    Nul,
+}
+
+/// Read a file through once, never whole: is it UTF-8 text without NUL
+/// (which PostgreSQL text cannot hold), and what are its first `chars`
+/// characters? A sequence split across reads is carried to the next.
+pub async fn read_text_preview(file: impl tokio::io::AsyncRead + Unpin, chars: usize) -> std::io::Result<TextCheck> {
+    read_text_with(file, chars, 64 * 1024).await
+}
+
+async fn read_text_with(mut file: impl tokio::io::AsyncRead + Unpin, chars: usize, read_size: usize) -> std::io::Result<TextCheck> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; read_size];
+    let mut chunk: Vec<u8> = Vec::with_capacity(buf.len() + 4);
+    let mut preview = String::new();
+    let mut count = 0usize;
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        chunk.extend_from_slice(&buf[..n]);
+        // in UTF-8 a zero byte is only ever U+0000
+        if chunk.contains(&0) {
+            return Ok(TextCheck::Nul);
+        }
+        let valid = match std::str::from_utf8(&chunk) {
+            Ok(s) => s.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => return Ok(TextCheck::NotUtf8),
+        };
+        if count < chars {
+            for ch in std::str::from_utf8(&chunk[..valid]).unwrap_or("").chars() {
+                if count == chars {
+                    break;
+                }
+                preview.push(ch);
+                count += 1;
+            }
+        }
+        chunk.drain(..valid);
+    }
+    Ok(if chunk.is_empty() { TextCheck::Text(preview) } else { TextCheck::NotUtf8 })
+}
+
 pub fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
@@ -551,5 +602,19 @@ mod tests {
         assert_eq!(parse_query_int("5"), Some(5));
         assert_eq!(parse_query_int("5.0"), None);
         assert_eq!(parse_query_int("-0"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn text_previews() {
+        let text = "aé✓😀".repeat(10);
+        for size in [1, 2, 3, 5, 64 * 1024] {
+            let got = read_text_with(text.as_bytes(), 7, size).await.unwrap();
+            assert_eq!(got, TextCheck::Text(text.chars().take(7).collect()), "reads of {size}");
+            assert_eq!(read_text_with(text.as_bytes(), 1000, size).await.unwrap(), TextCheck::Text(text.clone()));
+        }
+        assert_eq!(read_text_with(&b"ok\xff"[..], 5, 1).await.unwrap(), TextCheck::NotUtf8);
+        assert_eq!(read_text_with(&b"ends mid \xe2\x9c"[..], 5, 64).await.unwrap(), TextCheck::NotUtf8);
+        assert_eq!(read_text_with(&b"a\0b"[..], 5, 64).await.unwrap(), TextCheck::Nul);
+        assert_eq!(read_text_with(&b""[..], 5, 64).await.unwrap(), TextCheck::Text(String::new()));
     }
 }

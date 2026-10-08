@@ -16,8 +16,14 @@ use crate::db;
 use crate::presence::Listener;
 use crate::wire::{get_or, pg_text, py_iter, py_prefix, py_repr_str, py_str, py_strip, sqlite_text};
 
-/// v1 BODY_MAX: a longer body is cut, not refused (Phase 1 keeps this).
+/// v1 BODY_MAX. v1 cut every body here; v2 keeps bodies whole (G6) and
+/// shows v1's routes this much of a longer one, then says it continues, and
+/// keeps it as the preview of a body stored in a file.
 pub const BODY_MAX: usize = 20000;
+/// A body up to this many bytes is kept in its row and carried whole by
+/// sync and history; a longer one lives in a file fetched on demand
+/// (`GET /api/messages/{id}/body`), so their answers stay small.
+pub const INLINE_BODY_MAX: usize = 64 * 1024;
 pub const MAX_FILES_PER_MESSAGE: usize = 10;
 /// v1 POLL_CEILING: the longest a poll parks, whatever `wait` asks.
 pub const POLL_CEILING: f64 = 55.0;
@@ -25,8 +31,14 @@ pub const POLL_CEILING: f64 = 55.0;
 /// with the next poll, which returns at once while mail is queued).
 pub const POLL_BATCH: i64 = 500;
 
-pub const ENVELOPE_COLS: &str =
-    "n, id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, state, fetched_at, delivered_at, read_at, attachments, reply_to";
+pub const ENVELOPE_COLS: &str = "n, id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, state, fetched_at, delivered_at, \
+                                 read_at, attachments, reply_to, body_bytes, body_part";
+
+/// What a v1 route says after the first 20,000 characters of a longer body
+/// (ruling 8 October: never a silent cut).
+pub fn continues_line(total_bytes: i64) -> String {
+    format!("\n\n[message continues: {total_bytes} bytes — open it in a client that supports long messages]")
+}
 
 /// The client kinds an address registers as. v1 knew org and chat (and
 /// stored anything else as org); v2 adds person (G2). Fixed at the first
@@ -54,13 +66,40 @@ pub fn valid_slug(s: &str) -> bool {
         && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-'))
 }
 
-/// The wire shape a recipient sees on poll (v1 `row_to_envelope`).
+/// The wire shape a recipient sees on poll (v1 `row_to_envelope`). A body
+/// over 20,000 characters is cut there with a line saying it continues
+/// (v1 clients cannot fetch the rest).
 pub fn envelope(r: &tokio_postgres::Row) -> serde_json::Map<String, Value> {
+    let body: String = r.get("body");
+    let shown = match r.get::<_, Option<i64>>("body_bytes") {
+        // a body kept in a file: the row holds its first 20,000 characters
+        Some(total) => body + &continues_line(total),
+        None if body.len() > BODY_MAX && body.chars().nth(BODY_MAX).is_some() => {
+            format!("{}{}", py_prefix(&body, BODY_MAX), continues_line(body.len() as i64))
+        }
+        None => body,
+    };
+    envelope_with_body(r, shown)
+}
+
+/// The same message as v2's routes (sync, history) carry it: the whole body
+/// when it is kept in the row; otherwise its first 20,000 characters and
+/// `body_bytes`, the whole body's size (fetch it from
+/// `GET /api/messages/{id}/body`).
+pub fn envelope_v2(r: &tokio_postgres::Row) -> serde_json::Map<String, Value> {
+    let mut m = envelope_with_body(r, r.get("body"));
+    if let Some(total) = r.get::<_, Option<i64>>("body_bytes") {
+        m.insert("body_bytes".into(), json!(total));
+    }
+    m
+}
+
+fn envelope_with_body(r: &tokio_postgres::Row, body: String) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();
     m.insert("id".into(), json!(r.get::<_, String>("id")));
     m.insert("from".into(), json!(r.get::<_, String>("from_slug")));
     m.insert("to".into(), json!(r.get::<_, String>("to_slug")));
-    m.insert("body".into(), json!(r.get::<_, String>("body")));
+    m.insert("body".into(), json!(body));
     m.insert("kind".into(), json!(r.get::<_, Option<String>>("kind")));
     m.insert("thread_id".into(), json!(r.get::<_, Option<String>>("thread_id")));
     m.insert("sent_at".into(), json!(r.get::<_, Option<String>>("sent_at")));
@@ -105,6 +144,21 @@ pub fn roster_json(
         "last_seen": last_seen.map(clock::iso),
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
     })
+}
+
+/// The one address a v2 GET or DELETE acts for (`?slug=` when the header
+/// signs in several). The request is read before the future starts, so the
+/// future does not borrow it.
+pub(super) fn caller<'a>(hub: &'a Hub, req: &Req) -> impl std::future::Future<Output = ApiResult<String>> + Send + 'a {
+    let asked = req.query("slug").map(|s| Value::String(s.to_string()));
+    let auth = authed(hub, req);
+    async move {
+        let slugs = auth.await?;
+        if slugs.is_empty() {
+            return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+        }
+        one_address(&slugs, asked.as_ref())
+    }
 }
 
 /// The one address a v2 call acts for: the `slug` asked for, which the
@@ -409,6 +463,25 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if !slugs.contains(&frm) {
         return refuse(StatusCode::UNAUTHORIZED, "sender credentials required");
     }
+    // G6: the body is kept whole. One too long for its row goes to a file
+    // first (or comes from an upload, `body_part`), before any lock is held.
+    let mut long = match body.get("body_part") {
+        None | Some(Value::Null) => {
+            let text = pg_text(str_field(&body, "body"));
+            if text.len() > INLINE_BODY_MAX {
+                Some(LongBody::write(hub, &frm, text).await?)
+            } else {
+                None
+            }
+        }
+        Some(Value::String(part)) => {
+            if body.get("body").is_some_and(|b| !b.is_null() && b != &json!("")) {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "give body or body_part, not both");
+            }
+            Some(LongBody::uploaded(hub, &frm, part).await?)
+        }
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "body_part must be an upload id (a string)"),
+    };
     let mut c = hub.db.get().await?;
     let tx = c.transaction().await?;
     // the recipient's row is locked for the length of this short
@@ -429,10 +502,17 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("at most {MAX_FILES_PER_MESSAGE} attachments"));
     }
     let lookup: Vec<String> = att_ids.iter().filter(|a| !a.contains('\0')).cloned().collect();
+    let mut locking = lookup.clone();
+    if let Some(LongBody { uploaded: true, part, .. }) = &long {
+        if lookup.contains(part) {
+            return refuse(StatusCode::UNPROCESSABLE_ENTITY, "body_part is also listed as an attachment");
+        }
+        locking.push(part.clone());
+    }
     let rows = db::query(
         &tx,
         "SELECT id, name, bytes, owner_slug, message_id FROM attachments WHERE id = ANY($1) ORDER BY id FOR UPDATE",
-        &[&lookup],
+        &[&locking],
     )
     .await?;
     let found: std::collections::HashMap<String, &tokio_postgres::Row> = rows.iter().map(|r| (r.get::<_, String>(0), r)).collect();
@@ -448,7 +528,10 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         }
         metas.push(json!({ "id": row.get::<_, String>(0), "name": row.get::<_, String>(1), "bytes": row.get::<_, i64>(2) }));
     }
-    let text = pg_text(py_prefix(&str_field(&body, "body"), BODY_MAX).to_string());
+    let (text, body_bytes, body_part) = match &long {
+        Some(l) => (l.preview.clone(), Some(l.bytes), Some(l.part.clone())),
+        None => (pg_text(str_field(&body, "body")), None, None),
+    };
     let (Ok(kind), Ok(thread_id), Ok(sent_at)) =
         (sqlite_text(body.get("kind")), sqlite_text(body.get("thread_id")), sqlite_text(body.get("sent_at")))
     else {
@@ -472,20 +555,41 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // a retry is answered without touching the insert: v1's INSERT OR
     // IGNORE never used up a message number, and neither does this
     let known = db::query_opt(&tx, "SELECT 1 FROM messages WHERE id = $1", &[&mid]).await?.is_some();
+    if !known {
+        // G8: the limit bounds one message, its body and files together
+        let Ok(limit) = crate::blobs::attachment_limit(&hub.cfg) else {
+            return refuse(StatusCode::SERVICE_UNAVAILABLE, "attachment limit configuration is invalid");
+        };
+        let files: i64 = metas.iter().map(|m| m["bytes"].as_i64().unwrap_or(0)).sum();
+        let total = body_bytes.unwrap_or(text.len() as i64) + files;
+        if total as u64 > limit {
+            return Err(ApiError::Body(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({
+                    "detail": format!("message exceeds hub limit of {limit} bytes (body and attachments come to {total})"),
+                    "max_message_bytes": limit,
+                }),
+            ));
+        }
+    }
     let inserted = if known {
         None
     } else {
         db::query_opt(
             &tx,
-            "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments, reply_to)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING n",
-            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas), &reply_to],
+            "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments, reply_to,
+                                   body_bytes, body_part)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING RETURNING n",
+            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas), &reply_to, &body_bytes, &body_part],
         )
         .await?
     };
     let fresh = inserted.is_some();
     let received = if let Some(row) = inserted {
         db::execute(&tx, "UPDATE attachments SET message_id = $1 WHERE id = ANY($2)", &[&mid, &lookup]).await?;
+        if let Some(l) = &long {
+            l.bind(&tx, &mid, &frm).await?;
+        }
         // G1: both sides' devices see it (last: this holds the logs' heads)
         sync::log_changes(&tx, vec![(frm.clone(), row.get(0)), (to.clone(), row.get(0))]).await?;
         received
@@ -493,12 +597,97 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         db::query_one(&tx, "SELECT received_at FROM messages WHERE id = $1", &[&mid]).await?.get(0)
     };
     tx.commit().await?;
+    if let (true, Some(l)) = (fresh, long.as_mut()) {
+        l.keep();
+    }
     mark_seen(hub, &c, std::slice::from_ref(&frm)).await?;
     if fresh {
         hub.presence.wake([to.as_str()]);
         hub.presence.wake_sync([frm.as_str()]);
     }
     ok(json!({ "id": mid, "received_at": clock::iso(received), "duplicate": !fresh }))
+}
+
+/// A body too long for its row (G6): in a file under blobs/, an attachments
+/// row the message binds. Either the hub wrote it from the JSON body, or the
+/// sender uploaded it and named it `body_part`.
+struct LongBody {
+    part: String,
+    bytes: i64,
+    /// the first 20,000 characters, kept in the row
+    preview: String,
+    uploaded: bool,
+    /// a file this send wrote: removed unless the message came to exist
+    written: Option<crate::blobs::UploadFiles>,
+}
+
+impl LongBody {
+    #[tracing::instrument(level = "debug", skip(hub, text), fields(bytes = text.len()), err(level = "debug", Debug))]
+    async fn write(hub: &Hub, owner: &str, text: String) -> ApiResult<LongBody> {
+        let dir = hub.cfg.blob_dir();
+        tokio::fs::create_dir_all(&dir).await?;
+        let part = uuid::Uuid::new_v4().simple().to_string();
+        let files = crate::blobs::UploadFiles { partial: dir.join(format!("{part}.part")), final_path: dir.join(&part), committed: false };
+        tokio::fs::write(&files.partial, text.as_bytes()).await?;
+        tokio::fs::rename(&files.partial, &files.final_path).await?;
+        tracing::debug!(owner, part, "long body written");
+        Ok(LongBody { preview: py_prefix(&text, BODY_MAX).to_string(), bytes: text.len() as i64, part, uploaded: false, written: Some(files) })
+    }
+
+    /// An upload named as the body: the sender's own, not bound to another
+    /// message, UTF-8 text without NUL (read through once, never whole).
+    #[tracing::instrument(level = "debug", skip(hub), err(level = "debug", Debug))]
+    async fn uploaded(hub: &Hub, owner: &str, part: &str) -> ApiResult<LongBody> {
+        let unknown = || refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("unknown body_part {}", py_repr_str(part)));
+        if part.contains('\0') {
+            return unknown();
+        }
+        let c = hub.db.get().await?;
+        let Some(row) = db::query_opt(&c, "SELECT owner_slug, bytes FROM attachments WHERE id = $1", &[&part]).await? else {
+            return unknown();
+        };
+        drop(c);
+        if row.get::<_, String>(0) != owner {
+            return unknown();
+        }
+        let Some(path) = crate::blobs::blob_path(&hub.cfg.blob_dir(), part) else { return unknown() };
+        let Ok(file) = tokio::fs::File::open(&path).await else { return unknown() };
+        let preview = match crate::wire::read_text_preview(file, BODY_MAX).await? {
+            crate::wire::TextCheck::Text(preview) => preview,
+            crate::wire::TextCheck::NotUtf8 => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "body_part is not UTF-8 text"),
+            crate::wire::TextCheck::Nul => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "body_part contains a NUL character"),
+        };
+        Ok(LongBody { part: part.to_string(), bytes: row.get(1), preview, uploaded: true, written: None })
+    }
+
+    /// Bind the body to its (new) message, inside the send's transaction.
+    async fn bind(&self, tx: &impl GenericClient, mid: &str, owner: &str) -> ApiResult<()> {
+        if self.uploaded {
+            let n = db::execute(
+                tx,
+                "UPDATE attachments SET message_id = $1 WHERE id = $2 AND (message_id IS NULL OR message_id = '' OR message_id = $1)",
+                &[&mid, &self.part],
+            )
+            .await?;
+            if n == 0 {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("body_part {} already bound", py_repr_str(&self.part)));
+            }
+        } else {
+            db::execute(
+                tx,
+                "INSERT INTO attachments (id, owner_slug, name, bytes, created_at, message_id) VALUES ($1, $2, 'body.txt', $3, $4, $5)",
+                &[&self.part, &owner, &self.bytes, &clock::now(), &mid],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn keep(&mut self) {
+        if let Some(f) = self.written.as_mut() {
+            f.committed = true;
+        }
+    }
 }
 
 // ------------------------------------------------------------------ receipts

@@ -14,7 +14,7 @@ use deadpool_postgres::GenericClient;
 use http::StatusCode;
 use serde_json::{json, Map, Value};
 
-use super::mail::{authed, envelope, mark_seen, one_address, ENVELOPE_COLS};
+use super::mail::{caller, envelope_v2, mark_seen, ENVELOPE_COLS};
 use super::{ok, refuse, sync, ApiResult, Hub, Req};
 use crate::blobs::blob_path;
 use crate::clock;
@@ -30,25 +30,11 @@ const DELETE_BATCH: i64 = 1000;
 /// A message as history shows it: poll's envelope plus its receipt ladder
 /// (`received_at` is in the envelope).
 fn with_ladder(r: &tokio_postgres::Row) -> Map<String, Value> {
-    let mut m = envelope(r);
+    let mut m = envelope_v2(r);
     m.insert("fetched_at".into(), json!(r.get::<_, Option<DateTime<Utc>>>("fetched_at").map(clock::iso)));
     m.insert("delivered_at".into(), json!(r.get::<_, Option<String>>("delivered_at")));
     m.insert("read_at".into(), json!(r.get::<_, Option<String>>("read_at")));
     m
-}
-
-/// The address a GET or DELETE acts for (`?slug=` when several sign in).
-/// The request is read before the future starts, so it does not borrow it.
-fn caller<'a>(hub: &'a Hub, req: &Req) -> impl std::future::Future<Output = ApiResult<String>> + Send + 'a {
-    let asked = req.query("slug").map(|s| Value::String(s.to_string()));
-    let auth = authed(hub, req);
-    async move {
-        let slugs = auth.await?;
-        if slugs.is_empty() {
-            return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
-        }
-        one_address(&slugs, asked.as_ref())
-    }
 }
 
 /// `GET /api/conversations[?slug=]`: one row per address the caller has

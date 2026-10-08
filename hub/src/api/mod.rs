@@ -206,6 +206,7 @@ enum Route {
     Conversations,
     History,
     DeleteMessage,
+    MessageBody,
     DeleteConversation,
     Health,
     Index,
@@ -243,10 +244,14 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
                 (Download, Method::GET)
             } else if let Some(id) = p.strip_prefix("/api/messages/") {
                 // a message id is the client's: everything after the prefix
+                // (G6: `.../body` read with GET is the message's whole body)
                 if id.is_empty() {
                     return None;
                 }
-                (DeleteMessage, Method::DELETE)
+                match id.strip_suffix("/body") {
+                    Some(mid) if !mid.is_empty() && *method == Method::GET => (MessageBody, Method::GET),
+                    _ => (DeleteMessage, Method::DELETE),
+                }
             } else if let Some(with) = p.strip_prefix("/api/conversations/") {
                 if with.is_empty() || with.contains('/') {
                     return None;
@@ -368,6 +373,10 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::DeleteMessage => {
             let id = req.path.strip_prefix("/api/messages/").unwrap_or_default().to_string();
             history::delete_message(hub, req, &id).await
+        }
+        Route::MessageBody => {
+            let id = req.path.strip_prefix("/api/messages/").and_then(|p| p.strip_suffix("/body")).unwrap_or_default().to_string();
+            files::message_body(hub, req, &id).await
         }
         Route::DeleteConversation => {
             let with = req.path.strip_prefix("/api/conversations/").unwrap_or_default().to_string();

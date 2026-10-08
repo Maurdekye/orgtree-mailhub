@@ -629,11 +629,16 @@ async fn sec_send(t: &mut Tally, c: &Ctx) {
     })
     .await;
 
-    t.check("the body is truncated at 20000", async {
+    // v1 cut the stored body at 20000; v2 keeps it whole and a v1 poll is
+    // told it continues (G6, ruling 8 October: never a silent cut)
+    t.check("a body over 20000 is kept whole; v1's poll shows 20000 and says it continues", async {
         let (me, s) = (c.org().await, c.org().await);
         let mid = c.send(&s, &me.0, &"x".repeat(25000), json!({})).await.json()["id"].as_str().unwrap().to_string();
         let got: String = c.rows("SELECT body FROM messages WHERE id = $1", &[&mid]).await[0].get(0);
-        ensure!(got.chars().count() == mailhub::api::mail::BODY_MAX && mailhub::api::mail::BODY_MAX == 20000, "{}", got.len());
+        ensure!(got.len() == 25000 && mailhub::api::mail::BODY_MAX == 20000, "{}", got.len());
+        let p = Call::new("POST", "/api/poll?wait=0").auth(pair(&me.0, &me.1)).send(&c.hub).await.json();
+        let body = p["messages"][0]["body"].as_str().unwrap_or("").to_string();
+        ensure!(body == format!("{}{}", "x".repeat(20000), mailhub::api::mail::continues_line(25000)), "{}", body.len());
         Ok(())
     })
     .await;
