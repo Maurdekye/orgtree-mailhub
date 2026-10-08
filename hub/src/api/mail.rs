@@ -42,12 +42,24 @@ pub fn continues_line(total_bytes: i64) -> String {
 
 /// The client kinds an address registers as. v1 knew org and chat (and
 /// stored anything else as org); v2 adds person (G2). Fixed at the first
-/// registration.
+/// registration, except that a chat may become a person (`kept_kind`).
 pub fn register_kind(asked: &str) -> &'static str {
     match asked {
         "chat" => "chat",
         "person" => "person",
         _ => "org",
+    }
+}
+
+/// The kind a re-registration leaves an address with: the first one, except
+/// that a chat asking to be a person becomes one. Hubchat registered its
+/// people as chats on v1 hubs, which had no person kind; nothing else
+/// changes kind (no person to chat, nothing into or out of org).
+pub fn kept_kind<'a>(stored: &'a str, asked: &'a str) -> &'a str {
+    if stored == "chat" && asked == "person" {
+        "person"
+    } else {
+        stored
     }
 }
 
@@ -266,7 +278,12 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let mut c = hub.db.get().await?;
     let mut changed = false;
     for _ in 0..3 {
-        let row = db::query_opt(&c, "SELECT fingerprint, org_name, username, blurb FROM identities WHERE slug = $1", &[&slug]).await?;
+        let row = db::query_opt(
+            &c,
+            "SELECT fingerprint, org_name, username, blurb, kind, shared_key_enabled FROM identities WHERE slug = $1",
+            &[&slug],
+        )
+        .await?;
         let Some(row) = row else {
             // first write wins the address
             let tx = c.transaction().await?;
@@ -290,18 +307,28 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         if !auth::ct_eq(stored.as_bytes(), fp.as_bytes()) {
             return refuse(StatusCode::FORBIDDEN, "slug is owned by another identity");
         }
-        // re-registration refreshes the display fields (never the kind); one
-        // that changes nothing leaves the roster's order alone
-        if (row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3)) == (org_name.clone(), username.clone(), blurb.clone()) {
+        // registering is a use of the shared secret, which stops working once
+        // the address turns it off or rotates its identity key (G5)
+        if !row.get::<_, bool>(5) {
+            return refuse(StatusCode::UNAUTHORIZED, "this address no longer accepts its shared secret");
+        }
+        // re-registration refreshes the display fields, and the kind only as
+        // `kept_kind` allows; one that changes nothing leaves the roster's
+        // order alone
+        let stored_kind: String = row.get(4);
+        let kind_now = kept_kind(&stored_kind, kind);
+        if (row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3)) == (org_name.clone(), username.clone(), blurb.clone())
+            && kind_now == stored_kind
+        {
             break;
         }
         let tx = c.transaction().await?;
         sync::roster_lock(&tx).await?;
         let updated = db::execute(
             &tx,
-            "UPDATE identities SET org_name = $2, username = $3, blurb = $4, roster_seq = nextval('roster_seq')
+            "UPDATE identities SET org_name = $2, username = $3, blurb = $4, kind = $6, roster_seq = nextval('roster_seq')
               WHERE slug = $1 AND fingerprint = $5",
-            &[&slug, &org_name, &username, &blurb, &fp],
+            &[&slug, &org_name, &username, &blurb, &fp, &kind_now],
         )
         .await?;
         tx.commit().await?;

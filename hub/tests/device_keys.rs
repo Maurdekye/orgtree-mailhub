@@ -241,12 +241,20 @@ async fn device_keys() {
     assert_eq!(enrol(&hub, &carol.0, "cphone", &cphone, &cid).await.code(), 200);
     assert_eq!(off(pair(&carol.0, &carol.1)).await.code(), 200);
     assert_eq!(Call::new("GET", "/api/roster").auth(pair(&carol.0, &carol.1)).send(&hub).await.code(), 401);
+    let again = Call::new("POST", "/api/register")
+        .auth(pair(&carol.0, &carol.1))
+        .json(json!({ "slug": carol.0, "org_name": "taken over", "username": "keys", "kind": "person" }))
+        .send(&hub)
+        .await;
+    assert_eq!((again.code(), again.json()["detail"].clone()), (401, json!("this address no longer accepts its shared secret")));
+    let roster = Call::new("GET", "/api/roster").auth(token(&carol.0, "cphone", &cphone, 0)).send(&hub).await.json();
+    assert!(roster["roster"].as_array().unwrap().iter().any(|r| r["slug"] == json!(carol.0) && r["org_name"] == json!("carol")), "{roster}");
     assert_eq!(Call::new("GET", "/api/roster").auth(token(&carol.0, "cphone", &cphone, 0)).send(&hub).await.code(), 200);
     let r = Call::new("POST", "/api/identity").auth(token(&carol.0, "cphone", &cphone, 0)).json(json!({ "shared_key": true })).send(&hub).await;
     assert_eq!(r.code(), 422, "the shared key came back on");
     let h = Call::new("GET", "/healthz").send(&hub).await.json();
     assert!(h["features"].as_array().unwrap().contains(&json!("device_keys")));
-    println!("  ok  the owner can turn the shared key off for good once a device has its own key");
+    println!("  ok  the owner can turn the shared key off for good once a device has its own key (registering with it is refused too)");
 
     let _ = std::fs::remove_dir_all(&data);
     drop(pg);

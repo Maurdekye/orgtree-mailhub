@@ -54,11 +54,45 @@ async fn people_and_replies() {
         let r = register(&hub, &o, json!({ "kind": asked })).await;
         assert_eq!(row(&r.json()["roster"], &o.0)["kind"], stored, "kind {asked:?}");
     }
+    // the one change of kind: a chat that registers again as a person (a
+    // Hubchat person registered as a chat on a v1 hub). A device syncing
+    // elsewhere sees the change; nothing else changes kind.
+    let watcher = new_id("watcher");
+    register(&hub, &watcher, json!({ "kind": "org" })).await;
+    let sync = |cursor: Value| {
+        let hub = hub.clone();
+        let auth = pair(&watcher.0, &watcher.1);
+        async move { Call::new("POST", "/api/sync").auth(auth).json(json!({ "device_id": "w1", "cursor": cursor, "wait": 0 })).send(&hub).await.json() }
+    };
+    let mut cursor = Value::Null;
+    loop {
+        let s = sync(cursor.clone()).await;
+        cursor = s["cursor"].clone();
+        if s["more"] != json!(true) {
+            break;
+        }
+    }
+    let pat = new_id("pat");
+    assert_eq!(row(&register(&hub, &pat, json!({ "kind": "chat" })).await.json()["roster"], &pat.0)["kind"], "chat");
+    let s = sync(cursor.clone()).await;
+    cursor = s["cursor"].clone();
+    let up = register(&hub, &pat, json!({ "kind": "person" })).await;
+    assert_eq!(up.code(), 200, "{}", up.text());
+    assert_eq!(row(&up.json()["roster"], &pat.0)["kind"], "person", "a chat did not become a person");
+    let seen = sync(cursor).await;
+    assert_eq!(row(&seen["roster"], &pat.0)["kind"], "person", "a syncing device missed the change: {seen}");
+    assert_eq!(row(&register(&hub, &pat, json!({ "kind": "chat" })).await.json()["roster"], &pat.0)["kind"], "person", "a person became a chat");
+    for (first, then) in [("org", "person"), ("org", "chat"), ("chat", "org"), ("person", "org")] {
+        let o = new_id("k2");
+        register(&hub, &o, json!({ "kind": first })).await;
+        let r = register(&hub, &o, json!({ "kind": then })).await;
+        assert_eq!(row(&r.json()["roster"], &o.0)["kind"], first, "{first} became {then}");
+    }
     let ui = Call::new("GET", "/ui/data").send(&hub).await.json();
     assert_eq!(row(&ui["orgs"], &ann.0)["kind"], "person");
     let page = Call::new("GET", "/").send(&hub).await.text();
     assert!(page.contains("k-person"), "the hub's page does not style the person kind");
-    println!("  ok  person kind: registered, fixed at the first registration, shown in roster, /ui/data and the page");
+    println!("  ok  person kind: registered, fixed at the first registration but for chat -> person (seen by sync), shown in roster, /ui/data and the page");
 
     // ----------------------------------------------------------- G2 profile
     let bob = new_id("bob");

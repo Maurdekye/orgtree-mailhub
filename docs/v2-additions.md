@@ -16,8 +16,14 @@ New routes take a JSON object body and refuse anything else with
 `/api/register` accepts `"kind": "person"` beside `"org"` and `"chat"`; any
 other value (including `"PERSON"`) is stored as `"org"`, as v1 did. The kind is
 fixed at the first registration, as v1 fixed it: registering again with
-another kind keeps the first. The roster, `/ui/data` and the hub's page show
-it (the page gives a person a neutral border and a `person` tag).
+another kind keeps the first, with one exception. An address registered as
+`"chat"` that registers again (with its own secret) as `"person"` becomes a
+person: Hubchat registered its people as chats on v1 hubs, which had no person
+kind, and a client that sends `"person"` on every connect fixes itself on its
+next one. The change reaches every client like any roster change (poll, sync,
+roster). Nothing else changes kind: not person to chat, nothing into or out of
+`"org"`. The roster, `/ui/data` and the hub's page show it (the page gives a
+person a neutral border and a `person` tag).
 
 ## Profiles (G2)
 
@@ -406,6 +412,15 @@ key_version=<current key_version + 1>
 **5. The shared key off**: `POST /api/identity {"shared_key": false}` turns
 the shared v1 secret off for good, once at least one device has its own key
 (422 before; `true` is refused).
+
+Once the shared secret stops working (turned off, or the identity key rotated
+by signing a device out), registering with it is refused too: `POST
+/api/register` answers 401 `this address no longer accepts its shared
+secret` and changes nothing. A device never needs `/api/register`
+(`/api/register` only ever takes the shared secret: it claims an address by
+that secret's fingerprint). Every signed call (a sync, a profile change)
+counts as the address being seen, a parked sync keeps it online, and `POST
+/api/profile` changes its name and about line.
 
 `GET /api/devices` also shows each device's `public_key` (null for a device
 that only syncs with the shared secret) and `signed_out_at`.
