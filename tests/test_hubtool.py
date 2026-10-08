@@ -1128,6 +1128,110 @@ def sec_migration() -> None:
           "migration is idempotent", _alter_adds_the_column_and_keeps_the_rows)
 
 
+def sec_default_hub() -> None:
+    print("\n§7  the machine's default hub (what the one-line installer sets)")
+
+    def without_env(fn):
+        """Run fn with MAILHUB_URL unset (the harness sets it for every
+        other section), then put it back."""
+        def run():
+            saved = os.environ.pop("MAILHUB_URL", None)
+            try:
+                fn()
+            finally:
+                if saved is not None:
+                    os.environ["MAILHUB_URL"] = saved
+        return run
+
+    def _addresses_are_normalized_like_addhub():
+        fresh_ident()
+        for typed, stored in (("home-pc", "http://home-pc:7370"),
+                              ("home-pc:8000", "http://home-pc:8000"),
+                              ("100.64.0.7", "http://100.64.0.7:7370"),
+                              ("https://xyz.trycloudflare.com/",
+                               "https://xyz.trycloudflare.com")):
+            out = hubtool.default_hub(typed)
+            assert out.get("default_hub") == stored, (typed, out)
+            assert out.get("source") == "stored", out
+            assert hubtool._stored_default_hub() == stored
+    check("defaulthub · a bare host or host:port is stored as http + 7370, "
+          "https as typed", without_env(_addresses_are_normalized_like_addhub))
+
+    def _requests_go_where_the_default_points():
+        fresh_ident()
+        hubtool.default_hub("other-hub.test:7399")
+        hubtool._ident("default-user")
+        assert hubtool._hubs(ident_file()) == ["http://other-hub.test:7399"]
+        WIRE.clear()
+        hubtool.register()
+        assert WIRE and WIRE[0][0] == \
+            "http://other-hub.test:7399/api/register", WIRE[:1]
+        os.environ["MAILHUB_URL"] = "http://env-hub.test"
+        assert hubtool._hubs(ident_file()) == ["http://env-hub.test"], \
+            "MAILHUB_URL must win over the stored default"
+        note = hubtool.default_hub().get("note", "")
+        assert "MAILHUB_URL" in note and "other-hub.test" in note, note
+        del os.environ["MAILHUB_URL"]
+        # addhub writes the identity's own list (the default it was using
+        # first, then the new hub); a later default change leaves it alone
+        hubtool._hubs_edit("default-user", add="own-hub.test")
+        own = ["http://other-hub.test:7399", "http://own-hub.test:7370"]
+        assert hubtool._hubs(ident_file()) == own, hubtool._hubs(ident_file())
+        hubtool.default_hub("moved-hub.test")
+        assert hubtool._hubs(ident_file()) == own, \
+            "an identity's own list must win over a changed default"
+    check("defaulthub · an identity without a list of its own uses it; "
+          "MAILHUB_URL and the identity's own list win over it",
+          without_env(_requests_go_where_the_default_points))
+
+    def _clear_falls_back_to_the_local_hub():
+        fresh_ident()
+        hubtool.default_hub("home-pc")
+        out = hubtool.default_hub("--clear")
+        assert out.get("cleared") is True, out
+        assert out.get("default_hub") == "http://127.0.0.1:7370", out
+        assert out.get("source") == "built-in", out
+        assert hubtool._stored_default_hub() == ""
+    check("defaulthub · --clear forgets it and the local hub is used again",
+          without_env(_clear_falls_back_to_the_local_hub))
+
+    def _malformed_addresses_store_nothing():
+        fresh_ident()
+        hubtool.default_hub("home-pc")
+        for bad in ("ftp://home-pc", "home pc", "home-pc:port",
+                    "http://", "https://hub.test/?x=1"):
+            out = hubtool.default_hub(bad)
+            assert "error" in out, (bad, out)
+            assert hubtool._stored_default_hub() == "http://home-pc:7370", bad
+        saved = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            rc = hubtool.cli(["defaulthub", "ftp://home-pc"])
+            printed = sys.stdout.getvalue()
+        finally:
+            sys.stdout = saved
+        assert rc == 1 and "not a hub address" in printed, (rc, printed)
+    check("defaulthub · a malformed address is refused, nothing is stored, "
+          "and the verb exits 1", without_env(_malformed_addresses_store_nothing))
+
+    def _reachability_is_reported():
+        fresh_ident()
+        out = hubtool.default_hub()             # MAILHUB_URL = the test hub
+        assert out.get("source") == "MAILHUB_URL", out
+        assert out.get("reachable") is True, out
+        assert out.get("hub_name") == "test-hub", out
+        os.environ.pop("MAILHUB_URL")
+        try:
+            out = hubtool.default_hub("dark-hub.test")
+        finally:
+            os.environ["MAILHUB_URL"] = "http://hub.test"
+        assert out.get("reachable") is False and out.get("warning"), out
+        assert hubtool._stored_default_hub() == "http://dark-hub.test:7370", \
+            "an unreachable hub must still be stored (it may be offline now)"
+    check("defaulthub · says whether the hub answers, and keeps an "
+          "unreachable one", _reachability_is_reported)
+
+
 def main() -> int:
     print("orgtree · FR-06 hub chat clients (hub/hubtool.py)")
     sec_identity()
@@ -1141,6 +1245,7 @@ def main() -> int:
     sec_chat_receipts()
     sec_kind()
     sec_migration()
+    sec_default_hub()
 
     print()
     if GAPS:

@@ -47,9 +47,14 @@ wins, fewest hops; none → refuse naming the hubs searched). Manage the list:
     python hub/hubtool.py addhub <name> <address>
     python hub/hubtool.py drophub <name> <address>
 
-Env: MAILHUB_URL (the BOOTSTRAP hub, default http://127.0.0.1:7370 — used
-until the identity carries its own list) · MAILHUB_NAME (pre-seeds /
-selects the name; the listener requires one).
+The BOOTSTRAP hub, used until an identity carries its own list: MAILHUB_URL
+when the process has it, else this machine's stored default, else
+http://127.0.0.1:7370. The one-line installer (README: Connect an agent
+session) stores the default, so the MCP server and a listener started by hand
+agree without sharing an environment:
+    python hub/hubtool.py defaulthub [<address>|--clear]
+Env: MAILHUB_URL (see above) · MAILHUB_NAME (pre-seeds / selects the name;
+the listener requires one).
 """
 
 from __future__ import annotations
@@ -81,6 +86,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]  # TextIO stub lacks reconfigure; runtime TextIOWrapper has it (hasattr-guarded, the externtool.py pattern)
 
 HUB = os.environ.get("MAILHUB_URL", "http://127.0.0.1:7370").rstrip("/")
+_LOCAL_HUB = "http://127.0.0.1:7370"
+_DEFAULT_HUB_KEY = "default_hub"       # the settings row `defaulthub` writes
 _ID_DIR = os.path.expanduser("~/.orgtree/hub-clients")
 _RING_LOCK = threading.Lock()    # the listener's threads share the id file
 
@@ -114,7 +121,33 @@ def _hubs(d: dict[str, Any]) -> list[str]:
     operator pointed us."""
     hs = [str(h).rstrip("/") for h in cast("list[Any]", d.get("hubs") or [])]
     hs = [h for h in hs if h]
-    return hs or [HUB]
+    return hs or [_bootstrap()]
+
+
+def _bootstrap() -> str:
+    """The hub an identity with no list of its own uses: MAILHUB_URL when
+    this process has it (an operator's explicit choice, passed through
+    untouched), else this machine's stored default (`defaulthub <address>`,
+    which the one-line installer sets, so the MCP server and a listener
+    started by hand agree without sharing an environment), else the local
+    hub. Read at call time: a re-run installer applies without a restart."""
+    env = os.environ.get("MAILHUB_URL", "").strip().rstrip("/")
+    return env or _stored_default_hub() or _LOCAL_HUB
+
+
+def _stored_default_hub() -> str:
+    try:
+        con = _db()
+    except (OSError, sqlite3.Error):
+        return ""
+    try:
+        row = con.execute("SELECT value FROM settings WHERE key = ?",
+                          (_DEFAULT_HUB_KEY,)).fetchone()
+        return str(row["value"]).rstrip("/") if row else ""
+    except sqlite3.Error:
+        return ""
+    finally:
+        con.close()
 
 
 def _local_first(hubs: list[str]) -> list[str]:
@@ -178,6 +211,10 @@ CREATE TABLE IF NOT EXISTS migrations (
   sha256      TEXT NOT NULL,
   state       TEXT NOT NULL,            -- imported | duplicate | conflict
   migrated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,               -- default_hub: see _bootstrap()
+  value TEXT NOT NULL
 );
 """
 
@@ -970,6 +1007,87 @@ def _hubs_edit(name: str, add: str = "",
     return res
 
 
+def _bad_hub_address(addr: str) -> str:
+    """Why a NORMALIZED address cannot be a hub's, or '' when it can."""
+    if not addr or any(c.isspace() for c in addr):
+        return "it is empty or contains spaces"
+    try:
+        u = urllib.parse.urlsplit(addr)
+        _ = u.port                       # a non-numeric port raises here
+    except ValueError as e:
+        return str(e)
+    if u.scheme not in ("http", "https"):
+        return f"the scheme must be http or https, not {u.scheme!r}"
+    if not u.hostname:
+        return "it names no host"
+    if u.query or u.fragment:
+        return "a hub address has no ?query or #fragment"
+    return ""
+
+
+def _probe(hub: str) -> dict[str, Any]:
+    """One GET /healthz: who answers at `hub`, or why nothing does."""
+    try:
+        req = urllib.request.Request(hub + "/healthz", method="GET")
+        with urllib.request.urlopen(req, timeout=5.0) as r:
+            h = cast("dict[str, Any]", json.loads(r.read().decode() or "{}"))
+    except Exception as e:                                       # noqa: BLE001
+        return {"reachable": False,
+                "warning": f"{hub} did not answer as a mail hub just now "
+                           f"({str(e)[:160]}); the setting stands and "
+                           f"hubtool uses it once the hub answers"}
+    out: dict[str, Any] = {"reachable": True}
+    for k in ("name", "version"):
+        if h.get(k):
+            out[f"hub_{k}"] = str(h[k])
+    return out
+
+
+def default_hub(arg: str | None = None) -> dict[str, Any]:
+    """This machine's default hub, the one an identity without a list of its
+    own uses (_bootstrap). No argument shows it; an address stores it,
+    normalized as addhub does (bare host or host:port means http and 7370,
+    https stays as typed); `--clear` forgets it. The resulting hub is probed
+    once, so the caller (the one-line installer, or a person) learns now
+    whether it answers. An identity's own list still wins, and MAILHUB_URL
+    in the environment wins over the stored default."""
+    res: dict[str, Any] = {}
+    if arg == "--clear":
+        con = _db()
+        try:
+            con.execute("DELETE FROM settings WHERE key = ?",
+                        (_DEFAULT_HUB_KEY,))
+            con.commit()
+        finally:
+            con.close()
+        res["cleared"] = True
+    elif arg:
+        addr = _norm_hub(arg)
+        bad = _bad_hub_address(addr)
+        if bad:
+            return {"error": f"{arg!r} is not a hub address: {bad}. Use "
+                             f"host, host:port, http://host:port or "
+                             f"https://host"}
+        con = _db()
+        try:
+            con.execute("INSERT INTO settings (key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (_DEFAULT_HUB_KEY, addr))
+            con.commit()
+        finally:
+            con.close()
+    env = os.environ.get("MAILHUB_URL", "").strip().rstrip("/")
+    stored = _stored_default_hub()
+    hub = _bootstrap()
+    res["default_hub"] = hub
+    res["source"] = "MAILHUB_URL" if env else "stored" if stored else "built-in"
+    if env and stored and env != stored:
+        res["note"] = (f"MAILHUB_URL={env} is set in this environment and "
+                       f"wins over the stored default {stored}")
+    res.update(_probe(hub))
+    return res
+
+
 # ──────────────────────────────────────────────────────────── the MCP server
 
 TOOLS: list[dict[str, Any]] = [
@@ -1296,6 +1414,10 @@ def cli(argv: list[str]) -> int:
                          remove=argv[2] if verb == "drophub" else "")
         print(json.dumps(out), flush=True)
         return 1 if out.get("error") else 0
+    if verb == "defaulthub":
+        out = default_hub(argv[1] if len(argv) > 1 else None)
+        print(json.dumps(out), flush=True)
+        return 1 if out.get("error") else 0
     if verb == "hubs":
         d = _ident(argv[1] if len(argv) > 1 else None, mint=False)
         if not d.get("uid"):
@@ -1308,8 +1430,8 @@ def cli(argv: list[str]) -> int:
     # missing — the verb was real, the advertisement was not). A verb added
     # above belongs here in the same commit.
     print("usage: hubtool.py [listen|register|unregister|send|list|fetch|"
-          "hubs|addhub|drophub] …  (no verb = MCP server on stdio)",
-          flush=True)
+          "hubs|addhub|drophub|defaulthub] …  (no verb = MCP server on "
+          "stdio)", flush=True)
     return 2
 
 
