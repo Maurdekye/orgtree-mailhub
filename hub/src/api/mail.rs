@@ -71,15 +71,21 @@ pub fn valid_slug(s: &str) -> bool {
 /// (v1 clients cannot fetch the rest).
 pub fn envelope(r: &tokio_postgres::Row) -> serde_json::Map<String, Value> {
     let body: String = r.get("body");
-    let shown = match r.get::<_, Option<i64>>("body_bytes") {
+    let (shown, cut) = match r.get::<_, Option<i64>>("body_bytes") {
         // a body kept in a file: the row holds its first 20,000 characters
-        Some(total) => body + &continues_line(total),
+        Some(total) => (body + &continues_line(total), Some(total)),
         None if body.len() > BODY_MAX && body.chars().nth(BODY_MAX).is_some() => {
-            format!("{}{}", py_prefix(&body, BODY_MAX), continues_line(body.len() as i64))
+            let total = body.len() as i64;
+            (format!("{}{}", py_prefix(&body, BODY_MAX), continues_line(total)), Some(total))
         }
-        None => body,
+        None => (body, None),
     };
-    envelope_with_body(r, shown)
+    let mut m = envelope_with_body(r, shown);
+    // a client that knows it can fetch the whole body (GET /api/messages/{id}/body)
+    if let Some(total) = cut {
+        m.insert("body_bytes".into(), json!(total));
+    }
+    m
 }
 
 /// The same message as v2's routes (sync, history) carry it: the whole body

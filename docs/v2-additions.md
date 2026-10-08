@@ -221,7 +221,9 @@ A body is kept whole, never cut, up to the hub's limit.
 - **Reading (v1 routes)**: `/api/poll` and the operator page show a body over
   20,000 characters as its first 20,000 characters followed by
   `\n\n[message continues: N bytes — open it in a client that supports long
-  messages]` (N: the whole body's size in bytes). Never a silent cut.
+  messages]` (N: the whole body's size in bytes). Never a silent cut. The
+  envelope then also carries `"body_bytes": N`, so a v1 client that knows the
+  body route can fetch the rest.
 - **The limit** (`max_attachment_bytes`, also reported as
   `max_message_bytes`) bounds one message: its body (UTF-8 bytes) and all its
   attachments together, at most 10 files as before. Over it, 413:

@@ -260,6 +260,9 @@ class Diff:
                 m = CONTINUES.search(b["body"])
                 if m and b["body"][:m.start()] == a["body"] and len(a["body"]) == 20000 and int(m.group(1)) > len(a["body"].encode()):
                     b["body"] = a["body"]
+                    # and the whole body's size beside it, for clients that fetch it
+                    if "body_bytes" not in a and b.get("body_bytes") == int(m.group(1)):
+                        b.pop("body_bytes")
                     self.continuations += 1
         elif isinstance(a, list) and isinstance(b, list):
             return [self.set_aside_continuations(x, y) for x, y in zip(a, b)] + b[len(a):]

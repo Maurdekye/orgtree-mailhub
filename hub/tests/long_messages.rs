@@ -83,6 +83,9 @@ async fn long_messages_arrive_whole() {
     assert_eq!(hist["messages"][0]["body"].as_str().unwrap(), medium);
     let cut = format!("{}{}", &medium[..20000], continues_line(30000));
     assert_eq!(poll_body(&hub, &ann, "medium").await, cut);
+    let p = Call::new("POST", "/api/poll?wait=0").auth(pair(&ann.0, &ann.1)).send(&hub).await.json();
+    let polled = p["messages"].as_array().unwrap().iter().find(|m| m["id"] == "medium").cloned().unwrap();
+    assert_eq!(polled["body_bytes"], 30000, "a cut body did not say how long it is");
     let ui = Call::new("GET", &format!("/ui/messages?org={}", ann.0)).send(&hub).await.json();
     assert_eq!(ui["messages"][0]["body"].as_str().unwrap(), cut);
     let r = Call::new("GET", "/api/messages/medium/body").auth(pair(&ann.0, &ann.1)).send(&hub).await;
