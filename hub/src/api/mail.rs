@@ -8,6 +8,7 @@ use deadpool_postgres::GenericClient;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use super::sync;
 use super::{ok, refuse, ApiError, ApiResult, Hub, Req};
 use crate::auth;
 use crate::clock;
@@ -83,17 +84,45 @@ const ROSTER_COLS: &str = "slug, org_name, username, blurb, last_seen, kind";
 
 /// One roster row as v1 sent it (presence from this process).
 pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {
-    let slug: String = r.get(0);
-    let kind: String = r.get(5);
+    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5))
+}
+
+pub fn roster_json(
+    hub: &Hub,
+    slug: &str,
+    org_name: String,
+    username: String,
+    blurb: String,
+    last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    kind: String,
+) -> Value {
     json!({
         "slug": slug,
-        "org_name": r.get::<_, String>(1),
-        "username": r.get::<_, String>(2),
-        "blurb": r.get::<_, String>(3),
-        "online": hub.presence.online(&slug),
-        "last_seen": r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(4).map(clock::iso),
+        "org_name": org_name,
+        "username": username,
+        "blurb": blurb,
+        "online": hub.presence.online(slug),
+        "last_seen": last_seen.map(clock::iso),
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
     })
+}
+
+/// The one address a v2 call acts for: the `slug` asked for, which the
+/// header must sign in, or else the only address it signs in.
+pub(super) fn one_address(slugs: &[String], asked: Option<&Value>) -> ApiResult<String> {
+    match asked {
+        Some(Value::String(s)) if slugs.contains(s) => Ok(s.clone()),
+        Some(Value::Null) | None => {
+            let mut distinct = slugs.to_vec();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() != 1 {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "several addresses signed in: name the one to use (slug)");
+            }
+            Ok(distinct.remove(0))
+        }
+        Some(_) => refuse(StatusCode::UNAUTHORIZED, "no valid credentials for that address"),
+    }
 }
 
 /// One address's roster row, if it is registered.
@@ -161,35 +190,56 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let org_name = pg_text(str_field(&body, "org_name"));
     let username = pg_text(str_field(&body, "username"));
     let blurb = pg_text(str_field(&body, "blurb"));
-    let c = hub.db.get().await?;
+    let mut c = hub.db.get().await?;
+    let mut changed = false;
     for _ in 0..3 {
-        // first write wins the address
-        let now = clock::now();
-        let inserted = db::execute(
-            &c,
-            "INSERT INTO identities (slug, fingerprint, org_name, username, blurb, registered_at, last_seen, kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $6, $7) ON CONFLICT (slug) DO NOTHING",
-            &[&slug, &fp, &org_name, &username, &blurb, &now, &kind],
-        )
-        .await?;
-        if inserted == 1 {
-            break;
-        }
-        let Some(row) = db::query_opt(&c, "SELECT fingerprint FROM identities WHERE slug = $1", &[&slug]).await? else {
-            continue; // removed in between: claim it again
+        let row = db::query_opt(&c, "SELECT fingerprint, org_name, username, blurb FROM identities WHERE slug = $1", &[&slug]).await?;
+        let Some(row) = row else {
+            // first write wins the address
+            let tx = c.transaction().await?;
+            sync::roster_lock(&tx).await?;
+            let now = clock::now();
+            let inserted = db::execute(
+                &tx,
+                "INSERT INTO identities (slug, fingerprint, org_name, username, blurb, registered_at, last_seen, kind)
+                 VALUES ($1, $2, $3, $4, $5, $6, $6, $7) ON CONFLICT (slug) DO NOTHING",
+                &[&slug, &fp, &org_name, &username, &blurb, &now, &kind],
+            )
+            .await?;
+            tx.commit().await?;
+            if inserted == 1 {
+                changed = true;
+                break;
+            }
+            continue; // claimed in between: whose is it?
         };
         let stored: String = row.get(0);
         if !auth::ct_eq(stored.as_bytes(), fp.as_bytes()) {
             return refuse(StatusCode::FORBIDDEN, "slug is owned by another identity");
         }
-        // re-registration refreshes the display fields (never the kind)
-        db::execute(
-            &c,
-            "UPDATE identities SET org_name = $2, username = $3, blurb = $4 WHERE slug = $1",
-            &[&slug, &org_name, &username, &blurb],
+        // re-registration refreshes the display fields (never the kind); one
+        // that changes nothing leaves the roster's order alone
+        if (row.get::<_, String>(1), row.get::<_, String>(2), row.get::<_, String>(3)) == (org_name.clone(), username.clone(), blurb.clone()) {
+            break;
+        }
+        let tx = c.transaction().await?;
+        sync::roster_lock(&tx).await?;
+        let updated = db::execute(
+            &tx,
+            "UPDATE identities SET org_name = $2, username = $3, blurb = $4, roster_seq = nextval('roster_seq')
+              WHERE slug = $1 AND fingerprint = $5",
+            &[&slug, &org_name, &username, &blurb, &fp],
         )
         .await?;
-        break;
+        tx.commit().await?;
+        if updated == 1 {
+            changed = true;
+            break;
+        }
+        // removed in between: claim it again
+    }
+    if changed {
+        hub.presence.roster_changed();
     }
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let roster = roster(hub, &c).await?;
@@ -207,10 +257,16 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if slugs.is_empty() {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials in X-Org-Auth");
     }
-    let c = hub.db.get().await?;
-    db::execute(&c, "DELETE FROM identities WHERE slug = ANY($1)", &[&slugs]).await?;
+    let mut c = hub.db.get().await?;
+    let tx = c.transaction().await?;
+    sync::roster_lock(&tx).await?;
+    let gone = sync::leave(&tx, &slugs).await?;
+    tx.commit().await?;
     for s in &slugs {
         hub.presence.forget(s);
+    }
+    if !gone.is_empty() {
+        hub.presence.roster_changed();
     }
     ok(json!({ "unregistered": slugs }))
 }
@@ -419,14 +475,16 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         db::query_opt(
             &tx,
             "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments, reply_to)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING received_at",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING n",
             &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas), &reply_to],
         )
         .await?
     };
     let fresh = inserted.is_some();
-    let received = if fresh {
+    let received = if let Some(row) = inserted {
         db::execute(&tx, "UPDATE attachments SET message_id = $1 WHERE id = ANY($2)", &[&mid, &lookup]).await?;
+        // G1: both sides' devices see it (last: this holds the logs' heads)
+        sync::log_changes(&tx, vec![(frm.clone(), row.get(0)), (to.clone(), row.get(0))]).await?;
         received
     } else {
         db::query_one(&tx, "SELECT received_at FROM messages WHERE id = $1", &[&mid]).await?.get(0)
@@ -435,6 +493,7 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, std::slice::from_ref(&frm)).await?;
     if fresh {
         hub.presence.wake([to.as_str()]);
+        hub.presence.wake_sync([frm.as_str()]);
     }
     ok(json!({ "id": mid, "received_at": clock::iso(received), "duplicate": !fresh }))
 }
@@ -456,6 +515,9 @@ pub async fn receipts(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let tx = c.transaction().await?;
     let mut recorded = 0usize;
     let mut senders: Vec<String> = Vec::new();
+    let mut recipients: Vec<String> = Vec::new();
+    let mut changed: Vec<(String, i64)> = Vec::new();
+    let mut todo: Vec<(String, &str, String)> = Vec::new();
     for r in &items {
         let Value::Object(r) = r else { return crash("receipts: an entry is not an object") };
         let mid = str_field(r, "id");
@@ -465,22 +527,39 @@ pub async fn receipts(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         let sql = match str_field(r, "state").as_str() {
             "delivered" => {
                 "UPDATE messages SET delivered_at = $1, receipts_pushed = false
-                  WHERE id = $2 AND delivered_at IS NULL AND to_slug = ANY($3) RETURNING from_slug"
+                  WHERE id = $2 AND delivered_at IS NULL AND to_slug = ANY($3) RETURNING from_slug, to_slug, n"
             }
             "read" => {
                 "UPDATE messages SET read_at = $1, receipts_pushed = false
-                  WHERE id = $2 AND read_at IS NULL AND to_slug = ANY($3) RETURNING from_slug"
+                  WHERE id = $2 AND read_at IS NULL AND to_slug = ANY($3) RETURNING from_slug, to_slug, n"
             }
             _ => continue,
         };
         let at = pg_text(get_or(r, "at").map(py_str).unwrap_or_else(clock::now_iso));
-        let rows = db::query(&tx, sql, &[&at, &mid, &slugs]).await?;
-        recorded += rows.len();
-        senders.extend(rows.iter().map(|r| r.get::<_, String>(0)));
+        todo.push((mid, sql, at));
     }
+    // one lock order for every writer, so two devices of one reader sending
+    // the same receipts in different orders cannot deadlock (stable: a
+    // message's own receipts keep their order, and the first still wins)
+    todo.sort_by(|a, b| a.0.cmp(&b.0));
+    for (mid, sql, at) in &todo {
+        let rows = db::query(&tx, sql, &[at, mid, &slugs]).await?;
+        recorded += rows.len();
+        for row in &rows {
+            let (from, to, n): (String, String, i64) = (row.get(0), row.get(1), row.get(2));
+            changed.push((from.clone(), n));
+            changed.push((to.clone(), n));
+            senders.push(from);
+            recipients.push(to);
+        }
+    }
+    // G1: the receipt reaches the sender's devices and the reader's other
+    // devices (read on one is read on all)
+    sync::log_changes(&tx, changed).await?;
     tx.commit().await?;
     mark_seen(hub, &c, &slugs).await?;
     hub.presence.wake(senders.iter().map(String::as_str));
+    hub.presence.wake_sync(recipients.iter().map(String::as_str));
     ok(json!({ "recorded": recorded }))
 }
 
@@ -512,19 +591,7 @@ pub async fn profile(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if slugs.is_empty() {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
-    let slug = match body.get("slug") {
-        Some(Value::String(s)) if slugs.contains(s) => s.clone(),
-        Some(_) => return refuse(StatusCode::UNAUTHORIZED, "no valid credentials for that address"),
-        None => {
-            let mut distinct = slugs.clone();
-            distinct.sort();
-            distinct.dedup();
-            if distinct.len() != 1 {
-                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "several addresses signed in: name the one to update (slug)");
-            }
-            distinct.remove(0)
-        }
-    };
+    let slug = one_address(&slugs, body.get("slug"))?;
     let field = |names: [&str; 2], max: usize, what: &str| -> ApiResult<Option<String>> {
         // `name` wins over its roster spelling `org_name`; a null counts as absent
         let value = names.iter().find_map(|n| body.get(*n).filter(|v| !v.is_null()));
@@ -545,17 +612,22 @@ pub async fn profile(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if name.is_none() && about.is_none() {
         return refuse(StatusCode::UNPROCESSABLE_ENTITY, "nothing to update: give name and/or about");
     }
-    let c = hub.db.get().await?;
+    let mut c = hub.db.get().await?;
+    let tx = c.transaction().await?;
+    sync::roster_lock(&tx).await?;
     let updated = db::execute(
-        &c,
-        "UPDATE identities SET org_name = COALESCE($2, org_name), blurb = COALESCE($3, blurb) WHERE slug = $1",
+        &tx,
+        "UPDATE identities SET org_name = COALESCE($2, org_name), blurb = COALESCE($3, blurb), roster_seq = nextval('roster_seq')
+          WHERE slug = $1",
         &[&slug, &name, &about],
     )
     .await?;
+    tx.commit().await?;
     if updated == 0 {
         // unregistered between the credential check and the update
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
+    hub.presence.roster_changed();
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let me = roster_one(hub, &c, &slug).await?.unwrap_or(Value::Null);
     ok(json!({ "ok": true, "profile": me }))

@@ -37,7 +37,7 @@ X-Org-Auth: <slug>:<secret>
   empty string clears the field (clients then show the address).
 - When the header signs in several addresses, `slug` names the one to change;
   with several and no `slug`: 422 `several addresses signed in: name the one
-  to update (slug)`. A `slug` the header does not sign in: 401
+  to use (slug)`. A `slug` the header does not sign in: 401
   `no valid credentials for that address`. No valid credentials: 401
   `no valid org credentials`.
 - 422 refusals: `name must be a string`, `about must be a string`,
@@ -45,7 +45,7 @@ X-Org-Auth: <slug>:<secret>
   `nothing to update: give name and/or about`.
 - The address, username and kind never change here. The change counts as
   activity (`last_seen`), and every client sees it in the roster of its next
-  poll (and, from slice 2, through sync).
+  poll and through sync.
 - Registering again still sets the name and about line from the register
   body, as in v1: a client that edits its profile should send the current
   values when it registers.
@@ -54,7 +54,7 @@ X-Org-Auth: <slug>:<secret>
 
 `/api/send` accepts an optional `reply_to`: the id of the message this one
 answers. The hub stores it as given and returns it unchanged in poll (and the
-operator view `/ui/messages`; from later slices also sync and history). It is
+operator view `/ui/messages`), sync, and (from a later part) history. It is
 never checked: the message it names may live on another hub or be gone.
 
 - A message sent without `reply_to` (or with `null`) has exactly v1's
@@ -65,3 +65,87 @@ never checked: the message it names may live on another hub or be gone.
   `reply_to is longer than 4096 characters`, `reply_to contains a NUL
   character`. (v1 ignored the key, so a v1-era client that sent a non-string
   `reply_to` would now be refused; none does.)
+
+## Every device gets everything (G1)
+
+One address may be used from several devices, all equal. v1's queue gives a
+message to whichever client acks it first; sync gives every device all of it.
+
+```
+POST /api/sync[?wait=25]
+X-Org-Auth: <slug>:<secret>
+{"device_id": "pixel-7f3a", "device_name": "Ann's Pixel", "cursor": "<from the last answer>", "wait": 25}
+→ 200 {
+  "name": "<hub name>",
+  "cursor": "<opaque: send it with the next sync>",
+  "changes": [{"type": "message", "message": {<envelope>, "delivered_at": null, "read_at": null}}, ...],
+  "roster": [<roster entries that joined or changed>],
+  "roster_removed": ["<addresses that left>"],
+  "online": ["<every address online now>"],      (only when it changed since the cursor)
+  "more": false,
+  "reset": true                                   (only when the cursor was not this hub's; see below)
+}
+```
+
+- **What a device gets**: every message the address received or sent (from
+  any of its devices, and from v1 clients), in the hub's order, with its
+  receipts as they stand now. A message comes again whenever it changes (a
+  `delivered` or `read` receipt), so a device that syncs after a change sees
+  the message once, current. The envelope is poll's (v1 keys, `reply_to`
+  when set) plus `delivered_at` and `read_at` (the receipts' times, or null).
+  Deletions (G4) will arrive as `{"type": "deleted", ...}` changes; clients
+  should ignore change types they do not know.
+- **Receipts**: `POST /api/receipts` is unchanged and counts for the whole
+  address: read on one device is read on all (the first `read` wins, as in
+  v1), and the sender's devices see it. v1 senders still get receipts by poll.
+- **The roster**: the first sync of a device (no cursor) carries the whole
+  roster; later answers carry only entries that joined or changed (name,
+  about line), and `roster_removed` the addresses that left. `online` lists
+  every address online now, whenever that set changed since the cursor;
+  clients treat every other address as offline. Presence alone does not end
+  a parked sync early, so `online` is at most `wait` seconds old.
+- **The cursor** is per device: one device's progress never hides anything
+  from another. Without one (or with `null`/`""`) the device starts from the
+  beginning: its address's whole history, in pages. A cursor this hub could
+  not have written (a database restored from an older backup) starts the
+  device over from the beginning with `"reset": true`; the client should then
+  rebuild its copy rather than merge.
+- **Paging**: at most 500 message changes and 500 roster changes per answer;
+  `more: true` means sync again at once.
+- **Long poll**: as `/api/poll` — `wait` (body, or the query as for poll;
+  default 25, at most 55 seconds) is how long to park when nothing is new.
+  New mail, mail sent from another of the address's devices, a receipt and a
+  roster change end the park at once. A parked sync counts as online.
+- **Custody**: a device's cursor says it holds everything before it, so mail
+  to the address that is still in v1's queue below that cursor is handed over
+  at the device's next sync, as an ack would (v1 senders see `fetched`; v1
+  polls on the same address stop returning it).
+- **Devices**: `device_id` is made by the client: 1-64 printable ASCII
+  characters without spaces, stable per installation. `device_name` (up to
+  64 characters) is optional; when given it replaces the stored name. A
+  device is listed from its first sync; an address keeps at most 100 devices
+  (a new one replaces the one seen longest ago).
+- **Several addresses** in the header: `slug` names the one to sync (422
+  `several addresses signed in: name the one to use (slug)` without it).
+- **Refusals** (422 unless said): `device_id is required`, `device_id must be
+  1 to 64 printable ASCII characters without spaces`, `device_name must be a
+  string`, `device_name is longer than 64 characters`, `cursor is not a sync
+  cursor from this hub`, `wait must be a number of seconds`; 400 for a body
+  that is not a JSON object; 401 without valid credentials.
+- `/api/poll` and `/api/ack` are unchanged: a v1 client on its own address
+  sees exactly v1.
+
+```
+GET /api/devices[?slug=]
+→ 200 {"slug": "...", "devices": [{"device_id", "name", "created_at", "last_seen", "online"}, ...]}
+```
+
+Oldest first. `online`: synced within the last 90 seconds. Unregistering an
+address removes its devices (its mail and change log stay, as v1 kept its
+mail: back with the same key, a device continues from its cursor).
+
+## Telling what a hub supports
+
+`/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
+additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
+`devices` (more as later parts land). A v1 hub reports neither.

@@ -94,6 +94,8 @@ Auth rides one header, never URLs or bodies:
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
 | `GET /api/roster` · `GET /healthz` | roster with presence · liveness |
 | `POST /api/profile` | `{name?, about?, slug?}` — change your display name (≤ 48) and about line (≤ 200) |
+| `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online |
+| `GET /api/devices` | the devices an address syncs from |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).

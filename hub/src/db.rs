@@ -3,8 +3,9 @@
 //!
 //! The hub's tables live in their own schema, `mailhub`, so a hub can share
 //! a database with other software. No statement holds a lock beyond its own
-//! short transaction; the two advisory locks below are startup guards only
-//! (one migration at a time, one hub process per database).
+//! short transaction. Of the advisory locks below, two are startup guards
+//! (one migration at a time, one hub process per database); the third
+//! orders the roster's rare changes (see `ROSTER_LOCK`).
 
 use std::time::Duration;
 
@@ -18,6 +19,11 @@ use crate::config::Config;
 pub const SCHEMA: &str = "mailhub";
 const MIGRATE_LOCK: i64 = 0x6d61_696c_6875_6201; // "mailhub" + 1
 const INSTANCE_LOCK: i64 = 0x6d61_696c_6875_6202;
+/// Taken (for one short transaction) by every roster change before it draws
+/// its `roster_seq`, so the roster's commit order is its seq order and a
+/// directory syncing from a roster cursor never passes over a change that
+/// commits late. Re-registrations that change nothing never take it.
+pub const ROSTER_LOCK: i64 = 0x6d61_696c_6875_6203;
 
 pub type Params<'a> = [&'a (dyn ToSql + Sync)];
 
@@ -26,7 +32,18 @@ pub type Params<'a> = [&'a (dyn ToSql + Sync)];
 const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "v1 records", include_str!("../migrations/0001_v1_records.sql")),
     (2, "reply_to", include_str!("../migrations/0002_reply_to.sql")),
+    (3, "sync", concat!(include_str!("../migrations/0003_sync.sql"), "\n", include_str!("../migrations/sync_backfill.sql"))),
 ];
+
+/// Gives messages that have no change-log entry one (schema 3 does it for
+/// the rows it finds; an import does it for the rows it adds).
+const SYNC_BACKFILL: &str = include_str!("../migrations/sync_backfill.sql");
+
+#[tracing::instrument(level = "debug", skip_all, err(level = "debug", Debug))]
+pub async fn backfill_sync(c: &impl GenericClient) -> Result<(), tokio_postgres::Error> {
+    tracing::debug!(target: "hub::sql", "{}", one_line(SYNC_BACKFILL));
+    c.batch_execute(SYNC_BACKFILL).await
+}
 
 pub fn latest_schema() -> i64 {
     MIGRATIONS.last().map(|m| m.0).unwrap_or(0)

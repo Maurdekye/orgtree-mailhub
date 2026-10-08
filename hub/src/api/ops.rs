@@ -35,8 +35,14 @@ pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
         "queued": row.get::<_, i64>(1),
         "retention_days": hub.cfg.retention_days,
         "max_attachment_bytes": limit,
+        "version": env!("CARGO_PKG_VERSION"),
+        "features": FEATURES,
     }))
 }
+
+/// The protocol additions this hub serves (docs/v2-additions.md), so a
+/// client can tell what a hub supports without probing routes.
+pub const FEATURES: &[&str] = &["person", "profile", "reply_to", "sync", "devices"];
 
 /// v1 read the page in text mode, so line endings reached the browser as
 /// `\n` whatever the checkout's were; the embedded copy is served the same.

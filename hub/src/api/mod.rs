@@ -9,6 +9,7 @@
 pub mod files;
 pub mod mail;
 pub mod ops;
+pub mod sync;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -199,6 +200,8 @@ enum Route {
     Download,
     Roster,
     Profile,
+    Sync,
+    Devices,
     Health,
     Index,
     UiData,
@@ -219,6 +222,8 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/attachments" => (Upload, Method::POST),
         "/api/roster" => (Roster, Method::GET),
         "/api/profile" => (Profile, Method::POST),
+        "/api/sync" => (Sync, Method::POST),
+        "/api/devices" => (Devices, Method::GET),
         "/healthz" => (Health, Method::GET),
         "/" => (Index, Method::GET),
         "/ui/data" => (UiData, Method::GET),
@@ -325,6 +330,8 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Receipts => mail::receipts(hub, req).await,
         Route::Roster => mail::roster_route(hub, req).await,
         Route::Profile => mail::profile(hub, req).await,
+        Route::Sync => sync::sync(hub, req).await,
+        Route::Devices => sync::devices(hub, req).await,
         Route::Upload => files::upload(hub, req).await,
         Route::Download => files::download(hub, req).await,
         Route::Health => ops::healthz(hub).await,

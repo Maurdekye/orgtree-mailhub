@@ -52,6 +52,10 @@ EXPECTED = {
 }
 
 
+# keys v2's /healthz adds beside v1's (checked present, then set aside)
+HEALTHZ_ADDITIONS = ("version", "features")
+
+
 def ID(r: Any) -> str:
     return str(r.json()["id"])
 
@@ -156,6 +160,8 @@ class Diff:
         self.sides = (py, rs)
         self.verbose = verbose
         self.same = 0
+        # answers where v2's additive keys were checked and set aside
+        self.additions = 0
         self.unexpected: list[str] = []
         self.expected_seen: dict[str, str] = {}
         # (path, python status, rust status) of deliberate differences, so
@@ -222,10 +228,23 @@ class Diff:
             v["body"] = body
         return v
 
+    def set_aside_additions(self, va: dict[str, Any], vb: dict[str, Any]) -> None:
+        """v2's /healthz also says what it supports (`version`, `features`:
+        docs/v2-additions.md). Present on v2 and absent on v1, they are set
+        aside so the rest of the answer still compares exactly."""
+        ba, bb = va.get("body"), vb.get("body")
+        if not (isinstance(ba, dict) and isinstance(bb, dict) and "max_attachment_bytes" in bb):
+            return
+        if all(k in bb and k not in ba for k in HEALTHZ_ADDITIONS) and isinstance(bb["features"], list):
+            for k in HEALTHZ_ADDITIONS:
+                bb.pop(k)
+            self.additions += 1
+
     def compare(self, sid: str, a: Any, b: Any, extra: tuple[str, ...], exact: bool = False) -> None:
         keep_nul = sid.startswith("s19")
         va = self.view(self.sides[0], a, extra, keep_nul, exact)
         vb = self.view(self.sides[1], b, extra, keep_nul, exact)
+        self.set_aside_additions(va, vb)
         ja, jb = json.dumps(va, ensure_ascii=False), json.dumps(vb, ensure_ascii=False)
         same = ja == jb
         if not same:
@@ -723,7 +742,8 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 s.proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
-    print(f"\nagree: {d.same} · deliberate differences seen: {len(d.expected_seen)} · UNEXPECTED: {len(d.unexpected)}")
+    print(f"\nagree: {d.same} · deliberate differences seen: {len(d.expected_seen)} · UNEXPECTED: {len(d.unexpected)}"
+          f" · v2 additions set aside in {d.additions} answers (/healthz version, features)")
     for u in d.unexpected:
         print(f"\n✗ {u}")
     return 1 if d.unexpected else 0

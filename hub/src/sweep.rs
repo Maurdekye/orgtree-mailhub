@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde_json::json;
 
-use crate::api::Hub;
+use crate::api::{sync, Hub};
 use crate::blobs::blob_path;
 use crate::clock;
 use crate::db;
@@ -61,38 +61,48 @@ pub async fn run_once(hub: &Hub) -> Result<Swept> {
     }
     let mut messages = 0u64;
     loop {
-        let n = db::execute(
+        // their change-log entries go with them (a device that has a swept
+        // message keeps its copy; one that has not never hears of it)
+        let n: i64 = db::query_one(
             &c,
             &format!(
-                "DELETE FROM messages WHERE n IN
-                   (SELECT n FROM messages WHERE received_at < $1 ORDER BY received_at, n LIMIT {BATCH})"
+                "WITH gone AS (
+                    DELETE FROM messages WHERE n IN
+                      (SELECT n FROM messages WHERE received_at < $1 ORDER BY received_at, n LIMIT {BATCH})
+                    RETURNING n),
+                 logs AS (DELETE FROM mailbox_log WHERE message_n IN (SELECT n FROM gone))
+                 SELECT count(*) FROM gone"
             ),
             &[&cut],
         )
-        .await?;
-        messages += n;
-        if (n as i64) < BATCH {
+        .await?
+        .get(0);
+        messages += n as u64;
+        if n < BATCH {
             break;
         }
     }
     let org_cut = cutoff(hub.cfg.org_retention_days)?;
+    let mut c = c;
+    let tx = c.transaction().await?;
+    sync::roster_lock(&tx).await?;
     // rows a concurrent send holds are skipped this hour, never raced
     let rows = db::query(
-        &c,
-        "WITH cand AS (
-            SELECT slug FROM identities WHERE COALESCE(last_seen, registered_at) < $1
-             ORDER BY slug FOR UPDATE SKIP LOCKED)
-         DELETE FROM identities i USING cand
-          WHERE i.slug = cand.slug
+        &tx,
+        "SELECT slug FROM identities i WHERE COALESCE(last_seen, registered_at) < $1
             AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.state = 'queued' AND m.to_slug = i.slug)
-         RETURNING i.slug",
+          ORDER BY slug FOR UPDATE SKIP LOCKED",
         &[&org_cut],
     )
     .await?;
-    let mut pruned: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
-    pruned.sort();
+    let idle: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+    let pruned = sync::leave(&tx, &idle).await?;
+    tx.commit().await?;
     for s in &pruned {
         hub.presence.forget(s);
+    }
+    if !pruned.is_empty() {
+        hub.presence.roster_changed();
     }
     Ok(Swept { messages, attachments, pruned })
 }

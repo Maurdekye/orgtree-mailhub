@@ -444,6 +444,8 @@ pub async fn import(db: &Db, sqlite: &Path, blob_dir: &Path, mode: Mode) -> Resu
     reader_thread.join().map_err(|_| anyhow::anyhow!("the SQLite reader thread failed"))?;
     db::execute(&txn, "SELECT setval(pg_get_serial_sequence('messages', 'n'), GREATEST((SELECT max(n) FROM messages), 1))", &[])
         .await?;
+    // every imported message reaches its addresses' devices (G1)
+    db::backfill_sync(&txn).await?;
     let modified: Option<DateTime<Utc>> = meta.modified().ok().map(Into::into);
     let report = json!({
         "source": sqlite.display().to_string(),
