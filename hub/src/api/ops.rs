@@ -37,8 +37,12 @@ pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
     }))
 }
 
+/// v1 read the page in text mode, so line endings reached the browser as
+/// `\n` whatever the checkout's were; the embedded copy is served the same.
+static INDEX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| INDEX_HTML.replace("\r\n", "\n").replace('\r', "\n"));
+
 pub fn index() -> Resp {
-    let mut r = Response::new(Body::from(INDEX_HTML));
+    let mut r = Response::new(Body::from(INDEX.as_str()));
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
     r
 }

@@ -220,22 +220,21 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
 
 /// The full app (port 7370): API, health and the operator UI.
 pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
+    if is_websocket(req.headers()) {
+        return websocket_refused();
+    }
     let t0 = Instant::now();
     let slugs = crate::auth::logged_slugs(req.headers().get("x-org-auth"));
     let mut req = Req::new(req);
     let path = req.path.clone();
-    let resp = if is_websocket(&req.headers) {
-        plain(StatusCode::FORBIDDEN, "")
-    } else {
-        match route(&req.method, &path) {
-            Some(Ok(r)) => handle(&hub, r, &mut req).await.unwrap_or_else(ApiError::into_response),
-            Some(Err(allow)) => {
-                let mut r = json(StatusCode::METHOD_NOT_ALLOWED, &serde_json::json!({ "detail": "Method Not Allowed" }));
-                r.headers_mut().insert(header::ALLOW, HeaderValue::from_static(allow));
-                r
-            }
-            None => slash_redirect(&req).unwrap_or_else(|| json(StatusCode::NOT_FOUND, &serde_json::json!({ "detail": "Not Found" }))),
+    let resp = match route(&req.method, &path) {
+        Some(Ok(r)) => handle(&hub, r, &mut req).await.unwrap_or_else(ApiError::into_response),
+        Some(Err(allow)) => {
+            let mut r = json(StatusCode::METHOD_NOT_ALLOWED, &serde_json::json!({ "detail": "Method Not Allowed" }));
+            r.headers_mut().insert(header::ALLOW, HeaderValue::from_static(allow));
+            r
         }
+        None => slash_redirect(&req).unwrap_or_else(|| json(StatusCode::NOT_FOUND, &serde_json::json!({ "detail": "Not Found" }))),
     };
     crate::log::request_line(&path, &slugs, resp.status().as_u16(), t0.elapsed());
     resp
@@ -246,10 +245,10 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
 /// 404 that never reaches it (the operator UI is an unauthenticated view of
 /// all mail).
 pub async fn dispatch_public(hub: Arc<Hub>, req: Request<Body>) -> Resp {
-    let path = wire::decoded_path(req.uri().path());
     if is_websocket(req.headers()) {
-        return plain(StatusCode::FORBIDDEN, "");
+        return websocket_refused();
     }
+    let path = wire::decoded_path(req.uri().path());
     if !(path.starts_with("/api/") || path == "/healthz") {
         let mut r = Response::new(Body::from("not found"));
         *r.status_mut() = StatusCode::NOT_FOUND;
@@ -259,10 +258,18 @@ pub async fn dispatch_public(hub: Arc<Hub>, req: Request<Body>) -> Resp {
     dispatch(hub, req).await
 }
 
-/// A WebSocket handshake. v1 had no WebSocket route and its public wrapper
-/// closed any WebSocket scope; the server then refused the handshake (403).
+/// A WebSocket handshake, on either listener. v1 had no WebSocket route and
+/// its public wrapper closed any WebSocket scope, so the server refused the
+/// handshake — 403, plain text, before the app's request log ever saw it.
 fn is_websocket(h: &http::HeaderMap) -> bool {
     h.get(header::UPGRADE).and_then(|v| v.to_str().ok()).map(|v| v.eq_ignore_ascii_case("websocket")).unwrap_or(false)
+}
+
+fn websocket_refused() -> Resp {
+    let mut r = Response::new(Body::empty());
+    *r.status_mut() = StatusCode::FORBIDDEN;
+    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    r
 }
 
 /// Starlette's `redirect_slashes`: a path that matches no route but whose

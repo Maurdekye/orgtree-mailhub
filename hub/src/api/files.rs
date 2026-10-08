@@ -16,7 +16,7 @@ use super::{ok, refuse, ApiError, ApiResult, Hub, Req};
 use crate::blobs::{self, UploadFiles};
 use crate::clock;
 use crate::db;
-use crate::wire::{latin1, pg_text, py_basename, py_int, py_prefix};
+use crate::wire::{latin1, pg_text, py_basename, py_int, py_prefix, py_strip};
 
 pub async fn upload(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let name = req.query_str("name", "file");
@@ -132,70 +132,198 @@ pub async fn download(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if let Ok(v) = HeaderValue::from_str(&etag) {
         h.insert(header::ETAG, v);
     }
-    let (start, len) = match single_range(req.headers.get(header::RANGE), size) {
-        Range::Full => (0, size),
-        Range::Part(a, b) => {
-            *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
-            if let Ok(v) = HeaderValue::from_str(&format!("bytes {a}-{b}/{size}")) {
-                resp.headers_mut().insert(header::CONTENT_RANGE, v);
-            }
-            (a, b - a + 1)
-        }
-        Range::Unsatisfiable => {
-            *resp.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
-            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{size}")) {
-                resp.headers_mut().insert(header::CONTENT_RANGE, v);
-            }
-            return Ok(resp);
-        }
+    let range = req.headers.get(header::RANGE).map(|v| latin1(v.as_bytes()));
+    let if_range = req.headers.get(header::IF_RANGE).map(|v| latin1(v.as_bytes()));
+    let last_modified = resp.headers().get(header::LAST_MODIFIED).map(|v| latin1(v.as_bytes()));
+    let use_range = match (&range, &if_range) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(_), Some(ir)) => Some(ir) == last_modified.as_ref() || *ir == etag,
     };
-    if start > 0 {
-        file.seek(std::io::SeekFrom::Start(start)).await?;
+    let ranges = match range.filter(|_| use_range) {
+        None => None,
+        Some(r) => match parse_ranges(&r, size) {
+            Ok(r) => Some(r),
+            Err(RangeError::Malformed(text)) => return Ok(super::plain(StatusCode::BAD_REQUEST, text)),
+            Err(RangeError::NotSatisfiable) => {
+                let mut r = super::plain(StatusCode::RANGE_NOT_SATISFIABLE, "");
+                if let Ok(v) = HeaderValue::from_str(&format!("bytes */{size}")) {
+                    r.headers_mut().insert(header::CONTENT_RANGE, v);
+                }
+                r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(0u64));
+                return Ok(r);
+            }
+        },
+    };
+    match ranges.as_deref() {
+        None => {
+            resp.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(size));
+            *resp.body_mut() = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(file, CHUNK));
+        }
+        Some([(start, end)]) => {
+            *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{}/{size}", end - 1)) {
+                resp.headers_mut().insert(header::CONTENT_RANGE, v);
+            }
+            resp.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(end - start));
+            file.seek(std::io::SeekFrom::Start(*start)).await?;
+            let part = tokio::io::AsyncReadExt::take(file, end - start);
+            *resp.body_mut() = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(part, CHUNK));
+        }
+        Some(many) => {
+            // Starlette draws 13 random bytes as hex for the boundary
+            let boundary = uuid::Uuid::new_v4().simple().to_string()[..26].to_string();
+            let ctype = "application/octet-stream";
+            let fixed = 49 + boundary.len() as u64 + ctype.len() as u64 + size.to_string().len() as u64;
+            let length: u64 = many
+                .iter()
+                .map(|(s, e)| s.to_string().len() as u64 + (e - 1).to_string().len() as u64 + fixed + (e - s))
+                .sum::<u64>()
+                + 4
+                + boundary.len() as u64;
+            *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+            if let Ok(v) = HeaderValue::from_str(&format!("multipart/byteranges; boundary={boundary}")) {
+                resp.headers_mut().insert(header::CONTENT_TYPE, v);
+            }
+            resp.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+            *resp.body_mut() = Body::from_stream(multipart(file, many.to_vec(), boundary, ctype, size));
+        }
     }
-    resp.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-    let reader = tokio_util::io::ReaderStream::with_capacity(tokio::io::AsyncReadExt::take(file, len), 64 * 1024);
-    *resp.body_mut() = Body::from_stream(reader);
     Ok(resp)
 }
 
-enum Range {
-    Full,
-    Part(u64, u64),
-    Unsatisfiable,
+const CHUNK: usize = 64 * 1024;
+
+enum RangeError {
+    Malformed(&'static str),
+    NotSatisfiable,
 }
 
-/// One `bytes=a-b`, `bytes=a-` or `bytes=-n` range; anything else (several
-/// ranges, other units, malformed) is served whole, as RFC 9110 allows.
-fn single_range(h: Option<&HeaderValue>, size: u64) -> Range {
-    let Some(spec) = h.and_then(|v| v.to_str().ok()).and_then(|v| v.trim().strip_prefix("bytes=")) else { return Range::Full };
-    if spec.contains(',') {
-        return Range::Full;
+/// Starlette's `FileResponse._parse_range_header` (what v1's downloads
+/// answered): half-open byte ranges, merged when several overlap.
+fn parse_ranges(header: &str, size: u64) -> Result<Vec<(u64, u64)>, RangeError> {
+    let Some((units, spec)) = header.split_once('=') else { return Err(RangeError::Malformed("Malformed range header.")) };
+    if py_strip(units).to_lowercase() != "bytes" {
+        return Err(RangeError::Malformed("Only support bytes range"));
     }
-    let Some((a, b)) = spec.trim().split_once('-') else { return Range::Full };
-    let (a, b) = (a.trim(), b.trim());
-    let parse = |s: &str| s.parse::<u64>().ok();
-    match (a.is_empty(), b.is_empty()) {
-        (true, true) => Range::Full,
-        (true, false) => match parse(b) {
-            Some(0) => Range::Unsatisfiable,
-            Some(n) if size == 0 => {
-                let _ = n;
-                Range::Unsatisfiable
+    let size_i = size as i128;
+    let mut ranges: Vec<(i128, i128)> = Vec::new();
+    for part in spec.split(',') {
+        let part = py_strip(part);
+        if part.is_empty() || part == "-" {
+            continue;
+        }
+        let Some((s, e)) = part.split_once('-') else { continue };
+        let (s, e) = (py_strip(s), py_strip(e));
+        let start = if !s.is_empty() {
+            match py_int(s) {
+                Some(v) => v,
+                None => continue,
             }
-            Some(n) => Range::Part(size.saturating_sub(n), size - 1),
-            None => Range::Full,
-        },
-        (false, _) => {
-            let Some(start) = parse(a) else { return Range::Full };
-            let end = if b.is_empty() { Some(size.saturating_sub(1)) } else { parse(b) };
-            let Some(end) = end else { return Range::Full };
-            if start >= size {
-                return Range::Unsatisfiable;
+        } else {
+            match py_int(e) {
+                Some(v) => size_i - v,
+                None => continue,
             }
-            if end < start {
-                return Range::Full;
+        };
+        let end = if !s.is_empty() && !e.is_empty() {
+            match py_int(e) {
+                Some(v) if v < size_i => v + 1,
+                Some(_) => size_i,
+                None => continue,
             }
-            Range::Part(start, end.min(size - 1))
+        } else {
+            size_i
+        };
+        ranges.push((start, end));
+    }
+    if ranges.is_empty() {
+        return Err(RangeError::Malformed("Range header: range must be requested"));
+    }
+    if ranges.iter().any(|(s, _)| !(0 <= *s && *s < size_i)) {
+        return Err(RangeError::NotSatisfiable);
+    }
+    if ranges.iter().any(|(s, e)| s > e) {
+        return Err(RangeError::Malformed("Range header: start must be less than end"));
+    }
+    let mut ranges: Vec<(u64, u64)> = ranges.into_iter().map(|(s, e)| (s as u64, e as u64)).collect();
+    if ranges.len() == 1 {
+        return Ok(ranges);
+    }
+    ranges.sort();
+    let mut merged: Vec<(u64, u64)> = vec![ranges[0]];
+    for (s, e) in ranges.into_iter().skip(1) {
+        let last = merged.last_mut().expect("at least one range");
+        if s <= last.1 {
+            last.1 = last.1.max(e);
+        } else {
+            merged.push((s, e));
         }
     }
+    Ok(merged)
+}
+
+/// The multipart/byteranges body Starlette writes for several ranges, read
+/// from the file a chunk at a time.
+fn multipart(
+    file: tokio::fs::File,
+    ranges: Vec<(u64, u64)>,
+    boundary: String,
+    ctype: &'static str,
+    size: u64,
+) -> impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send {
+    struct State {
+        file: tokio::fs::File,
+        ranges: Vec<(u64, u64)>,
+        i: usize,
+        pos: u64,
+        in_body: bool,
+        done: bool,
+    }
+    let start = State { file, ranges, i: 0, pos: 0, in_body: false, done: false };
+    futures::stream::unfold(start, move |mut st| {
+        let boundary = boundary.clone();
+        async move {
+            use tokio::io::AsyncReadExt;
+            if st.done {
+                return None;
+            }
+            if st.i == st.ranges.len() {
+                st.done = true;
+                return Some((Ok(bytes::Bytes::from(format!("--{boundary}--"))), st));
+            }
+            let (s, e) = st.ranges[st.i];
+            if !st.in_body {
+                if let Err(err) = st.file.seek(std::io::SeekFrom::Start(s)).await {
+                    st.done = true;
+                    return Some((Err(err), st));
+                }
+                st.pos = s;
+                st.in_body = true;
+                let head = format!("--{boundary}\r\nContent-Type: {ctype}\r\nContent-Range: bytes {s}-{}/{size}\r\n\r\n", e - 1);
+                return Some((Ok(bytes::Bytes::from(head)), st));
+            }
+            if st.pos < e {
+                let mut buf = vec![0u8; ((e - st.pos) as usize).min(CHUNK)];
+                return match st.file.read(&mut buf).await {
+                    Ok(0) => {
+                        st.done = true;
+                        Some((Err(std::io::ErrorKind::UnexpectedEof.into()), st))
+                    }
+                    Ok(n) => {
+                        buf.truncate(n);
+                        st.pos += n as u64;
+                        Some((Ok(bytes::Bytes::from(buf)), st))
+                    }
+                    Err(err) => {
+                        st.done = true;
+                        Some((Err(err), st))
+                    }
+                };
+            }
+            st.i += 1;
+            st.in_body = false;
+            Some((Ok(bytes::Bytes::from_static(b"\r\n")), st))
+        }
+    })
 }

@@ -359,13 +359,20 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     };
     let (kind, thread_id, sent_at) = (kind.map(pg_text), thread_id.map(pg_text), sent_at.map(pg_text));
     let received = clock::now();
-    let inserted = db::query_opt(
-        &tx,
-        "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING RETURNING received_at",
-        &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas)],
-    )
-    .await?;
+    // a retry is answered without touching the insert: v1's INSERT OR
+    // IGNORE never used up a message number, and neither does this
+    let known = db::query_opt(&tx, "SELECT 1 FROM messages WHERE id = $1", &[&mid]).await?.is_some();
+    let inserted = if known {
+        None
+    } else {
+        db::query_opt(
+            &tx,
+            "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING RETURNING received_at",
+            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas)],
+        )
+        .await?
+    };
     let fresh = inserted.is_some();
     let received = if fresh {
         db::execute(&tx, "UPDATE attachments SET message_id = $1 WHERE id = ANY($2)", &[&mid, &lookup]).await?;
