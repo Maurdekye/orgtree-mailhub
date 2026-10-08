@@ -23,7 +23,10 @@ pub type Params<'a> = [&'a (dyn ToSql + Sync)];
 
 /// The embedded migrations, in order. A database records the last one it
 /// applied in `hub_meta.schema_version`.
-const MIGRATIONS: &[(i64, &str, &str)] = &[(1, "v1 records", include_str!("../migrations/0001_v1_records.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "v1 records", include_str!("../migrations/0001_v1_records.sql")),
+    (2, "reply_to", include_str!("../migrations/0002_reply_to.sql")),
+];
 
 pub fn latest_schema() -> i64 {
     MIGRATIONS.last().map(|m| m.0).unwrap_or(0)

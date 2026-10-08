@@ -85,14 +85,18 @@ Auth rides one header, never URLs or bodies:
 
 | endpoint | purpose |
 |---|---|
-| `POST /api/register` | `{slug, org_name, username, blurb?}` — upsert if the fingerprint matches; first write wins the slug. Returns hub name, retention, roster |
+| `POST /api/register` | `{slug, org_name, username, blurb?, kind?}` (kind `org`, `chat` or `person`, fixed at the first registration) — upsert if the fingerprint matches; first write wins the slug. Returns hub name, retention, roster |
 | `POST /api/poll?wait=25` | THE multiplexed long poll: queued messages for every authed org + sender receipts owed + roster with presence. 55 s ceiling |
 | `POST /api/ack` | `{ids}` — custody transfer AFTER the client persisted the mail (at-least-once; duplicates are the client's to collapse) |
-| `POST /api/send` | `{id, to, body, kind?, thread_id?, sent_at, attachments?}` — idempotent on the client-minted id; the 200 IS the "received" receipt |
+| `POST /api/send` | `{id, to, body, kind?, thread_id?, sent_at, attachments?, reply_to?}` — idempotent on the client-minted id; the 200 IS the "received" receipt |
 | `POST /api/receipts` | `{receipts: [{id, state: delivered\|read, at}]}` from the recipient side |
 | `POST /api/attachments?name=` | streamed raw body ≤ advertised limit (default 1 GiB) → `{id, bytes}`; bind ids in a send (≤ 10) |
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
 | `GET /api/roster` · `GET /healthz` | roster with presence · liveness |
+| `POST /api/profile` | `{name?, about?, slug?}` — change your display name (≤ 48) and about line (≤ 200) |
+
+The v2 additions (profiles, replies, and the rest of Phase 2) are described in
+[docs/v2-additions.md](docs/v2-additions.md).
 
 Ordering: `received_at` (hub clock) is authoritative; `sent_at` is the
 sender's claim, display only. Presence: a parked poll or any authed call in

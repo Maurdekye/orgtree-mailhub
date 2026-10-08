@@ -165,6 +165,17 @@ impl Req {
             Err(e) => Err(ApiError::Internal(anyhow::anyhow!("request body is not JSON: {e}"))),
         }
     }
+
+    /// The body of a v2 route (no v1 behaviour to keep): anything but a
+    /// JSON object is a 400 that says so.
+    pub async fn json_object_strict(&mut self) -> ApiResult<Map<String, Value>> {
+        let body = std::mem::take(&mut self.body);
+        let bytes = read_limited(body, MAX_JSON_BODY).await?;
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(o)) => Ok(o),
+            _ => refuse(StatusCode::BAD_REQUEST, "the request body must be a JSON object"),
+        }
+    }
 }
 
 async fn read_limited(body: Body, limit: usize) -> ApiResult<Bytes> {
@@ -187,6 +198,7 @@ enum Route {
     Upload,
     Download,
     Roster,
+    Profile,
     Health,
     Index,
     UiData,
@@ -206,6 +218,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/receipts" => (Receipts, Method::POST),
         "/api/attachments" => (Upload, Method::POST),
         "/api/roster" => (Roster, Method::GET),
+        "/api/profile" => (Profile, Method::POST),
         "/healthz" => (Health, Method::GET),
         "/" => (Index, Method::GET),
         "/ui/data" => (UiData, Method::GET),
@@ -311,6 +324,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Send => mail::send(hub, req).await,
         Route::Receipts => mail::receipts(hub, req).await,
         Route::Roster => mail::roster_route(hub, req).await,
+        Route::Profile => mail::profile(hub, req).await,
         Route::Upload => files::upload(hub, req).await,
         Route::Download => files::download(hub, req).await,
         Route::Health => ops::healthz(hub).await,

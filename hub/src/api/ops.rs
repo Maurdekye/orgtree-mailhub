@@ -100,7 +100,7 @@ pub async fn ui_messages(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         }
     };
     let c = hub.db.get().await?;
-    let cols = "n, id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, state, fetched_at, delivered_at, read_at, attachments";
+    let cols = super::mail::ENVELOPE_COLS;
     let page = "AND ($2::timestamptz IS NULL OR received_at < $2 OR (received_at = $2 AND n < $3))
                 ORDER BY received_at DESC, n DESC LIMIT $4";
     let rows = if !org.is_empty() {

@@ -48,6 +48,7 @@ EXPECTED = {
     "log-startup": "v1 printed its startup line once per listener (the public listener ran the app's lifespan again); v2 prints it once",
     "u7-bad-cursor": "a before_at that is not a timestamp: v1 compared it as a string, v2 refuses it (422)",
     "log-500": "v2 also writes a request line for a 500 (v1's middleware never saw the crash)",
+    "h2-index": "the operator page also tags the person kind (an addition: docs/v2-additions.md)",
 }
 
 
@@ -353,7 +354,7 @@ def scenarios(d: Diff) -> None:
         d.step(f"r7-malformed-{i}", "POST", "/api/register", auth=f"x:{'s' * 32}", body={"slug": bad})
     pad = me("padded", "secret-pad")
     d.step("r8-padded", "POST", "/api/register", auth=pair(pad), body={"slug": f"  {pad[0]}\t", "org_name": "Pad"})
-    for i, kind in enumerate(["person", 5, None, "CHAT"]):
+    for i, kind in enumerate(["PERSON", 5, None, "CHAT"]):  # "person" itself is a v2 kind (docs/v2-additions.md)
         o = me(f"kind{i}", f"secret-kind-{i}")
         d.step(f"r9-kind-{i}", "POST", "/api/register", auth=pair(o), body={"slug": o[0], "kind": kind})
     for i, raw in enumerate([b"not json", b"[1, 2]", b"null", b"", b"\"text\"", b"{\"slug\": "]):

@@ -38,9 +38,12 @@
      at a glance even inside one client's group */
   .org.k-org { border-left-color: var(--accent); }
   .org.k-chat { border-left-color: var(--sky); }
+  /* v2 (G2): a PERSON stays neutral, as in Hubchat */
+  .org.k-person { border-left-color: var(--line); }
   .kindtag { font-size: 9.5px; border: 1px solid var(--line);
              border-radius: 8px; padding: 0 5px; color: var(--sky);
              flex: none; }
+  .kindtag.k-person { color: var(--dim); }
   /* FR-11: one header per CLIENT (the slug's username part) — grouping is
      spatial, color is spent on org-vs-chat. The header is also a FILTER
      (user spec 2026-08-05): clicking it shows every mail touching any of
@@ -235,14 +238,14 @@ async function refresh () {
     const orgRow = (o) => {
       const parts = o.slug.split('.')
       const fp = parts.length > 2 ? parts.pop() : ''
-      const kind = o.kind === 'chat' ? 'chat' : 'org'
+      const kind = o.kind === 'chat' || o.kind === 'person' ? o.kind : 'org'
       return '<div class="org k-' + kind
         + (filter === o.slug ? ' current' : '')
         + '" onclick="pick(\'' + esc(o.slug) + '\')">'
         + '<span class="dot' + (o.online ? ' on' : '') + '"></span>'
         + '<span><div class="slug">' + esc(parts.join('.'))
         + ' <span class="fp">·' + esc(fp) + '</span>'
-        + (kind === 'chat' ? ' <span class="kindtag">chat</span>' : '')
+        + (kind !== 'org' ? ' <span class="kindtag k-' + kind + '">' + kind + '</span>' : '')
         + '</div>'
         + '<div class="last">' + (o.online ? 'online' : ago(o.last_seen))
         + (o.blurb ? ' · ' + esc(o.blurb) : '') + '</div></span>'

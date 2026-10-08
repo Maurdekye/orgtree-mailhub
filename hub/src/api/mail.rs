@@ -24,8 +24,25 @@ pub const POLL_CEILING: f64 = 55.0;
 /// with the next poll, which returns at once while mail is queued).
 pub const POLL_BATCH: i64 = 500;
 
-const ENVELOPE_COLS: &str =
-    "n, id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, state, fetched_at, delivered_at, read_at, attachments";
+pub const ENVELOPE_COLS: &str =
+    "n, id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, state, fetched_at, delivered_at, read_at, attachments, reply_to";
+
+/// The client kinds an address registers as. v1 knew org and chat (and
+/// stored anything else as org); v2 adds person (G2). Fixed at the first
+/// registration.
+pub fn register_kind(asked: &str) -> &'static str {
+    match asked {
+        "chat" => "chat",
+        "person" => "person",
+        _ => "org",
+    }
+}
+
+/// The longest `reply_to` a send may carry (message ids are client-minted;
+/// this only stops a reference from being used as a payload).
+pub const REPLY_TO_MAX: usize = 4096;
+pub const PROFILE_NAME_MAX: usize = 48;
+pub const PROFILE_ABOUT_MAX: usize = 200;
 
 /// `^[a-z0-9][a-z0-9._-]{0,127}$`
 pub fn valid_slug(s: &str) -> bool {
@@ -48,29 +65,41 @@ pub fn envelope(r: &tokio_postgres::Row) -> serde_json::Map<String, Value> {
     m.insert("sent_at".into(), json!(r.get::<_, Option<String>>("sent_at")));
     m.insert("received_at".into(), json!(clock::iso(r.get("received_at"))));
     m.insert("attachments".into(), r.get::<_, Value>("attachments"));
+    // G3: present only when the sender set it, so v1 envelopes keep v1's keys
+    if let Some(reply_to) = r.get::<_, Option<String>>("reply_to") {
+        m.insert("reply_to".into(), json!(reply_to));
+    }
     m
 }
 
 /// The roster every client is sent: all registered addresses with presence.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn roster(hub: &Hub, c: &impl GenericClient) -> ApiResult<Vec<Value>> {
-    let rows = db::query(c, "SELECT slug, org_name, username, blurb, last_seen, kind FROM identities ORDER BY slug", &[]).await?;
-    Ok(rows
-        .iter()
-        .map(|r| {
-            let slug: String = r.get(0);
-            let kind: String = r.get(5);
-            json!({
-                "slug": slug,
-                "org_name": r.get::<_, String>(1),
-                "username": r.get::<_, String>(2),
-                "blurb": r.get::<_, String>(3),
-                "online": hub.presence.online(&slug),
-                "last_seen": r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(4).map(clock::iso),
-                "kind": if kind.is_empty() { "org".to_string() } else { kind },
-            })
-        })
-        .collect())
+    let rows = db::query(c, &format!("SELECT {ROSTER_COLS} FROM identities ORDER BY slug"), &[]).await?;
+    Ok(rows.iter().map(|r| roster_entry(hub, r)).collect())
+}
+
+const ROSTER_COLS: &str = "slug, org_name, username, blurb, last_seen, kind";
+
+/// One roster row as v1 sent it (presence from this process).
+pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {
+    let slug: String = r.get(0);
+    let kind: String = r.get(5);
+    json!({
+        "slug": slug,
+        "org_name": r.get::<_, String>(1),
+        "username": r.get::<_, String>(2),
+        "blurb": r.get::<_, String>(3),
+        "online": hub.presence.online(&slug),
+        "last_seen": r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(4).map(clock::iso),
+        "kind": if kind.is_empty() { "org".to_string() } else { kind },
+    })
+}
+
+/// One address's roster row, if it is registered.
+pub async fn roster_one(hub: &Hub, c: &impl GenericClient, slug: &str) -> ApiResult<Option<Value>> {
+    let row = db::query_opt(c, &format!("SELECT {ROSTER_COLS} FROM identities WHERE slug = $1"), &[&slug]).await?;
+    Ok(row.map(|r| roster_entry(hub, &r)))
 }
 
 /// v1 `_mark_seen`: the last authenticated call, in memory (presence) and
@@ -128,7 +157,7 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         );
     }
     let fp = auth::fingerprint(&secret);
-    let kind = if str_field(&body, "kind") == "chat" { "chat" } else { "org" };
+    let kind = register_kind(&str_field(&body, "kind"));
     let org_name = pg_text(str_field(&body, "org_name"));
     let username = pg_text(str_field(&body, "username"));
     let blurb = pg_text(str_field(&body, "blurb"));
@@ -367,6 +396,19 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         return crash("send: a list or object where text belongs");
     };
     let (kind, thread_id, sent_at) = (kind.map(pg_text), thread_id.map(pg_text), sent_at.map(pg_text));
+    // G3: the message this one answers, as the sender names it (never checked
+    // for existence: it may be deleted, or on another hub)
+    let reply_to = match body.get("reply_to") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(r)) if r.contains('\0') => {
+            return refuse(StatusCode::UNPROCESSABLE_ENTITY, "reply_to contains a NUL character");
+        }
+        Some(Value::String(r)) if r.chars().count() > REPLY_TO_MAX => {
+            return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("reply_to is longer than {REPLY_TO_MAX} characters"));
+        }
+        Some(Value::String(r)) => Some(r.clone()),
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "reply_to must be a message id (a string)"),
+    };
     let received = clock::now();
     // a retry is answered without touching the insert: v1's INSERT OR
     // IGNORE never used up a message number, and neither does this
@@ -376,9 +418,9 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     } else {
         db::query_opt(
             &tx,
-            "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING RETURNING received_at",
-            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas)],
+            "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments, reply_to)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING RETURNING received_at",
+            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas), &reply_to],
         )
         .await?
     };
@@ -454,6 +496,69 @@ pub async fn roster_route(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, &slugs).await?;
     let roster = roster(hub, &c).await?;
     ok(json!({ "name": hub.cfg.hub_name, "roster": roster }))
+}
+
+// ------------------------------------------------------------------- profile
+
+/// G2: the owner edits the display name (`name`, up to 48 characters) and
+/// the about line (`about`, up to 200) after registration; the roster's
+/// `org_name` and `blurb` carry them, so every directory shows the change at
+/// its next poll. The address, the username and the kind never change.
+/// `org_name`/`blurb` are accepted as the same fields' roster spellings.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
+pub async fn profile(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
+    let body = req.json_object_strict().await?;
+    let slugs = authed(hub, req).await?;
+    if slugs.is_empty() {
+        return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+    }
+    let slug = match body.get("slug") {
+        Some(Value::String(s)) if slugs.contains(s) => s.clone(),
+        Some(_) => return refuse(StatusCode::UNAUTHORIZED, "no valid credentials for that address"),
+        None => {
+            let mut distinct = slugs.clone();
+            distinct.sort();
+            distinct.dedup();
+            if distinct.len() != 1 {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "several addresses signed in: name the one to update (slug)");
+            }
+            distinct.remove(0)
+        }
+    };
+    let field = |names: [&str; 2], max: usize, what: &str| -> ApiResult<Option<String>> {
+        // `name` wins over its roster spelling `org_name`; a null counts as absent
+        let value = names.iter().find_map(|n| body.get(*n).filter(|v| !v.is_null()));
+        match value {
+            None => Ok(None),
+            Some(Value::String(s)) => {
+                let s = pg_text(py_strip(s).to_string());
+                if s.chars().count() > max {
+                    return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("{what} is longer than {max} characters"));
+                }
+                Ok(Some(s))
+            }
+            Some(_) => refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("{what} must be a string")),
+        }
+    };
+    let name = field(["name", "org_name"], PROFILE_NAME_MAX, "name")?;
+    let about = field(["about", "blurb"], PROFILE_ABOUT_MAX, "about")?;
+    if name.is_none() && about.is_none() {
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "nothing to update: give name and/or about");
+    }
+    let c = hub.db.get().await?;
+    let updated = db::execute(
+        &c,
+        "UPDATE identities SET org_name = COALESCE($2, org_name), blurb = COALESCE($3, blurb) WHERE slug = $1",
+        &[&slug, &name, &about],
+    )
+    .await?;
+    if updated == 0 {
+        // unregistered between the credential check and the update
+        return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+    }
+    mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
+    let me = roster_one(hub, &c, &slug).await?.unwrap_or(Value::Null);
+    ok(json!({ "ok": true, "profile": me }))
 }
 
 #[cfg(test)]
