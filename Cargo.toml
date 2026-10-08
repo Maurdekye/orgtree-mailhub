@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["hub"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true
+
+# Dependencies optimised even in debug builds: the test suite streams tens of
+# megabytes and hashes thousands of secrets.
+[profile.dev.package."*"]
+opt-level = 2
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = "line-tables-only"
+panic = "unwind"
