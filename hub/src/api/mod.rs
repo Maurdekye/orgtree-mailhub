@@ -11,6 +11,7 @@ pub mod history;
 pub mod mail;
 pub mod ops;
 pub mod sync;
+pub mod transfers;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,6 +40,8 @@ pub struct Hub {
     pub db: Db,
     pub presence: Presence,
     pub shutdown: CancellationToken,
+    /// resumable uploads a request is writing to right now (one at a time)
+    pub writing: papaya::HashSet<String>,
 }
 
 pub type Resp = Response<Body>;
@@ -209,6 +212,13 @@ enum Route {
     DeleteMessage,
     MessageBody,
     DeleteConversation,
+    UploadStart,
+    UploadStatus,
+    UploadAppend,
+    UploadCancel,
+    LinkPut,
+    LinkTake,
+    LinkCancel,
     Health,
     Index,
     UiData,
@@ -219,6 +229,21 @@ enum Route {
 /// `Some(Err(allowed))` when only the method differs, `None` otherwise.
 fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
     use Route::*;
+    // the one path with several methods: an upload in progress
+    if let Some(id) = path.strip_prefix("/api/uploads/") {
+        if id.is_empty() || id.contains('/') {
+            return None;
+        }
+        return Some(if *method == Method::GET {
+            Ok(UploadStatus)
+        } else if *method == Method::PATCH {
+            Ok(UploadAppend)
+        } else if *method == Method::DELETE {
+            Ok(UploadCancel)
+        } else {
+            Err("GET, PATCH, DELETE")
+        });
+    }
     let (r, m) = match path {
         "/api/register" => (Register, Method::POST),
         "/api/unregister" => (Unregister, Method::POST),
@@ -234,6 +259,10 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/conversations" => (Conversations, Method::GET),
         "/api/directory" => (Directory, Method::GET),
         "/api/history" => (History, Method::GET),
+        "/api/uploads" => (UploadStart, Method::POST),
+        "/api/link/put" => (LinkPut, Method::POST),
+        "/api/link/take" => (LinkTake, Method::POST),
+        "/api/link/cancel" => (LinkCancel, Method::POST),
         "/healthz" => (Health, Method::GET),
         "/" => (Index, Method::GET),
         "/ui/data" => (UiData, Method::GET),
@@ -381,6 +410,18 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
             let id = req.path.strip_prefix("/api/messages/").and_then(|p| p.strip_suffix("/body")).unwrap_or_default().to_string();
             files::message_body(hub, req, &id).await
         }
+        Route::UploadStart => transfers::start(hub, req).await,
+        Route::UploadStatus | Route::UploadAppend | Route::UploadCancel => {
+            let id = req.path.strip_prefix("/api/uploads/").unwrap_or_default().to_string();
+            match r {
+                Route::UploadStatus => transfers::status(hub, req, &id).await,
+                Route::UploadAppend => transfers::append(hub, req, &id).await,
+                _ => transfers::cancel(hub, req, &id).await,
+            }
+        }
+        Route::LinkPut => transfers::link_put(hub, req).await,
+        Route::LinkTake => transfers::link_take(hub, req).await,
+        Route::LinkCancel => transfers::link_cancel(hub, req).await,
         Route::DeleteConversation => {
             let with = req.path.strip_prefix("/api/conversations/").unwrap_or_default().to_string();
             history::delete_conversation(hub, req, &with).await

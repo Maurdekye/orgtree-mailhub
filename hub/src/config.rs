@@ -161,6 +161,12 @@ impl Config {
         self.data_dir.join("blobs")
     }
 
+    /// Resumable uploads in progress (kept across restarts, unlike the
+    /// partial files of whole-file uploads in `blobs/`).
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.data_dir.join("uploads")
+    }
+
     pub fn sqlite_path(&self) -> PathBuf {
         self.data_dir.join("hub.sqlite3")
     }

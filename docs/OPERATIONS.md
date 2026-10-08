@@ -37,6 +37,8 @@ host ports. Nothing else collides.
 
 ## Health and logs
 
+- `HUB_DATA/uploads/` holds resumable uploads in progress (a day untouched
+  and they are swept); complete, they move to `HUB_DATA/blobs/`.
 - `GET /healthz` → `{ok, name, orgs, queued, retention_days,
   max_attachment_bytes, version, features}`; the compose file wires `orgtree-mailhub healthcheck`
   (which asks it) as the container healthcheck.

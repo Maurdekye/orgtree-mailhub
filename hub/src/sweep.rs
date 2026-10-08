@@ -63,6 +63,7 @@ async fn sweep_files(c: &impl deadpool_postgres::GenericClient, dir: &std::path:
 #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "warn"))]
 pub async fn run_once(hub: &Hub) -> Result<Swept> {
     let dir = hub.cfg.blob_dir();
+    crate::api::transfers::sweep(hub).await?;
     let c = hub.db.get().await?;
     let mut attachments = sweep_files(&c, &dir, "message_id IS NULL AND created_at < $1", cutoff(UNBOUND_UPLOAD_DAYS)?).await?;
     let mut messages = 0u64;

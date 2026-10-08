@@ -254,9 +254,68 @@ last. With `q`, only addresses whose address, name, username or about line
 contains it (any case; `%` and `_` are plain characters). Any signed-in
 address may read it; 422 `limit must be a whole number`.
 
+## Resumable uploads
+
+`POST /api/attachments` still takes a whole file in one request. For a large
+file over a fragile connection, an upload can go in pieces and resume:
+
+```
+POST /api/uploads {"bytes": <size>, "name": "photo.jpg", "sha256": "<hex, optional>"}   [?slug=]
+→ 200 {"id": "<upload id>", "name": "...", "bytes": <size>, "offset": 0, "complete": false, "expires_at": "..."}
+
+PATCH /api/uploads/{id}?offset=<N>      (raw bytes: the file from N on, or the next piece)
+→ 200 {"id", "bytes", "offset": <confirmed>, "complete": false}
+→ 200 {"id", "name", "bytes", "offset": <size>, "complete": true}      once every byte is in
+
+GET /api/uploads/{id}       → where it stands (also once complete)
+DELETE /api/uploads/{id}    → {"cancelled": true}
+```
+
+- The upload's owner is the address that opened it (`slug` when the header
+  signs in several); nobody else can see, write or cancel it (404).
+- `offset` must be where the upload stands; otherwise 409 `this upload is at
+  offset N` with `"offset": N`. A piece cut short keeps what arrived (bytes
+  are made durable as they come, at least every 8 MiB), so after a dropped
+  connection: `GET` the upload and send from its `offset`. One request writes
+  to an upload at a time (409 for a second).
+- Complete, the upload is an ordinary attachment with the same id: name it in
+  a send's `attachments` (or as `body_part`), download it with
+  `GET /api/attachments/{id}` (which already resumes with `Range`).
+- With `sha256` given, the bytes are checked when the last one arrives; a
+  mismatch empties the upload (422, `"offset": 0`).
+- The size is checked against the limit when the upload opens (413 with
+  `max_attachment_bytes`); a send still checks the whole message (G8). More
+  bytes than the size: 400 with the offset reached. A day without a byte and
+  the upload is swept. Uploads in progress survive a hub restart.
+- Refusals (422): `bytes must be the upload's size: a whole number`, `name
+  must be a string`, `sha256 must be 64 hexadecimal characters`, `offset is
+  required: where these bytes start, a whole number`.
+
+## Linking a device through a hub
+
+A new device has no key yet, so it cannot sign in. A signed-in device leaves
+it a payload sealed by the clients (the identity key, hub list and profile:
+the hub never sees inside) under a one-time code the new device shows:
+
+```
+POST /api/link/put {"code": "<one-time code>", "sealed": "<encrypted payload>"}   (signed in)
+→ 200 {"ok": true, "expires_at": "..."}            409 while the same code still waits
+POST /api/link/take {"code": "<one-time code>", "wait": 25}                       (no sign-in)
+→ 200 {"sealed": "...", "from": "<address that left it>"}    404 when nothing waits by then
+POST /api/link/cancel {"code": "<one-time code>"}                                 (signed in)
+→ 200 {"cancelled": true}
+```
+
+- A payload waits ten minutes and is taken once. `take` long-polls up to
+  `wait` seconds (default 25, at most 55) and answers as soon as it arrives.
+- Codes are 6-128 characters and travel only in request bodies, so no request
+  log holds one; the hub stores only their sha256. `sealed` is at most 1 MiB.
+- Only the address that left a payload can cancel it.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
 `devices`, `history`, `delete`, `long_messages`, `message_limit`,
-`directory` (more as later parts land). A v1 hub reports neither.
+`directory`, `uploads`, `link` (more as later parts land). A v1 hub reports
+neither.

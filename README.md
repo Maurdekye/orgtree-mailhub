@@ -101,6 +101,8 @@ Auth rides one header, never URLs or bodies:
 | `DELETE /api/messages/{id}` · `DELETE /api/conversations/{address}` | delete your copy (the other side keeps theirs) |
 | `GET /api/messages/{id}/body` | a message's whole body (streamed, ranges) |
 | `GET /api/directory?q=&after=&limit=` | every registered address, searched and paged |
+| `POST /api/uploads` · `PATCH`/`GET`/`DELETE /api/uploads/{id}` | a resumable upload: open it with its size, send pieces at offsets, resume after a cut |
+| `POST /api/link/put` · `/take` · `/cancel` | hand a sealed payload to a new device under a one-time code |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).

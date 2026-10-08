@@ -36,11 +36,13 @@ pub struct Presence {
     epoch: Instant,
     /// every parked sync: the roster changed (a join, an edit, a leave)
     roster: Notify,
+    /// every waiting link take: a payload was left
+    link: Notify,
 }
 
 impl Default for Presence {
     fn default() -> Self {
-        Presence { slots: papaya::HashMap::new(), epoch: Instant::now(), roster: Notify::new() }
+        Presence { slots: papaya::HashMap::new(), epoch: Instant::now(), roster: Notify::new(), link: Notify::new() }
     }
 }
 
@@ -129,6 +131,18 @@ impl Presence {
         self.roster.notify_waiters();
     }
 
+    /// A link payload was left: every waiting take checks its own code.
+    pub fn link_left(&self) {
+        self.link.notify_waiters();
+    }
+
+    /// A link take's wake-up, enabled at once: call it BEFORE the check.
+    pub fn link_waiter(&self) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>> {
+        let mut w = Box::pin(self.link.notified());
+        w.as_mut().enable();
+        w
+    }
+
     /// Wake every parked poll and sync (shutdown).
     pub fn wake_all(&self) {
         for (_, slot) in self.slots.pin().iter() {
@@ -136,6 +150,7 @@ impl Presence {
             slot.sync.notify_waiters();
         }
         self.roster.notify_waiters();
+        self.link.notify_waiters();
     }
 
     /// An address left (unregister or roster prune): forget its presence.
