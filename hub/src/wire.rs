@@ -207,28 +207,32 @@ fn py_isprintable(c: char) -> bool {
     !nonprint.iter().any(|(a, b)| (*a..=*b).contains(&u))
 }
 
+/// A value v1's handler would have crashed on (Python raised a TypeError,
+/// or sqlite3 refused to bind it): the request becomes a 500.
+#[derive(Debug)]
+pub struct Unusable;
+
 /// Iterating `value or []` the way a v1 handler's list comprehension does.
-/// `Err` is the TypeError (the request becomes a 500).
-pub fn py_iter(v: Option<&Value>) -> Result<Vec<Value>, ()> {
+pub fn py_iter(v: Option<&Value>) -> Result<Vec<Value>, Unusable> {
     let Some(v) = v.filter(|v| truthy(v)) else { return Ok(Vec::new()) };
     match v {
         Value::Array(a) => Ok(a.clone()),
         Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
         Value::Object(o) => Ok(o.keys().map(|k| Value::String(k.clone())).collect()),
-        _ => Err(()),
+        _ => Err(Unusable),
     }
 }
 
 /// What a v1 TEXT-affinity column held after binding `value`: strings as
 /// they are, booleans and integers as their decimal text, null as NULL.
-/// `Err` is sqlite3's refusal to bind a list or dict (a 500 in v1).
-pub fn sqlite_text(v: Option<&Value>) -> Result<Option<String>, ()> {
+/// A list or dict is `Unusable` (sqlite3 refused to bind it).
+pub fn sqlite_text(v: Option<&Value>) -> Result<Option<String>, Unusable> {
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(Value::Bool(b)) => Ok(Some(if *b { "1" } else { "0" }.into())),
         Some(Value::Number(n)) => Ok(Some(if n.is_f64() { py_float_repr(n.as_f64().unwrap_or(0.0)) } else { n.to_string() })),
-        Some(_) => Err(()),
+        Some(_) => Err(Unusable),
     }
 }
 

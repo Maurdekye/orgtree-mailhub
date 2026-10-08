@@ -73,6 +73,9 @@ struct MsgRow {
     attachments: Option<String>,
 }
 
+/// slug, fingerprint, org_name, username, blurb, kind — one vector each
+type OrgColumns = (Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>);
+
 enum Batch {
     Orgs(Vec<OrgRow>),
     Atts(Vec<AttRow>),
@@ -281,7 +284,7 @@ pub async fn import(db: &Db, sqlite: &Path, blob_dir: &Path, mode: Mode) -> Resu
         match batch? {
             Batch::Orgs(rows) => {
                 let n = rows.len() as u64;
-                let mut cols: (Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>) = Default::default();
+                let mut cols: OrgColumns = Default::default();
                 let mut reg: Vec<DateTime<Utc>> = Vec::new();
                 let mut seen: Vec<Option<DateTime<Utc>>> = Vec::new();
                 for r in rows {
