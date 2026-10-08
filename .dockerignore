@@ -4,6 +4,7 @@
 __pycache__
 *.pyc
 .env
+target/
 tests/
 docs/
 *.md
@@ -11,3 +12,4 @@ expose-hub.ps1
 install-hook.py
 session-start.sh
 hubtool.py
+tools/

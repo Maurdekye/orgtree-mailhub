@@ -27,9 +27,12 @@ pub struct Config {
     pub max_file_bytes: u64,
     /// the embedding host's live override (`HUB_RUNTIME_CONFIG_FILE`)
     pub runtime_config_file: Option<PathBuf>,
-    /// PostgreSQL connection string (URL or key=value). Holds a password:
-    /// never logged, never serialized.
+    /// PostgreSQL connection string (URL or key=value). May hold a
+    /// password: never logged, never serialized.
     database_url: String,
+    /// `HUB_DATABASE_PASSWORD`: the password kept out of the URL (no
+    /// percent-encoding, and a host can pass it apart from the address)
+    database_password: Option<String>,
     pub pool_size: usize,
     pub verbose: bool,
     /// import `<data>/hub.sqlite3` on startup when the database is empty
@@ -126,6 +129,7 @@ impl Config {
             max_file_bytes: u64::try_from(max_file_bytes).unwrap_or(u64::MAX),
             runtime_config_file: get("HUB_RUNTIME_CONFIG_FILE").filter(|v| !v.is_empty()).map(PathBuf::from),
             database_url,
+            database_password: get("HUB_DATABASE_PASSWORD").filter(|p| !p.is_empty()).map(str::to_string),
             pool_size,
             verbose: flag("HUB_LOG_VERBOSE", false),
             import_sqlite: flag("HUB_IMPORT_SQLITE", true),
@@ -135,6 +139,11 @@ impl Config {
     #[doc(hidden)]
     pub fn database_url(&self) -> &str {
         &self.database_url
+    }
+
+    #[doc(hidden)]
+    pub fn database_password(&self) -> Option<&str> {
+        self.database_password.as_deref()
     }
 
     pub fn blob_dir(&self) -> PathBuf {

@@ -9,6 +9,9 @@ services:
     restart: unless-stopped          # start-on-boot rides the Docker daemon's
                                      # own autostart (Docker Desktop default;
                                      # `systemctl enable docker` on Linux)
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       # HUB_BIND (cross-org find 2026-08-06, neoja's shape): which interface
       # the FULL app — including the unauthenticated all-mail UI — listens
@@ -30,17 +33,43 @@ services:
       # and the hub's own header. Defaults to the container hostname if unset.
       HUB_NAME: ${HUB_NAME:-}
       HUB_RETENTION_DAYS: ${HUB_RETENTION_DAYS:-30}
+      HUB_ORG_RETENTION_DAYS: ${HUB_ORG_RETENTION_DAYS:-45}
       HUB_MAX_FILE_BYTES: ${HUB_MAX_FILE_BYTES:-1073741824}
       # set to 1 to serve the API-only public listener on 7371 (FR-10)
       HUB_PUBLIC: ${HUB_PUBLIC:-}
+      # v2: the hub's records live in the postgres service below (the
+      # password travels apart from the address: no URL escaping needed)
+      HUB_DATABASE_URL: postgres://mailhub@postgres:5432/mailhub
+      HUB_DATABASE_PASSWORD: ${HUB_DB_PASSWORD:?set HUB_DB_PASSWORD in .env (see .env.example)}
     volumes:
+      # blobs/ (attachment bytes) and, on an upgrade from v1, the hub.sqlite3
+      # the first v2 start imports (it is kept, never changed)
       - orgtree-hub-data:/data
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7370/healthz', timeout=3)"]
+      test: ["CMD", "orgtree-mailhub", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
 
+  # The hub's PostgreSQL. Not published on any host port: only the hub
+  # reaches it, over this compose project's own network.
+  postgres:
+    image: postgres:18
+    container_name: ${HUB_DB_CONTAINER_NAME:-orgtree-mailhub-db}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mailhub
+      POSTGRES_PASSWORD: ${HUB_DB_PASSWORD:?set HUB_DB_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: mailhub
+    volumes:
+      # postgres 18 images keep their cluster under /var/lib/postgresql/18
+      - orgtree-hub-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailhub -d mailhub"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
 volumes:
   orgtree-hub-data:
+  orgtree-hub-db:

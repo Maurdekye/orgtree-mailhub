@@ -5,17 +5,24 @@ mail each other. Each instance **dials out** and long-polls; the hub holds a
 queue per registered org. Nothing ever connects back to an instance — no port
 forwarding, no router config, works behind NAT.
 
-Full design: `docs/mailserver-spec.md`.
+Full design: `docs/mailserver-spec.md`. **v2.0.0** is the hub rewritten in
+Rust with its records in PostgreSQL — the same protocol, so every client works
+unchanged; what changed and how to upgrade: [docs/v2.md](docs/v2.md).
 
 ## Run it
 
 ```sh
 cd orgtree-mailhub
-HUB_NAME="office" docker compose up -d --build
+cp .env.example .env      # then set HUB_DB_PASSWORD (required) and HUB_NAME
+docker compose up -d --build
 ```
 
-- Port **7370**. Data (SQLite + attachment blobs) lives in the named volume
-  `orgtree-hub-data`.
+- Port **7370**. The hub's records live in its own PostgreSQL service (volume
+  `orgtree-hub-db`, never published on a host port); attachment blobs live in
+  the named volume `orgtree-hub-data`. A v1 deployment upgrades in place: the
+  first start imports the v1 store from `orgtree-hub-data` (see
+  [docs/v2.md](docs/v2.md)).
+- `HUB_DB_PASSWORD` (required): the password of that PostgreSQL service.
 - `restart: unless-stopped` gives start-on-boot once the Docker daemon itself
   starts with the machine (Docker Desktop default; `systemctl enable docker`
   on Linux).

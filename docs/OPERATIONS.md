@@ -13,7 +13,14 @@ All configuration is environment variables (compose reads `.env`; see
 |---|---|---|
 | `HUB_NAME` | container hostname | display name; clients discover it on connect, and it titles the hub UI |
 | `HUB_PORT` | `7370` | the FULL app: API + the unauthenticated read-only UI |
-| `HUB_DATA` | `/data` | data root: `hub.sqlite3` (WAL) + `blobs/` |
+| `HUB_DATA` | `/data` | data root: `blobs/` (attachment bytes); a v1 `hub.sqlite3` found here is imported at the first v2 start and kept |
+| `HUB_DATABASE_URL` | — (required, v2) | the hub's PostgreSQL (URL or key=value); tables in schema `mailhub`. Compose sets it to its own `postgres` service |
+| `HUB_DATABASE_PASSWORD` | — | the database password apart from the URL (compose passes `HUB_DB_PASSWORD` here) |
+| `HUB_DB_PASSWORD` | — (required by compose) | compose only: the password the `postgres` service is created with and the hub connects with |
+| `HUB_DB_POOL` | `32` | database connections the hub may hold |
+| `HUB_IMPORT_SQLITE` | on | import `HUB_DATA/hub.sqlite3` into an EMPTY database at startup (once) |
+| `HUB_LOG_VERBOSE` | off | `1`: every handler call/return and SQL statement on stderr |
+| `HUB_PUBLIC_PORT` | `7371` | the public listener's port inside the container/host process (v1 fixed it) |
 | `HUB_RETENTION_DAYS` | `30` | hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state** |
 | `HUB_ORG_RETENTION_DAYS` | `45` | roster rows silent this long are pruned, except rows still holding queued mail; a pruned client re-registers itself on its next 401 |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
@@ -30,8 +37,9 @@ host ports. Nothing else collides.
 
 ## Health and logs
 
-- `GET /healthz` → `{ok, name, orgs, queued, retention_days}`; the compose
-  file wires it as the container healthcheck.
+- `GET /healthz` → `{ok, name, orgs, queued, retention_days,
+  max_attachment_bytes}`; the compose file wires `orgtree-mailhub healthcheck`
+  (which asks it) as the container healthcheck.
 - One structured JSON line per request on stdout (`docker logs
   orgtree-mailhub`), plus one line per retention sweep. Slugs are logged,
   secrets never are. Logs are bounded by Docker's own log driver — set
@@ -106,7 +114,12 @@ If you want TLS, put a reverse proxy (e.g. Caddy) in front — see README.
 
 ## Backup and restore
 
-The whole state is `HUB_DATA`: `hub.sqlite3` (+ WAL sidecars) and `blobs/`.
+v2: the state is TWO volumes — the PostgreSQL volume (`orgtree-hub-db`: the
+records) and `HUB_DATA` (`orgtree-hub-data`: the attachment blobs, plus a v1
+`hub.sqlite3` kept from an upgrade). Back up both while the hub is stopped,
+so they agree; `docker exec orgtree-mailhub-db pg_dump -U mailhub mailhub`
+gives a portable dump of the records, and the volume copy below works for
+either volume. (v1's state was `hub.sqlite3` + WAL sidecars and `blobs/`.)
 
 ⚠ **The volume's real name is not the name in `compose.yaml`** (cross-org
 find 2026-09-16, neoja): compose prefixes volume names with the project
@@ -135,7 +148,19 @@ docker volume inspect "$VOL" >/dev/null             # errors if it does not exis
 
 ## Upgrades
 
-The store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
+v1 → v2: set `HUB_DB_PASSWORD` in `.env` (compose refuses to start without
+it), then rebuild and restart as always. The first start imports the v1 store
+from `orgtree-hub-data` into the empty database in one transaction, writes
+`v2-import-report.json` beside it, and never imports again; the SQLite file
+is kept. Rolling back to v1 means restarting the v1 image on the same
+`orgtree-hub-data` volume: it finds its own store as it left it (mail that
+arrived on v2 meanwhile is not in it). Details: `docs/v2.md`.
+
+Within v2, the schema is versioned in the database (`hub_meta`) and migrated
+at startup, so upgrading the image and restarting is the whole procedure; a
+database written by a newer hub is refused rather than downgraded.
+
+v1: the store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
 idempotent column migrations at connect time — upgrading the image and
 restarting is the whole procedure. Downgrading is not supported once a newer
 schema wrote new columns; take a backup before upgrading if you may roll
@@ -143,6 +168,18 @@ back. Message data is a relay queue: at worst, a recipient re-fetches
 anything unacked (delivery is at-least-once by design).
 
 ## Verification
+
+v2 (see `docs/v2.md` for what each proves; all on throwaway databases):
+
+- `cargo test --test hub_suite` — v1's protocol suite, ported check for check.
+- `cargo test --test concurrency` / `--test v2_behaviour` — races and v2's
+  deliberate differences.
+- `cargo test --test differential -- --ignored` — v1 and v2 side by side,
+  a v1 store imported, and `hubtool.py` against both.
+- `python tools/verify-docker.py [--upgrade]` — the image, its PostgreSQL
+  container and the in-place upgrade from a v1 volume, end to end.
+
+v1 (the Python server, kept as the reference during Phase 1):
 
 - `python tests/test_hub.py` — the hermetic protocol suite (no sockets).
 - `python tests/test_hubtool.py` / `tests/test_hubtool_migration.py` — the

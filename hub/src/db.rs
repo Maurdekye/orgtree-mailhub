@@ -52,8 +52,18 @@ impl Db {
         Ok(pg)
     }
 
+    /// The connection settings a configuration names: its URL, plus the
+    /// password given apart (`HUB_DATABASE_PASSWORD`) when there is one.
+    pub fn config_for(cfg: &Config) -> Result<tokio_postgres::Config> {
+        let mut pg = Self::pg_config(cfg.database_url())?;
+        if let Some(pw) = cfg.database_password() {
+            pg.password(pw);
+        }
+        Ok(pg)
+    }
+
     pub fn new(cfg: &Config) -> Result<Db> {
-        let pg = Self::pg_config(cfg.database_url())?;
+        let pg = Self::config_for(cfg)?;
         let mgr = Manager::from_config(pg, NoTls, ManagerConfig { recycling_method: RecyclingMethod::Fast });
         let pool = Pool::builder(mgr)
             .max_size(cfg.pool_size)
@@ -110,7 +120,7 @@ impl Db {
     /// see half the picture. The returned client holds the claim open.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn claim_instance(cfg: &Config) -> Result<tokio_postgres::Client> {
-        let pg = Self::pg_config(cfg.database_url())?;
+        let pg = Self::config_for(cfg)?;
         let (client, conn) = pg.connect(NoTls).await.context("could not connect to the database")?;
         tokio::spawn(async move {
             if let Err(e) = conn.await {
