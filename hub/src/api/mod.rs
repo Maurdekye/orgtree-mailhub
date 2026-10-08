@@ -8,6 +8,7 @@
 
 pub mod files;
 pub mod history;
+pub mod keys;
 pub mod mail;
 pub mod ops;
 pub mod sync;
@@ -206,6 +207,10 @@ enum Route {
     Profile,
     Sync,
     Devices,
+    Enrol,
+    SignOut,
+    IdentityGet,
+    IdentitySet,
     Conversations,
     Directory,
     History,
@@ -229,7 +234,27 @@ enum Route {
 /// `Some(Err(allowed))` when only the method differs, `None` otherwise.
 fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
     use Route::*;
-    // the one path with several methods: an upload in progress
+    // paths with several methods
+    let get_or_post = |get: Route, post: Route| -> Option<Result<Route, &'static str>> {
+        Some(if *method == Method::GET {
+            Ok(get)
+        } else if *method == Method::POST {
+            Ok(post)
+        } else {
+            Err("GET, POST")
+        })
+    };
+    match path {
+        "/api/devices" => return get_or_post(Devices, Enrol),
+        "/api/identity" => return get_or_post(IdentityGet, IdentitySet),
+        _ => {}
+    }
+    if let Some(device) = path.strip_prefix("/api/devices/") {
+        if device.is_empty() {
+            return None;
+        }
+        return Some(if *method == Method::DELETE { Ok(SignOut) } else { Err("DELETE") });
+    }
     if let Some(id) = path.strip_prefix("/api/uploads/") {
         if id.is_empty() || id.contains('/') {
             return None;
@@ -255,7 +280,6 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/roster" => (Roster, Method::GET),
         "/api/profile" => (Profile, Method::POST),
         "/api/sync" => (Sync, Method::POST),
-        "/api/devices" => (Devices, Method::GET),
         "/api/conversations" => (Conversations, Method::GET),
         "/api/directory" => (Directory, Method::GET),
         "/api/history" => (History, Method::GET),
@@ -399,6 +423,13 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Profile => mail::profile(hub, req).await,
         Route::Sync => sync::sync(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
+        Route::Enrol => keys::enrol(hub, req).await,
+        Route::SignOut => {
+            let device = req.path.strip_prefix("/api/devices/").unwrap_or_default().to_string();
+            keys::sign_out(hub, req, &device).await
+        }
+        Route::IdentityGet => keys::get_identity(hub, req).await,
+        Route::IdentitySet => keys::set_identity(hub, req).await,
         Route::Conversations => history::conversations(hub, req).await,
         Route::Directory => mail::directory(hub, req).await,
         Route::History => history::history(hub, req).await,

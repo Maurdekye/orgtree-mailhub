@@ -312,10 +312,105 @@ POST /api/link/cancel {"code": "<one-time code>"}                               
   log holds one; the hub stores only their sha256. `sealed` is at most 1 MiB.
 - Only the address that left a payload can cancel it.
 
+## Per-device keys, and signing a device out (G5)
+
+The shared v1 secret keeps working until the address moves on. With device
+keys, every device has its own Ed25519 key, enrolled by the address's
+identity key, and signs its calls with it; signing one device out cuts it
+off while the others keep working, under the same address (ruling 8
+October: the identity key lives on every device; signing a device out also
+rotates it).
+
+Keys and signatures are base64url without padding: public keys 32 bytes,
+signatures 64 (Ed25519, verified strictly). Texts are signed as UTF-8, lines
+joined by `\n`, no trailing newline. The hub never sees a private key.
+
+**1. The identity key** (once, with the shared secret):
+
+```
+POST /api/identity {"identity_key": "<public key>"}        X-Org-Auth: <slug>:<shared secret>
+GET  /api/identity → {"slug", "identity_key", "key_version": 0, "shared_key": true, "sealed": ...}
+```
+
+Setting the same key again is fine; a different one is refused (409) — a new
+identity key only comes by rotation.
+
+**2. Enrolling a device** (no other sign-in: the certificate is the proof):
+
+```
+POST /api/devices {"slug", "device_id", "public_key": "<the device's key>", "created": "<ISO time>",
+                   "signature": "<identity key over the certificate>", "name": "<optional>"}
+certificate =
+orgtree-hub device v2
+address=<slug>
+device_id=<device_id>
+public_key=<public_key>
+created=<created>
+```
+
+Refusals: 409 when the address has no identity key, or the device id was
+signed out (enrol under a new id), or 100 devices are enrolled; 401 when the
+identity key did not sign it; 422 for a malformed field. Enrolling the same
+device again replaces its key.
+
+**3. Signed calls**: any route, `X-Org-Auth: <slug>:dev1.<device_id>.<unix ms>.<signature>`,
+the device's key over
+
+```
+orgtree-hub call v2
+<slug>
+<device_id>
+<unix ms>
+```
+
+The time must be within 10 minutes of the hub's (its `Date` header tells the
+hub's clock). Like the shared secret it is a bearer credential for those
+minutes, so send it over TLS or a trusted network. A device's sync must name
+its own `device_id` (422 otherwise).
+
+**4. Signing a device out** (from any signed-in device, or with the shared
+secret while it still works):
+
+```
+DELETE /api/devices/{device_id}
+{"identity_key": "<new identity public key>",
+ "signature": "<CURRENT identity key over the rotation statement>",
+ "sealed": {"<each remaining enrolled device_id>": "<the new identity secret, sealed to that device>"}}
+rotation statement =
+orgtree-hub rotate v2
+address=<slug>
+sign_out=<device_id>
+identity_key=<new identity public key>
+key_version=<current key_version + 1>
+→ 200 {"signed_out": "<device_id>", "rotated": true, "key_version": <n>}
+```
+
+- From then on the device's calls are refused (401), its parked sync ends
+  with 401, and it cannot enrol again under that id. The other devices keep
+  working with their own keys; the address does not change.
+- The old identity key no longer enrols or rotates; the shared v1 secret
+  stops working (a device that still syncs with it must be enrolled first).
+- Every remaining enrolled device must get a sealed copy (422 naming one
+  that has none; 422 for a copy addressed to a device not enrolled here);
+  how it is sealed is the clients' choice (for example a sealed box to the
+  device's key). Each device sees the new `identity_key_version` in its next
+  sync answer and collects its copy from `GET /api/identity` (signed by
+  itself: `"sealed"` holds its copy).
+- 401 when the current identity key did not sign the statement; 404 for an
+  unknown device; 409 when it is already signed out.
+- An address with no identity key: `DELETE /api/devices/{id}` (no body) only
+  takes the device off the list and out of sync (`"rotated": false`).
+
+**5. The shared key off**: `POST /api/identity {"shared_key": false}` turns
+the shared v1 secret off for good, once at least one device has its own key
+(422 before; `true` is refused).
+
+`GET /api/devices` also shows each device's `public_key` (null for a device
+that only syncs with the shared secret) and `signed_out_at`.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
 `devices`, `history`, `delete`, `long_messages`, `message_limit`,
-`directory`, `uploads`, `link` (more as later parts land). A v1 hub reports
-neither.
+`directory`, `uploads`, `link`, `device_keys`. A v1 hub reports neither.

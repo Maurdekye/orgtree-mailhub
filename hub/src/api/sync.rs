@@ -20,7 +20,7 @@ use deadpool_postgres::GenericClient;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use super::mail::{authed, envelope_v2, mark_seen, one_address, roster_json, ENVELOPE_COLS, POLL_CEILING};
+use super::mail::{authed, authed_callers, envelope_v2, mark_seen, one_address, roster_json, ENVELOPE_COLS, POLL_CEILING};
 use super::{ok, refuse, ApiResult, Hub, Req};
 use crate::clock;
 use crate::db;
@@ -216,7 +216,7 @@ async fn seen_device(c: &impl GenericClient, slug: &str, device: &str, name: Opt
         // never the device that just arrived
         db::execute(
             c,
-            "DELETE FROM devices WHERE slug = $1 AND device_id IN
+            "DELETE FROM devices WHERE slug = $1 AND public_key IS NULL AND device_id IN
                (SELECT device_id FROM devices WHERE slug = $1 AND device_id <> $2
                  ORDER BY last_seen DESC, created_at DESC, device_id DESC OFFSET $3)",
             &[&slug, &device, &(DEVICES_MAX - 1)],
@@ -224,6 +224,13 @@ async fn seen_device(c: &impl GenericClient, slug: &str, device: &str, name: Opt
         .await?;
     }
     Ok(())
+}
+
+/// Was this device signed out (G5)?
+async fn signed_out(c: &impl GenericClient, slug: &str, device: &str) -> Result<bool, tokio_postgres::Error> {
+    Ok(db::query_opt(c, "SELECT 1 FROM devices WHERE slug = $1 AND device_id = $2 AND revoked_at IS NOT NULL", &[&slug, &device])
+        .await?
+        .is_some())
 }
 
 /// Custody, as an ack: the device's cursor says it holds everything up to
@@ -261,6 +268,9 @@ struct Batch {
     to: Cursor,
     more: bool,
     reset: bool,
+    /// the address's identity key version (G5): a change means fetch the
+    /// new key (`GET /api/identity`)
+    key_version: i32,
 }
 
 impl Batch {
@@ -276,11 +286,12 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     let heads = db::query_one(
         &c,
         "SELECT COALESCE((SELECT seq FROM mailbox_heads WHERE slug = $1), 0),
-                (SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM roster_seq)",
+                (SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM roster_seq),
+                COALESCE((SELECT key_version FROM identities WHERE slug = $1), 0)",
         &[&slug],
     )
     .await?;
-    let (mail_head, roster_head): (i64, i64) = (heads.get(0), heads.get(1));
+    let (mail_head, roster_head, key_version): (i64, i64, i32) = (heads.get(0), heads.get(1), heads.get(2));
     // a cursor beyond what this hub has written comes from another history
     // (a restored database, a re-created store): start the device over
     let reset = cur.mail > mail_head || cur.roster > roster_head;
@@ -361,7 +372,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
             None => removed.push(slug),
         }
     }
-    Ok(Batch { changes, roster, removed, to, more: more_mail || more_roster, reset })
+    Ok(Batch { changes, roster, removed, to, more: more_mail || more_roster, reset, key_version })
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -377,6 +388,7 @@ async fn sync_answer(hub: &Hub, slug: &str, cur: Cursor, b: Batch) -> ApiResult 
         "roster": b.roster,
         "roster_removed": b.removed,
         "more": b.more,
+        "identity_key_version": b.key_version,
     });
     if b.reset || cur.online != Some(print) {
         out["online"] = json!(online);
@@ -392,12 +404,18 @@ async fn sync_answer(hub: &Hub, slug: &str, cur: Cursor, b: Batch) -> ApiResult 
 pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let wait_query = req.query_float("wait", 25.0)?;
     let body = req.json_object_strict().await?;
-    let slugs = authed(hub, req).await?;
-    if slugs.is_empty() {
+    let callers = authed_callers(hub, req).await?;
+    if callers.is_empty() {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
+    let slugs: Vec<String> = callers.iter().map(|c| c.slug.clone()).collect();
     let slug = one_address(&slugs, body.get("slug"))?;
     let device = device_id(body.get("device_id"))?;
+    // G5: a device that signs its calls syncs as itself
+    let signer = callers.iter().find(|c| c.slug == slug && c.device.is_some()).and_then(|c| c.device.clone());
+    if signer.as_ref().is_some_and(|s| s != &device) && !callers.iter().any(|c| c.slug == slug && c.device.is_none()) {
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "device_id must be the signing device's own");
+    }
     let name = device_name(body.get("device_name"))?;
     let cur = Cursor::parse(body.get("cursor"))?;
     let wait = match body.get("wait") {
@@ -409,6 +427,9 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let deadline = Instant::now() + Duration::from_secs_f64(wait);
     {
         let c = hub.db.get().await?;
+        if signed_out(&c, &slug, &device).await? {
+            return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
+        }
         seen_device(&c, &slug, &device, name.as_deref()).await?;
         mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
         let senders = take_custody(&c, &slug, cur.mail).await?;
@@ -420,6 +441,10 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     loop {
         let listener = hub.presence.sync_listener(&slot);
         let batch = sync_check(hub, &slug, cur).await?;
+        // signed out while parked: refused from now on
+        if signed_out(&hub.db.get().await?, &slug, &device).await? {
+            return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
+        }
         if batch.news() || stop || Instant::now() >= deadline {
             return sync_answer(hub, &slug, cur, batch).await;
         }
@@ -444,7 +469,8 @@ pub async fn devices(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let rows = db::query(
         &c,
-        "SELECT device_id, name, created_at, last_seen FROM devices WHERE slug = $1 ORDER BY created_at, device_id LIMIT $2",
+        "SELECT device_id, name, created_at, last_seen, public_key, revoked_at FROM devices WHERE slug = $1
+          ORDER BY created_at, device_id LIMIT $2",
         &[&slug, &DEVICES_MAX],
     )
     .await?;
@@ -459,7 +485,9 @@ pub async fn devices(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
                 "name": r.get::<_, String>(1),
                 "created_at": clock::iso(r.get(2)),
                 "last_seen": clock::iso(seen),
-                "online": now - seen < window,
+                "online": now - seen < window && r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(5).is_none(),
+                "public_key": r.get::<_, Option<String>>(4),
+                "signed_out_at": r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(5).map(clock::iso),
             })
         })
         .collect();

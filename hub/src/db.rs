@@ -36,6 +36,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (4, "history", include_str!("../migrations/0004_history.sql")),
     (5, "long bodies", include_str!("../migrations/0005_long_bodies.sql")),
     (6, "transfers", include_str!("../migrations/0006_transfers.sql")),
+    (7, "device keys", include_str!("../migrations/0007_device_keys.sql")),
 ];
 
 /// Gives messages that have no change-log entry one (schema 3 does it for

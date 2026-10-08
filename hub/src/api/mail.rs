@@ -146,6 +146,19 @@ pub fn roster_json(
     })
 }
 
+/// Every credential a request proves, with the device that signed it when
+/// one did (G5). Read before the future starts, as `authed`.
+pub(super) fn authed_callers<'a>(hub: &'a Hub, req: &Req) -> impl std::future::Future<Output = ApiResult<Vec<auth::Caller>>> + Send + 'a {
+    let pairs = auth::pairs(req.auth_header());
+    async move {
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let c = hub.db.get().await?;
+        Ok(auth::authenticate_callers(&c, &pairs).await?)
+    }
+}
+
 /// The one address a v2 GET or DELETE acts for (`?slug=` when the header
 /// signs in several). The request is read before the future starts, so the
 /// future does not borrow it.

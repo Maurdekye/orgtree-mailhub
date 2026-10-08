@@ -103,6 +103,7 @@ Auth rides one header, never URLs or bodies:
 | `GET /api/directory?q=&after=&limit=` | every registered address, searched and paged |
 | `POST /api/uploads` · `PATCH`/`GET`/`DELETE /api/uploads/{id}` | a resumable upload: open it with its size, send pieces at offsets, resume after a cut |
 | `POST /api/link/put` · `/take` · `/cancel` | hand a sealed payload to a new device under a one-time code |
+| `GET`/`POST /api/identity` · `POST /api/devices` · `DELETE /api/devices/{id}` | per-device keys: the identity key, enrolling a device, signing one out (rotating the identity key) |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).

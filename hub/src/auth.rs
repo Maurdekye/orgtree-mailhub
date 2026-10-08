@@ -56,21 +56,112 @@ pub fn pairs(header: Option<&http::HeaderValue>) -> Vec<Pair> {
 /// header order (a slug presented twice counts twice, as in v1). Unknown
 /// slugs and wrong secrets simply drop out: a multiplexed call proceeds for
 /// the valid ones.
-#[tracing::instrument(level = "debug", skip_all, fields(slugs = ?pairs.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>()), ret(level = "debug"))]
 pub async fn authenticate(c: &impl GenericClient, pairs: &[Pair]) -> Result<Vec<String>, tokio_postgres::Error> {
+    Ok(authenticate_callers(c, pairs).await?.into_iter().map(|c| c.slug).collect())
+}
+
+/// Who a credential proved to be: the address, and the device when the call
+/// was signed with that device's own key (G5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Caller {
+    pub slug: String,
+    pub device: Option<String>,
+}
+
+/// How far a device-signed call's time may be from the hub's.
+pub const CALL_SKEW_MS: i64 = 10 * 60 * 1000;
+
+/// What a device signs to make a call: `X-Org-Auth: <slug>:dev1.<device_id>.<unix ms>.<signature>`,
+/// the signature (Ed25519, base64url without padding) over this text.
+pub fn call_message(slug: &str, device: &str, unix_ms: i64) -> String {
+    format!("orgtree-hub call v2\n{slug}\n{device}\n{unix_ms}")
+}
+
+/// A device's signed credential, parsed (device ids may hold dots, so the
+/// time and signature are taken from the right).
+fn device_token(secret: &str) -> Option<(&str, i64, ed25519_dalek::Signature)> {
+    let rest = secret.strip_prefix("dev1.")?;
+    let (head, sig) = rest.rsplit_once('.')?;
+    let (device, ms) = head.rsplit_once('.')?;
+    if device.is_empty() || ms.is_empty() || !ms.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let sig = b64url(sig)?;
+    let sig: [u8; 64] = sig.try_into().ok()?;
+    Some((device, ms.parse().ok()?, ed25519_dalek::Signature::from_bytes(&sig)))
+}
+
+/// base64url without padding (with it, too), as the keys and signatures of
+/// v2's device protocol are written.
+pub fn b64url(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.trim_end_matches('=')).ok()
+}
+
+/// An Ed25519 public key as the protocol writes it (base64url, 32 bytes).
+pub fn verifying_key(b64: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    let bytes: [u8; 32] = b64url(b64)?.try_into().ok()?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes).ok()
+}
+
+/// `signature` (base64url) by `key` (base64url) over `message`.
+pub fn signed_by(key: &str, message: &str, signature: &str) -> bool {
+    let (Some(key), Some(sig)) = (verifying_key(key), b64url(signature)) else { return false };
+    let Ok(sig) = <[u8; 64]>::try_from(sig) else { return false };
+    key.verify_strict(message.as_bytes(), &ed25519_dalek::Signature::from_bytes(&sig)).is_ok()
+}
+
+/// Every credential the header proves, in header order: an address's shared
+/// v1 secret (while the address keeps it on), or a call its enrolled,
+/// signed-in device signed with its own key within the last ten minutes.
+#[tracing::instrument(level = "debug", skip_all, fields(slugs = ?pairs.iter().map(|p| p.slug.as_str()).collect::<Vec<_>>()), ret(level = "debug"))]
+pub async fn authenticate_callers(c: &impl GenericClient, pairs: &[Pair]) -> Result<Vec<Caller>, tokio_postgres::Error> {
     if pairs.is_empty() {
         return Ok(Vec::new());
     }
     let mut wanted: Vec<&str> = pairs.iter().map(|p| p.slug.as_str()).collect();
     wanted.sort_unstable();
     wanted.dedup();
-    let rows = db::query(c, "SELECT slug, fingerprint FROM identities WHERE slug = ANY($1)", &[&wanted]).await?;
-    let stored: std::collections::HashMap<String, String> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
-    Ok(pairs
+    let rows = db::query(c, "SELECT slug, fingerprint, shared_key_enabled FROM identities WHERE slug = ANY($1)", &[&wanted]).await?;
+    let stored: std::collections::HashMap<String, (String, bool)> = rows.iter().map(|r| (r.get(0), (r.get(1), r.get(2)))).collect();
+    let tokens: Vec<Option<(&str, i64, ed25519_dalek::Signature)>> = pairs.iter().map(|p| device_token(&p.secret)).collect();
+    let (mut tslugs, mut tdevices) = (Vec::new(), Vec::new());
+    for (p, t) in pairs.iter().zip(&tokens) {
+        if let Some((device, _, _)) = t {
+            tslugs.push(p.slug.as_str());
+            tdevices.push(*device);
+        }
+    }
+    let keys: std::collections::HashMap<(String, String), String> = if tslugs.is_empty() {
+        Default::default()
+    } else {
+        db::query(
+            c,
+            "SELECT d.slug, d.device_id, d.public_key FROM devices d
+               JOIN unnest($1::text[], $2::text[]) AS w(slug, device_id) ON d.slug = w.slug AND d.device_id = w.device_id
+              WHERE d.public_key IS NOT NULL AND d.revoked_at IS NULL",
+            &[&tslugs, &tdevices],
+        )
+        .await?
         .iter()
-        .filter(|p| stored.get(&p.slug).map(|fp| ct_eq(fp.as_bytes(), fingerprint(&p.secret).as_bytes())).unwrap_or(false))
-        .map(|p| p.slug.clone())
-        .collect())
+        .map(|r| ((r.get(0), r.get(1)), r.get(2)))
+        .collect()
+    };
+    let now = crate::clock::now().timestamp_millis();
+    let mut out = Vec::new();
+    for (p, t) in pairs.iter().zip(&tokens) {
+        let Some((fp, shared)) = stored.get(&p.slug) else { continue };
+        if *shared && ct_eq(fp.as_bytes(), fingerprint(&p.secret).as_bytes()) {
+            out.push(Caller { slug: p.slug.clone(), device: None });
+            continue;
+        }
+        let Some((device, ms, sig)) = t else { continue };
+        let Some(key) = keys.get(&(p.slug.clone(), device.to_string())).and_then(|k| verifying_key(k)) else { continue };
+        if (now - ms).abs() <= CALL_SKEW_MS && key.verify_strict(call_message(&p.slug, device, *ms).as_bytes(), sig).is_ok() {
+            out.push(Caller { slug: p.slug.clone(), device: Some(device.to_string()) });
+        }
+    }
+    Ok(out)
 }
 
 /// The secret `/api/register` reads for `slug`: v1 scanned every
