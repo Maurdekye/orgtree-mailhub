@@ -2,9 +2,10 @@
 //! their owners delete them (G4) unless `HUB_RETENTION_DAYS` is set; then,
 //! as v1, messages and attachments older than that go (the attachment's file
 //! first, then its row). Uploads never bound to a message go after a week
-//! either way. Roster rows silent longer than `HUB_ORG_RETENTION_DAYS` go —
-//! except an address still holding queued mail, so a delivery is never
-//! stranded. Work happens in bounded batches, each its own short
+//! either way. An address stays on the roster until it unregisters or the
+//! operator removes it (G9) unless `HUB_ORG_RETENTION_DAYS` is set; then,
+//! as v1, roster rows silent longer than that go — except an address still
+//! holding queued mail, so a delivery is never stranded. Work happens in bounded batches, each its own short
 //! transaction.
 
 use std::sync::Arc;
@@ -91,7 +92,10 @@ pub async fn run_once(hub: &Hub) -> Result<Swept> {
             }
         }
     }
-    let org_cut = cutoff(hub.cfg.org_retention_days)?;
+    let Some(org_days) = hub.cfg.org_retention_days else {
+        return Ok(Swept { messages, attachments, pruned: Vec::new() });
+    };
+    let org_cut = cutoff(org_days)?;
     let mut c = c;
     let tx = c.transaction().await?;
     sync::roster_lock(&tx).await?;

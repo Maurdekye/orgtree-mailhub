@@ -204,6 +204,7 @@ enum Route {
     Sync,
     Devices,
     Conversations,
+    Directory,
     History,
     DeleteMessage,
     MessageBody,
@@ -231,6 +232,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/sync" => (Sync, Method::POST),
         "/api/devices" => (Devices, Method::GET),
         "/api/conversations" => (Conversations, Method::GET),
+        "/api/directory" => (Directory, Method::GET),
         "/api/history" => (History, Method::GET),
         "/healthz" => (Health, Method::GET),
         "/" => (Index, Method::GET),
@@ -369,6 +371,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Sync => sync::sync(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
         Route::Conversations => history::conversations(hub, req).await,
+        Route::Directory => mail::directory(hub, req).await,
         Route::History => history::history(hub, req).await,
         Route::DeleteMessage => {
             let id = req.path.strip_prefix("/api/messages/").unwrap_or_default().to_string();

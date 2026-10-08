@@ -312,7 +312,7 @@ def start_python(data: str) -> Side:
 def start_rust(rust_bin: str, data: str, database_url: str) -> Side:
     port, public = free_port(), free_port()
     env = dict(clean_env(), HUB_DATABASE_URL=database_url, HUB_DATA=data, HUB_PORT=str(port), HUB_BIND="127.0.0.1", HUB_PUBLIC="1",
-               HUB_PUBLIC_BIND="127.0.0.1", HUB_PUBLIC_PORT=str(public), HUB_NAME="diff-hub", HUB_RETENTION_DAYS="30",
+               HUB_PUBLIC_BIND="127.0.0.1", HUB_PUBLIC_PORT=str(public), HUB_NAME="diff-hub", HUB_RETENTION_DAYS="30", HUB_ORG_RETENTION_DAYS="45",
                HUB_MAX_FILE_BYTES=str(LIMIT))
     proc = subprocess.Popen([rust_bin], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return wait_healthy(Side("rust", port, public, data, proc))

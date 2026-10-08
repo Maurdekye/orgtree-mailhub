@@ -777,6 +777,51 @@ pub async fn roster_route(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     ok(json!({ "name": hub.cfg.hub_name, "roster": roster }))
 }
 
+// ----------------------------------------------------------------- directory
+
+/// Entries one directory page carries at most.
+pub const DIRECTORY_MAX: i64 = 500;
+
+/// G9: `GET /api/directory[?q=][&after=][&limit=100]` — every registered
+/// address (a page at a time, by address), or those whose address, name,
+/// username or about line contains `q` (any case). `after` from an answer
+/// fetches the next page; it is null on the last.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
+pub async fn directory(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
+    let q = req.query("q").map(py_strip).unwrap_or("").to_string();
+    let after = req.query("after").unwrap_or("").to_string();
+    let limit = match req.query("limit") {
+        None | Some("") => 100,
+        Some(l) => match l.trim().parse::<i64>() {
+            Ok(l) => l.clamp(1, DIRECTORY_MAX),
+            Err(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "limit must be a whole number"),
+        },
+    };
+    let slugs = authed(hub, req).await?;
+    if slugs.is_empty() {
+        return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+    }
+    let c = hub.db.get().await?;
+    mark_seen(hub, &c, &slugs).await?;
+    // q matches literally: LIKE's own characters are escaped
+    let pattern = format!("%{}%", pg_text(q).replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let rows = db::query(
+        &c,
+        &format!(
+            "SELECT {ROSTER_COLS} FROM identities
+              WHERE slug > $1
+                AND (slug ILIKE $2 OR org_name ILIKE $2 OR username ILIKE $2 OR blurb ILIKE $2)
+              ORDER BY slug LIMIT $3"
+        ),
+        &[&pg_text(after), &pattern, &(limit + 1)],
+    )
+    .await?;
+    let more = rows.len() as i64 > limit;
+    let entries: Vec<Value> = rows.iter().take(limit as usize).map(|r| roster_entry(hub, r)).collect();
+    let next = if more { entries.last().and_then(|e| e["slug"].as_str()).map(str::to_string) } else { None };
+    ok(json!({ "name": hub.cfg.hub_name, "entries": entries, "after": next }))
+}
+
 // ------------------------------------------------------------------- profile
 
 /// G2: the owner edits the display name (`name`, up to 48 characters) and

@@ -232,9 +232,31 @@ A body is kept whole, never cut, up to the hub's limit.
   limit is now. Each upload is still checked against the limit on its own.
 - A long body's file is deleted with the message's last copy (G4).
 
+## A complete directory (G9)
+
+Every registered address is listed to every signed-in client — address,
+kind, name, about line, online, last seen — with no opt-out, and stays
+listed until it unregisters or the operator removes it
+(`orgtree-mailhub remove-address SLUG...`). An idle address is no longer
+pruned unless the operator sets `HUB_ORG_RETENTION_DAYS` (then, as v1,
+except an address still holding queued mail). Joins, edits and leaves reach
+syncing clients through sync (G1); `/api/roster` still lists everyone, as
+in v1.
+
+```
+GET /api/directory[?q=<text>][&after=<cursor>][&limit=100]
+→ 200 {"name": "<hub>", "entries": [<roster entry>, ...], "after": "<cursor>" | null}
+```
+
+Entries are roster entries, ordered by address, `limit` a page (default 100,
+at most 500); `after` from an answer fetches the next page, `null` on the
+last. With `q`, only addresses whose address, name, username or about line
+contains it (any case; `%` and `_` are plain characters). Any signed-in
+address may read it; 422 `limit must be a whole number`.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
-`devices`, `history`, `delete`, `long_messages`, `message_limit` (more as
-later parts land). A v1 hub reports neither.
+`devices`, `history`, `delete`, `long_messages`, `message_limit`,
+`directory` (more as later parts land). A v1 hub reports neither.

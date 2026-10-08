@@ -4,6 +4,7 @@
 //!     orgtree-mailhub migrate                 bring the database schema up to date and exit
 //!     orgtree-mailhub import-sqlite [PATH] [--merge]
 //!                                             import a v1 store (default: $HUB_DATA/hub.sqlite3)
+//!     orgtree-mailhub remove-address SLUG...   take addresses off the roster (as their own unregister)
 //!     orgtree-mailhub healthcheck             exit 0 when the local hub answers /healthz
 //!     orgtree-mailhub version
 
@@ -12,7 +13,8 @@ use std::process::ExitCode;
 
 use mailhub::{import, server, Config, VERSION};
 
-const USAGE: &str = "usage: orgtree-mailhub [serve | migrate | import-sqlite [PATH] [--merge] | healthcheck | version]";
+const USAGE: &str =
+    "usage: orgtree-mailhub [serve | migrate | import-sqlite [PATH] [--merge] | remove-address SLUG... | healthcheck | version]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +72,20 @@ fn main() -> ExitCode {
                 let mode = if merge { import::Mode::Merge } else { import::Mode::Empty };
                 let report = import::import(&db, &path, &cfg.blob_dir(), mode).await?;
                 println!("{}", serde_json::to_string_pretty(&report.json)?);
+                Ok(())
+            }
+            "remove-address" => {
+                mailhub::log::init_tracing(cfg.verbose);
+                let slugs: Vec<String> = args.iter().skip(1).cloned().collect();
+                if slugs.is_empty() {
+                    anyhow::bail!("name the addresses to remove\n{USAGE}");
+                }
+                let db = mailhub::db::Db::new(&cfg)?;
+                db.migrate().await?;
+                let gone = mailhub::api::sync::remove_addresses(&db, &slugs).await?;
+                for s in &slugs {
+                    println!("{s}: {}", if gone.contains(s) { "removed" } else { "not registered" });
+                }
                 Ok(())
             }
             other => Err(anyhow::anyhow!("unknown command {other:?}\n{USAGE}")),

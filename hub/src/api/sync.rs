@@ -119,6 +119,18 @@ pub async fn leave(tx: &impl GenericClient, slugs: &[String]) -> Result<Vec<Stri
     Ok(gone)
 }
 
+/// The operator removes these addresses from the roster (the CLI's
+/// `remove-address`): as an unregister, under the roster lock. Returns the
+/// ones that were registered.
+pub async fn remove_addresses(db: &db::Db, slugs: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut c = db.get().await?;
+    let tx = c.transaction().await?;
+    roster_lock(&tx).await?;
+    let gone = leave(&tx, slugs).await?;
+    tx.commit().await?;
+    Ok(gone)
+}
+
 /// A sync position: the address's change log, the roster, and the online
 /// set the device was last told (`<mail>-<roster>-<16 hex>`; opaque to
 /// clients).

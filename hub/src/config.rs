@@ -24,7 +24,10 @@ pub struct Config {
     /// days mail and files are kept (`HUB_RETENTION_DAYS`); None, the v2
     /// default, keeps them until their owners delete them (G4)
     pub retention_days: Option<i64>,
-    pub org_retention_days: i64,
+    /// days a silent address stays on the roster (`HUB_ORG_RETENTION_DAYS`);
+    /// None, the v2 default, keeps it until it unregisters or the operator
+    /// removes it (G9)
+    pub org_retention_days: Option<i64>,
     /// the startup default for one attachment upload (`HUB_MAX_FILE_BYTES`)
     pub max_file_bytes: u64,
     /// the embedding host's live override (`HUB_RUNTIME_CONFIG_FILE`)
@@ -130,7 +133,10 @@ impl Config {
                 None | Some("") => None,
                 Some(_) => Some(clamp_days(int("HUB_RETENTION_DAYS", 0)?)),
             },
-            org_retention_days: clamp_days(int("HUB_ORG_RETENTION_DAYS", 45)?),
+            org_retention_days: match get("HUB_ORG_RETENTION_DAYS").map(py_strip) {
+                None | Some("") => None,
+                Some(_) => Some(clamp_days(int("HUB_ORG_RETENTION_DAYS", 0)?)),
+            },
             max_file_bytes: u64::try_from(max_file_bytes).unwrap_or(u64::MAX),
             runtime_config_file: get("HUB_RUNTIME_CONFIG_FILE").filter(|v| !v.is_empty()).map(PathBuf::from),
             database_url,
@@ -207,7 +213,7 @@ mod tests {
         assert_eq!(c.public_port, 7371);
         assert_eq!(c.data_dir, PathBuf::from("/data"));
         assert_eq!(c.retention_days, None, "v2 keeps mail until it is deleted (G4)");
-        assert_eq!(c.org_retention_days, 45);
+        assert_eq!(c.org_retention_days, None, "v2 lists an address until it leaves (G9)");
         assert_eq!(c.max_file_bytes, 1024 * 1024 * 1024);
         assert!(c.runtime_config_file.is_none());
         assert!(!c.hub_name.is_empty());

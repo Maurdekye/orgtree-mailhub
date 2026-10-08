@@ -100,6 +100,7 @@ Auth rides one header, never URLs or bodies:
 | `GET /api/conversations` · `GET /api/history?with=` | who you have mail with (last message, unread) · one conversation, newest first, paged |
 | `DELETE /api/messages/{id}` · `DELETE /api/conversations/{address}` | delete your copy (the other side keeps theirs) |
 | `GET /api/messages/{id}/body` | a message's whole body (streamed, ranges) |
+| `GET /api/directory?q=&after=&limit=` | every registered address, searched and paged |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).
