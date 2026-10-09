@@ -91,6 +91,18 @@ listed is meant to be byte-identical or behavior-identical to V1.
    the main port also says where the relay-only door listens (`door`), for
    Hubchat's phone linking (`hubchat-1-0-0-milestone`, item 1). All
    additive: v2.0.0 clients see no change.
+10. **v2.0.2: presence that notices a client is gone** (2026-10-09,
+   coordinator rulings 22:48Z; docket item
+   `hubchat-shows-an-org-as-online-while-its-orgtree`, from the user's
+   report that an Orgtree killed by an update stayed "online" in Hubchat).
+   A parked poll or sync that ends with its client hung up leaves the
+   address online only for a 10 s grace, not v1's 90 s window (a deliberate
+   difference, docs/v2.md row 30); parked syncs of devices in use hear of
+   presence changes within a second; `HUB_PUBLIC_ADVERTISE` names the
+   door's address as clients reach it (`door.advertise`). TCP keepalive was
+   tried and left out: probes every few seconds would wake phones' radios
+   (coordinator's ruling, 23:20Z), so a client lost without closing its
+   connection still shows offline after about 2 to 2.5 minutes.
 
 ## Known V1 gaps carried across deliberately
 

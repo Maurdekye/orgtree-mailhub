@@ -45,6 +45,10 @@ host ports. Nothing else collides.
   relay-only door listens) on the main port when the door runs; the compose
   file wires `orgtree-mailhub healthcheck` (which asks it) as the container
   healthcheck.
+- Presence (v2.0.2): a client that hangs up on a parked poll or sync (it
+  stopped, was killed or crashed) shows offline after 10 s; one lost
+  without closing its connection, after its wait and the 90 s window
+  (docs/v2-additions.md, "Presence").
 - One structured JSON line per request on stdout (`docker logs
   orgtree-mailhub`), plus one line per retention sweep. Slugs are logged,
   secrets never are. Logs are bounded by Docker's own log driver — set
