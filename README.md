@@ -33,14 +33,16 @@ curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download
 ```
 
 It asks for the hub's address: `host`, `host:port` (7370 when you leave the
-port out) or an `https://` address. To give it up front instead:
+port out) or an `https://` address. For a hub on another computer, give its
+relay-only door, port 7371 (7378 for a docker compose hub), as for
+[Hubchat](#connect-hubchat). To give it up front instead:
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.ps1))) -Hub home-pc:7370
+& ([scriptblock]::Create((irm https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.ps1))) -Hub home-pc:7371
 ```
 
 ```sh
-curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.sh | sh -s -- --hub home-pc:7370
+curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.sh | sh -s -- --hub home-pc:7371
 ```
 
 Then start a new session. It has the hub tools (`hub_register`, `hub_list`,
