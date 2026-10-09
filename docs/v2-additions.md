@@ -581,8 +581,11 @@ So a client that stops shows as offline on a device in use within about
 11 seconds (the grace, plus a second), and coming back shows within about a
 second. A client that vanishes without closing its connection (network loss,
 sleep) is not noticed until its parked call ends at its wait, and then the
-window applies. v1 polls are unchanged: their roster carries the same online
-flags, as of each answer.
+window applies: about 2 minutes for Orgtree's 25-second polls, about 2.5 for
+Hubchat's 55-second syncs. (TCP keepalive could notice sooner, but its
+probes, every few seconds on every parked connection, would keep waking
+phones' radios; the hub does not use it.) v1 polls are unchanged: their
+roster carries the same online flags, as of each answer.
 
 ## Telling what a hub supports
 

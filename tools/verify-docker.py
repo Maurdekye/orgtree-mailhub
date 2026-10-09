@@ -4,7 +4,8 @@ Builds the image, runs a throwaway PostgreSQL container and the hub on their
 own network, ports and named volumes, and drives the real wire protocol
 against it: register (owned addresses), send (idempotent), the multiplexed
 long poll, custody ack, receipts, attachments, presence, the read-only UI,
-the FR-10 public listener split, the container healthcheck, and
+the FR-10 public listener split, the container healthcheck, a client
+killed mid-poll showing offline after the 10 s grace (v2.0.2), and
 persistence across a hub restart and a database restart.
 
 With --upgrade it also proves the in-place upgrade from v1: the v1 image
@@ -150,8 +151,11 @@ def start_hub(image: str, extra_env: list[str] | None = None) -> None:
         *env, *(extra_env or []), "-v", f"{VOL}:/data", image)
 
 
+CLIENT = f"{NAME}-client"
+
+
 def cleanup() -> None:
-    for c in (NAME, DB):
+    for c in (NAME, DB, CLIENT):
         quiet("docker", "rm", "-f", c)
     for v in (VOL, DBVOL):
         quiet("docker", "volume", "rm", v)
@@ -214,6 +218,39 @@ def protocol(sa: str, sb: str) -> tuple[str, str, str]:
     return alice, bob, str(aid)
 
 
+def hang_up() -> None:
+    """v2.0.2: a long poll parked from a client container on the hub's
+    network (bash /dev/tcp in the postgres image, holding a poll as Orgtree's
+    engine does); the container is killed, so its connection closes, and
+    the address shows offline after the 10 s grace, not v1's 90 s."""
+    ws, ks = "e" * 32, "9" * 32
+    watcher, killed = slug_for("watcher", ws), slug_for("killed", ks)
+    req(FULL, "/api/register", {"slug": watcher, "org_name": "Watcher"}, auth=f"{watcher}:{ws}")
+    req(FULL, "/api/register", {"slug": killed, "org_name": "Killed"}, auth=f"{killed}:{ks}")
+    script = (f"exec 3<>/dev/tcp/{NAME}/7370 && printf 'POST /api/poll?wait=55 HTTP/1.1\\r\\nHost: hub\\r\\n"
+              f"X-Org-Auth: {killed}:{ks}\\r\\nContent-Length: 0\\r\\n\\r\\n' >&3 && cat <&3 >/dev/null; sleep 600")
+    run("docker", "run", "-d", "--name", CLIENT, "--network", NET, "--entrypoint", "bash", "postgres:18", "-c", script)
+    time.sleep(4)
+
+    def online() -> bool:
+        _, out = req(FULL, "/api/roster", auth=f"{watcher}:{ws}")
+        return any(r["slug"] == killed and r["online"] for r in (out.get("roster", []) if isinstance(out, dict) else []))
+
+    check("hang-up: the client container holds a parked poll (online)", online())
+    t0 = time.monotonic()
+    run("docker", "kill", CLIENT)
+    gone = None
+    while gone is None and time.monotonic() - t0 < 60:
+        if online():
+            time.sleep(0.5)
+        else:
+            gone = round(time.monotonic() - t0, 1)
+    print(f"  measured: offline {gone} s after the kill")
+    check("hang-up: a killed client (its connection closed) shows offline after the 10 s grace, not v1's 90 s",
+          gone is not None and 9 <= gone <= 14, str(gone))
+    quiet("docker", "rm", "-f", CLIENT)
+
+
 def persistence(alice: str, sa: str, bob: str, aid: str, orgs: int) -> None:
     h2 = wait_health(FULL)
     check("persistence: orgs survive", h2.get("orgs") == orgs, str(h2))
@@ -258,6 +295,7 @@ def main() -> int:
         check("logging: structured JSON request lines on stdout",
               any(line.startswith("{") and '"path"' in line for line in logs.splitlines()))
         check("logging: the startup line on stdout", any('"hub": "verify-hub"' in line for line in logs.splitlines()))
+        hang_up()
         if upgrade:
             print("\nin-place upgrade from v1")
             quiet("docker", "rm", "-f", NAME)
