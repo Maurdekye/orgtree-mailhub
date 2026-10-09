@@ -87,8 +87,10 @@ listed is meant to be byte-identical or behavior-identical to V1.
    every hub on an identity's list and merges the conversation, with a
    cursor that means the same on every hub. A new device can sync from now
    (`start: "now"`) and page back by time (`before=<unix ms>`), and
-   `/healthz` and sync answers carry the hub's clock (`now`). All additive:
-   v2.0.0 clients see no change.
+   `/healthz` and sync answers carry the hub's clock (`now`). `/healthz` on
+   the main port also says where the relay-only door listens (`door`), for
+   Hubchat's phone linking (`hubchat-1-0-0-milestone`, item 1). All
+   additive: v2.0.0 clients see no change.
 
 ## Known V1 gaps carried across deliberately
 

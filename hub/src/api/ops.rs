@@ -17,7 +17,7 @@ use crate::db;
 use crate::wire::{self, pg_text};
 
 #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
-pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
+pub async fn healthz(hub: &Arc<Hub>, on_door: bool) -> ApiResult {
     let c = hub.db.get().await?;
     let row = db::query_one(
         &c,
@@ -28,7 +28,7 @@ pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
     let Ok(limit) = blobs::attachment_limit(&hub.cfg) else {
         return refuse(StatusCode::SERVICE_UNAVAILABLE, "attachment limit configuration is invalid");
     };
-    ok(json!({
+    let mut health = json!({
         "ok": true,
         "name": hub.cfg.hub_name,
         "orgs": row.get::<_, i64>(0),
@@ -43,13 +43,20 @@ pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
         // the hub's clock in unix milliseconds, so a client on several hubs
         // can estimate each one's offset (lazy history orders by hub times)
         "now": clock::now().timestamp_millis(),
-    }))
+    });
+    // where the relay-only door listens, so a client on this machine can
+    // hand its address to a phone. The main port only: a client on the door
+    // already has its address, and strangers there get no internal ones.
+    if let (false, Some(door), Value::Object(o)) = (on_door, hub.door.get(), &mut health) {
+        o.insert("door".into(), json!({ "port": door.port(), "bind": door.ip().to_string() }));
+    }
+    ok(health)
 }
 
 /// The protocol additions this hub serves (docs/v2-additions.md), so a
 /// client can tell what a hub supports without probing routes.
 pub const FEATURES: &[&str] =
-    &["person", "profile", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history"];
+    &["person", "profile", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history", "door"];
 
 /// v1 read the page in text mode, so line endings reached the browser as
 /// `\n` whatever the checkout's were; the embedded copy is served the same.

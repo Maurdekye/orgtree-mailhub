@@ -519,13 +519,46 @@ trip), since received times are each hub's own.
 
 `/healthz` lists the feature as `lazy_history`.
 
+## The relay-only door's address (v2.0.1)
+
+When the hub runs its relay-only door (`HUB_PUBLIC`), `/healthz` on the
+main port says where the door listens. A client on the same machine
+(Hubchat on the PC, linking a phone) can put that address in a setup code
+instead of guessing:
+
+```
+GET /healthz                                  (on the main port)
+→ 200 {..., "door": {"port": 7371, "bind": "100.64.1.2"}}
+```
+
+- `port` and `bind` are where the door's listener actually listens. `bind`
+  is always an IP address: a host name in `HUB_PUBLIC_BIND` shows as the
+  address it resolved to, and port 0 as the port the system picked.
+- `"0.0.0.0"` (or `"::"` for IPv6) means every address of the machine, and
+  the client picks one the phone can reach. Any other value is the one
+  address the door accepts connections on.
+- **No door, no field.** A hub that runs no door leaves `door` out. So does
+  a hub without this feature (v2.0.0, v1); `features` tells the two apart.
+- **The main port only.** The door's own `/healthz` never carries `door`: a
+  client there already has the door's address, and the door, which strangers
+  can reach, doesn't hand out the machine's own addresses.
+- **What the hub can't see.** The hub reports its own listener. Behind a
+  port mapping the reachable address is different: Docker publishes the
+  door's 7371 as host port 7378 by default (`compose.yaml`), and a router
+  forward or a tunnel has its own address. Before putting an address in a
+  setup code, check that it answers `/healthz`.
+
+`/healthz` lists the feature as `door`.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.1"`), `"features"` and `"now"`
 (the hub's clock, unix milliseconds). The features are the additions this
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
-`device_keys`, `active`, `lazy_history`. A v1 hub reports none of them.
+`device_keys`, `active`, `lazy_history`, `door`. A v1 hub reports none of
+them. On the main port, `/healthz` also says where the relay-only door
+listens (`door`, when one runs).
 
 ## The hub's version, to every client
 

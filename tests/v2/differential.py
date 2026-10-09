@@ -205,7 +205,7 @@ class Diff:
                     s.set(name, fn(r))
                 except Exception:  # noqa: BLE001 — a failed answer simply has nothing to capture
                     pass
-        self.compare(sid, out[0], out[1], compare_headers, exact)
+        self.compare(sid, out[0], out[1], compare_headers, exact, public)
         if sid in EXPECTED and out[0].status_code != out[1].status_code:
             p = urllib.parse.unquote(str(resolve(path, self.sides[0])).split("?")[0])
             self.divergent.add((p, out[0].status_code, out[1].status_code))
@@ -235,11 +235,12 @@ class Diff:
             v["body"] = body
         return v
 
-    def set_aside_additions(self, va: dict[str, Any], vb: dict[str, Any]) -> None:
+    def set_aside_additions(self, va: dict[str, Any], vb: dict[str, Any], public: bool = False) -> None:
         """v2's /healthz also says what it supports (`version`, `features`:
-        docs/v2-additions.md) and its clock (`now`), and every other answer
-        that names the hub (`name`) also gives its `version`. Present on v2
-        and absent on v1, they are set aside so the rest of the answer still
+        docs/v2-additions.md) and its clock (`now`), and on the main port
+        where its relay-only door listens (`door`); every other answer that
+        names the hub (`name`) also gives its `version`. Present on v2 and
+        absent on v1, they are set aside so the rest of the answer still
         compares exactly."""
         ba, bb = va.get("body"), vb.get("body")
         if not (isinstance(ba, dict) and isinstance(bb, dict)):
@@ -247,6 +248,9 @@ class Diff:
         if "max_attachment_bytes" in bb and all(k in bb and k not in ba for k in HEALTHZ_ADDITIONS) and isinstance(bb["features"], list):
             assert bb["max_message_bytes"] == bb["max_attachment_bytes"], bb
             assert isinstance(bb["now"], int) and abs(bb["now"] - time.time() * 1000) < 600_000, bb
+            # the v2 hub here runs its door on loopback: named on the main port only
+            door, want = bb.pop("door", None), None if public else {"port": self.sides[1].public_port, "bind": "127.0.0.1"}
+            assert door == want, (door, want)
             for k in HEALTHZ_ADDITIONS:
                 bb.pop(k)
             self.additions += 1
@@ -275,11 +279,11 @@ class Diff:
             return [self.set_aside_continuations(x, y) for x, y in zip(a, b)] + b[len(a):]
         return b
 
-    def compare(self, sid: str, a: Any, b: Any, extra: tuple[str, ...], exact: bool = False) -> None:
+    def compare(self, sid: str, a: Any, b: Any, extra: tuple[str, ...], exact: bool = False, public: bool = False) -> None:
         keep_nul = sid.startswith("s19")
         va = self.view(self.sides[0], a, extra, keep_nul, exact)
         vb = self.view(self.sides[1], b, extra, keep_nul, exact)
-        self.set_aside_additions(va, vb)
+        self.set_aside_additions(va, vb, public)
         vb["body"] = self.set_aside_continuations(va.get("body"), vb.get("body"))
         ja, jb = json.dumps(va, ensure_ascii=False), json.dumps(vb, ensure_ascii=False)
         same = ja == jb
@@ -779,7 +783,7 @@ def main() -> int:
                 s.proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\nagree: {d.same} · deliberate differences seen: {len(d.expected_seen)} · UNEXPECTED: {len(d.unexpected)}"
-          f" · v2 additions set aside in {d.additions} answers (the hub's version beside its name; /healthz features, max_message_bytes, now)"
+          f" · v2 additions set aside in {d.additions} answers (the hub's version beside its name; /healthz features, max_message_bytes, now, door)"
           f" and {d.continuations} bodies (the \"message continues\" line)")
     for u in d.unexpected:
         print(f"\n✗ {u}")

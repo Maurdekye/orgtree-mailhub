@@ -43,6 +43,10 @@ pub struct Hub {
     pub shutdown: CancellationToken,
     /// resumable uploads a request is writing to right now (one at a time)
     pub writing: papaya::HashSet<String>,
+    /// where the relay-only door (the public listener) listens, once it
+    /// does: the bound socket, so a host name or port 0 in the settings
+    /// shows as what it became
+    pub door: std::sync::OnceLock<std::net::SocketAddr>,
 }
 
 pub type Resp = Response<Body>;
@@ -121,14 +125,21 @@ pub struct Req {
     query: Vec<(String, String)>,
     raw_query: Option<String>,
     pub body: Body,
+    /// it came through the relay-only door, not the main port
+    pub on_door: bool,
 }
+
+/// Marks a request the public listener let through (`dispatch_public`).
+#[derive(Clone, Copy)]
+struct ThroughDoor;
 
 impl Req {
     fn new(req: Request<Body>) -> Req {
         let (parts, body) = req.into_parts();
         let query = parts.uri.query().map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect()).unwrap_or_default();
         let raw_query = parts.uri.query().map(str::to_string);
-        Req { method: parts.method, path: wire::decoded_path(parts.uri.path()), headers: parts.headers, query, raw_query, body }
+        let on_door = parts.extensions.get::<ThroughDoor>().is_some();
+        Req { method: parts.method, path: wire::decoded_path(parts.uri.path()), headers: parts.headers, query, raw_query, body, on_door }
     }
 
     /// A query parameter; repeated names take the last value (Starlette).
@@ -365,7 +376,7 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
 /// 404 that never reaches it (the operator UI is an unauthenticated view of
 /// all mail).
 #[tracing::instrument(level = "debug", skip_all, fields(listener = "public"))]
-pub async fn dispatch_public(hub: Arc<Hub>, req: Request<Body>) -> Resp {
+pub async fn dispatch_public(hub: Arc<Hub>, mut req: Request<Body>) -> Resp {
     if is_websocket(req.headers()) {
         return websocket_refused();
     }
@@ -376,6 +387,7 @@ pub async fn dispatch_public(hub: Arc<Hub>, req: Request<Body>) -> Resp {
         r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
         return r;
     }
+    req.extensions_mut().insert(ThroughDoor);
     dispatch(hub, req).await
 }
 
@@ -470,7 +482,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         }
         Route::Upload => files::upload(hub, req).await,
         Route::Download => files::download(hub, req).await,
-        Route::Health => ops::healthz(hub).await,
+        Route::Health => ops::healthz(hub, req.on_door).await,
         Route::Index => Ok(ops::index()),
         Route::UiData => ops::ui_data(hub).await,
         Route::UiMessages => ops::ui_messages(hub, req).await,

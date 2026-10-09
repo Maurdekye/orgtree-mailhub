@@ -33,7 +33,20 @@ pub async fn prepare(cfg: Config) -> Result<Arc<Hub>> {
     if removed > 0 {
         tracing::info!(removed, "removed partial uploads left by a previous run");
     }
-    Ok(Arc::new(Hub { cfg, db, presence: Presence::default(), shutdown: CancellationToken::new(), writing: papaya::HashSet::new() }))
+    Ok(Arc::new(Hub { cfg, db, presence: Presence::default(), shutdown: CancellationToken::new(), writing: papaya::HashSet::new(), door: std::sync::OnceLock::new() }))
+}
+
+/// The relay-only door's listener, when `HUB_PUBLIC` asks for one. Where it
+/// actually listens is kept for /healthz, which names it on the main port.
+pub async fn bind_door(hub: &Hub) -> Result<Option<tokio::net::TcpListener>> {
+    if !hub.cfg.public {
+        return Ok(None);
+    }
+    let listener = tokio::net::TcpListener::bind((hub.cfg.public_bind.as_str(), hub.cfg.public_port))
+        .await
+        .with_context(|| format!("could not listen on {}:{}", hub.cfg.public_bind, hub.cfg.public_port))?;
+    let _ = hub.door.set(listener.local_addr()?);
+    Ok(Some(listener))
 }
 
 async fn full(State(hub): State<Arc<Hub>>, req: Request<Body>) -> api::Resp {
@@ -61,15 +74,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let full_listener = tokio::net::TcpListener::bind((hub.cfg.bind.as_str(), hub.cfg.port))
         .await
         .with_context(|| format!("could not listen on {}:{}", hub.cfg.bind, hub.cfg.port))?;
-    let public_listener = if hub.cfg.public {
-        Some(
-            tokio::net::TcpListener::bind((hub.cfg.public_bind.as_str(), hub.cfg.public_port))
-                .await
-                .with_context(|| format!("could not listen on {}:{}", hub.cfg.public_bind, hub.cfg.public_port))?,
-        )
-    } else {
-        None
-    };
+    let public_listener = bind_door(&hub).await?;
     log::line(&json!({ "ts": clock::now_iso(), "hub": hub.cfg.hub_name, "retention_days": hub.cfg.retention_days }));
     tracing::info!(bind = %hub.cfg.bind, port = hub.cfg.port, public = hub.cfg.public, "mail hub listening");
     tokio::spawn(sweep::sweep_loop(hub.clone()));

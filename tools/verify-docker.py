@@ -238,6 +238,12 @@ def main() -> int:
         check("clean startup: /healthz ok with the configured name and the 1 GiB limit",
               h.get("name") == "verify-hub" and h.get("retention_days") == 30
               and h.get("max_attachment_bytes") == 1024 ** 3, str(h))
+        # v2.0.1: the hub names its door as the container sees it (Docker
+        # publishes it here as 7392); the door's own /healthz never does
+        check("door: /healthz on the main port names it as the container sees it (7371, every address)",
+              h.get("door") == {"port": 7371, "bind": "0.0.0.0"}, str(h))
+        code, d = req(PUB, "/healthz")
+        check("door: its own /healthz does not name it", code == 200 and isinstance(d, dict) and d.get("ok") is True and "door" not in d, str(d))
         sa, sb = "a" * 32, "b" * 32
         alice, bob, aid = protocol(sa, sb)
         check("container healthcheck: `orgtree-mailhub healthcheck` reports healthy", container_health(NAME) == "healthy")

@@ -40,8 +40,10 @@ host ports. Nothing else collides.
 - `HUB_DATA/uploads/` holds resumable uploads in progress (a day untouched
   and they are swept); complete, they move to `HUB_DATA/blobs/`.
 - `GET /healthz` → `{ok, name, orgs, queued, retention_days,
-  max_attachment_bytes, version, features}`; the compose file wires `orgtree-mailhub healthcheck`
-  (which asks it) as the container healthcheck.
+  max_attachment_bytes, version, features, now}`, plus `door` (where the
+  relay-only door listens) on the main port when the door runs; the compose
+  file wires `orgtree-mailhub healthcheck` (which asks it) as the container
+  healthcheck.
 - One structured JSON line per request on stdout (`docker logs
   orgtree-mailhub`), plus one line per retention sweep. Slugs are logged,
   secrets never are. Logs are bounded by Docker's own log driver — set
