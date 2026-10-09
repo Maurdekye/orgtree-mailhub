@@ -37,6 +37,9 @@ services:
       HUB_MAX_FILE_BYTES: ${HUB_MAX_FILE_BYTES:-1073741824}
       # set to 1 to serve the API-only public listener on 7371 (FR-10)
       HUB_PUBLIC: ${HUB_PUBLIC:-}
+      # where clients reach that listener from outside (this host's address
+      # and HUB_PUBLIC_HOST_PORT, or a tunnel's URL); /healthz tells Hubchat
+      HUB_PUBLIC_ADVERTISE: ${HUB_PUBLIC_ADVERTISE:-}
       # v2: the hub's records live in the postgres service below (the
       # password travels apart from the address: no URL escaping needed)
       HUB_DATABASE_URL: postgres://mailhub@postgres:5432/mailhub

@@ -81,6 +81,16 @@ async fn healthz_names_the_door_on_the_main_port_only() {
     assert!(matches!(h["door"]["bind"].as_str(), Some("127.0.0.1" | "::1")), "{h}");
     println!("  ok  a host name shows as the address it resolved to ({})", h["door"]["bind"]);
 
+    // --------------------------------- where clients reach it (v2.0.2)
+    let mapped = hub(&url, &data, &[("HUB_PUBLIC", "1"), ("HUB_PUBLIC_BIND", "127.0.0.1"), ("HUB_PUBLIC_PORT", "0"), ("HUB_PUBLIC_ADVERTISE", "100.64.1.2:7378")]).await;
+    let mapped_door = server::bind_door(&mapped).await.unwrap().expect("the door listens");
+    let h = Call::new("GET", "/healthz").send(&mapped).await.json();
+    assert_eq!(h["door"], json!({ "port": mapped_door.local_addr().unwrap().port(), "bind": "127.0.0.1", "advertise": "100.64.1.2:7378" }), "{h}");
+    assert!(Call::new("GET", "/healthz").public().send(&mapped).await.json().get("door").is_none());
+    let unopened = hub(&url, &data, &[("HUB_PUBLIC_ADVERTISE", "100.64.1.2:7378")]).await;
+    assert!(Call::new("GET", "/healthz").send(&unopened).await.json().get("door").is_none(), "no door, no field, advertised or not");
+    println!("  ok  HUB_PUBLIC_ADVERTISE shows as door.advertise beside the listener's own address (main port only; no door, no field)");
+
     // ------------------------------------------------------- every address
     // set directly: binding every address in a test would open a port on
     // this machine's network

@@ -48,7 +48,13 @@ pub async fn healthz(hub: &Arc<Hub>, on_door: bool) -> ApiResult {
     // hand its address to a phone. The main port only: a client on the door
     // already has its address, and strangers there get no internal ones.
     if let (false, Some(door), Value::Object(o)) = (on_door, hub.door.get(), &mut health) {
-        o.insert("door".into(), json!({ "port": door.port(), "bind": door.ip().to_string() }));
+        let mut d = json!({ "port": door.port(), "bind": door.ip().to_string() });
+        // where clients reach it, when the operator says that differs
+        // (Docker's port mapping, a tunnel): HUB_PUBLIC_ADVERTISE, v2.0.2
+        if let Some(a) = &hub.cfg.public_advertise {
+            d["advertise"] = json!(a);
+        }
+        o.insert("door".into(), d);
     }
     ok(health)
 }

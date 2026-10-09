@@ -20,6 +20,10 @@ pub struct Config {
     pub public: bool,
     pub public_bind: String,
     pub public_port: u16,
+    /// `HUB_PUBLIC_ADVERTISE`: where clients reach the door when that is not
+    /// where it listens (Docker's port mapping, a tunnel); /healthz shows it
+    /// beside the listener's own address (v2.0.2)
+    pub public_advertise: Option<String>,
     pub data_dir: PathBuf,
     /// days mail and files are kept (`HUB_RETENTION_DAYS`); None, the v2
     /// default, keeps them until their owners delete them (G4)
@@ -53,6 +57,7 @@ impl std::fmt::Debug for Config {
             .field("public", &self.public)
             .field("public_bind", &self.public_bind)
             .field("public_port", &self.public_port)
+            .field("public_advertise", &self.public_advertise)
             .field("data_dir", &self.data_dir)
             .field("retention_days", &self.retention_days)
             .field("org_retention_days", &self.org_retention_days)
@@ -128,6 +133,13 @@ impl Config {
             public: !py_strip(get("HUB_PUBLIC").unwrap_or("")).is_empty(),
             public_bind: stripped_or("HUB_PUBLIC_BIND", "0.0.0.0"),
             public_port,
+            public_advertise: {
+                let a = py_strip(get("HUB_PUBLIC_ADVERTISE").unwrap_or(""));
+                if a.len() > 255 || !a.bytes().all(|b| b.is_ascii_graphic()) {
+                    anyhow::bail!("HUB_PUBLIC_ADVERTISE must be one address clients can use, such as 100.64.1.2:7378 or https://hub.example.com (no spaces, at most 255 characters)");
+                }
+                (!a.is_empty()).then(|| a.to_string())
+            },
             data_dir,
             retention_days: match get("HUB_RETENTION_DAYS").map(py_strip) {
                 None | Some("") => None,
@@ -233,6 +245,12 @@ mod tests {
         assert_eq!(c.hub_name, "office");
         assert!(c.public);
         assert_eq!(c.bind, "0.0.0.0");
+        assert_eq!(c.public_advertise, None);
+        let a = Config::from_vars(&vars(&[("HUB_PUBLIC_ADVERTISE", " 100.64.1.2:7378 ")])).unwrap();
+        assert_eq!(a.public_advertise.as_deref(), Some("100.64.1.2:7378"));
+        assert_eq!(Config::from_vars(&vars(&[("HUB_PUBLIC_ADVERTISE", "  ")])).unwrap().public_advertise, None);
+        assert!(Config::from_vars(&vars(&[("HUB_PUBLIC_ADVERTISE", "two words")])).is_err());
+        assert!(Config::from_vars(&vars(&[("HUB_PUBLIC_ADVERTISE", &"h".repeat(256))])).is_err());
         assert!(Config::from_vars(&vars(&[("HUB_MAX_FILE_BYTES", "0")])).is_err());
         assert!(Config::from_vars(&vars(&[("HUB_MAX_FILE_BYTES", "-1")])).is_err());
         assert!(Config::from_vars(&vars(&[("HUB_RETENTION_DAYS", "abc")])).is_err());

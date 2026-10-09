@@ -547,6 +547,12 @@ GET /healthz                                  (on the main port)
   door's 7371 as host port 7378 by default (`compose.yaml`), and a router
   forward or a tunnel has its own address. Before putting an address in a
   setup code, check that it answers `/healthz`.
+- **`advertise` (v2.0.2).** The operator can say where clients reach the
+  door with `HUB_PUBLIC_ADVERTISE` (this host's address and the published
+  port, or a tunnel's URL). `door` then carries it beside the listener's own
+  address: `"door": {"port": 7371, "bind": "0.0.0.0", "advertise":
+  "100.64.1.2:7378"}`. Prefer it when present; it is the operator's word,
+  not something the hub checked, so check it answers `/healthz` too.
 
 `/healthz` lists the feature as `door`.
 

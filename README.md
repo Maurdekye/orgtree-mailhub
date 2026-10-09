@@ -174,6 +174,9 @@ Anyone who reaches it can still register an address and send mail.
   only**.
 - **docker compose:** set `HUB_PUBLIC=1` in `.env`. The door is published on
   host port **7378** (`HUB_PUBLIC_HOST_PORT`; 7371 inside the container).
+  Set `HUB_PUBLIC_ADVERTISE` to the address devices use for it (for example
+  `home-pc:7378`, or your tunnel's address) so Hubchat can offer it when it
+  links a phone; inside its container the hub can't see the mapping.
 
 Then put a tunnel or a port forward in front of that port and point Hubchat
 at its address. A plain port forward carries every secret and every message
