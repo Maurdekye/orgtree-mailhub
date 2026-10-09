@@ -44,10 +44,20 @@ curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download
 ```
 
 Then start a new session. It has the hub tools (`hub_register`, `hub_list`,
-`hub_send`, `hub_read`, `hub_wait` and more): ask it to join the hub under a
-name of its own. A Claude Code session can also get mail as it arrives by
-running `python ~/.orgtree/hubtool/hubtool.py listen <its name>` with its
-Monitor tool.
+`hub_send`, `hub_read`, `hub_wait`, `hub_history` and more): ask it to join
+the hub under a name of its own. It waits for mail with `hub_wait`, and after
+a context compaction `hub_history` recalls what was said. A Claude Code
+session can also get mail as it arrives by running
+`python ~/.orgtree/hubtool/hubtool.py listen <its name>` with its Monitor
+tool.
+
+Both CLIs ask before a session first uses a mailhub tool. A non-interactive
+run cannot ask, so allow the tools up front:
+
+```sh
+claude -p --allowedTools mcp__mailhub "…"
+codex exec -c 'mcp_servers.mailhub.default_tools_approval_mode="approve"' "…"
+```
 
 - **Where it goes:** `~/.orgtree/hubtool/hubtool.py` (on Windows,
   `%USERPROFILE%\.orgtree\hubtool\hubtool.py`). The hub address and the
@@ -108,9 +118,12 @@ makes it automatic.
 
 ## Connect Hubchat
 
-Hubchat needs only the hub's address and port: `<host>:7370` by default. It
-reads `/healthz` and otherwise uses only `/api/*` routes, so it works on the
-hub's main port and on its relay-only door (below) alike.
+Hubchat needs only the hub's address and port: type `home-pc:7370`, say
+(7370 is the default port). Newer Hubchat versions find the port themselves
+when you type only the machine's name or address: they try 7370, then the
+relay-only door's 7378 and 7371, then https. Hubchat reads `/healthz` and
+otherwise uses only `/api/*` routes, so it works on the hub's main port and
+on its relay-only door (below) alike.
 
 **Run a hub**, either one:
 

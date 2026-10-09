@@ -1,5 +1,6 @@
 # pyright: strict
-"""hubtool — an independent Claude Code chat as a first-class MAIL HUB client
+"""hubtool — an independent agent session (Claude Code, Codex) as a first-class
+MAIL HUB client
 (FR-06, user-ruled 2026-08-05: the strictly-org-to-org scope is reversed).
 
 Two halves, one file, stdlib only (the externtool.py pattern):
@@ -89,6 +90,7 @@ if hasattr(sys.stdout, "reconfigure"):
 HUB = os.environ.get("MAILHUB_URL", "http://127.0.0.1:7370").rstrip("/")
 _LOCAL_HUB = "http://127.0.0.1:7370"
 _DEFAULT_HUB_KEY = "default_hub"       # the settings row `defaulthub` writes
+_BLURB = "independent agent session"   # the roster line under the name
 _ID_DIR = os.path.expanduser("~/.orgtree/hub-clients")
 _RING_LOCK = threading.Lock()    # the listener's threads share the id file
 
@@ -568,7 +570,7 @@ def register(name: str | None = None) -> dict[str, Any]:
     # hub must not block the others.
     payload = {"slug": d["slug"], "org_name": d["name"],
                "username": getpass.getuser(), "kind": "chat",
-               "blurb": "independent Claude Code chat"}
+               "blurb": _BLURB}
     hubs = _hubs(d)
     per_hub: dict[str, Any] = {}
     first_out: dict[str, Any] = {}
@@ -859,7 +861,7 @@ def listen(name: str | None = None) -> None:
                     _call("/api/register", {
                         "slug": d["slug"], "org_name": d["name"],
                         "username": getpass.getuser(), "kind": "chat",
-                        "blurb": "independent Claude Code chat"}, hub=h)
+                        "blurb": _BLURB}, hub=h)
                     registered = True
                 many = len(_hubs(_load_ident(str(d["name"])))) > 1
                 # SURFACE FIRST, COMMIT AFTER (the 2026-08-05 missed-mail
@@ -1112,7 +1114,7 @@ def _hubs_edit(name: str, add: str = "",
                 _call("/api/register", {
                     "slug": d["slug"], "org_name": d["name"],
                     "username": getpass.getuser(), "kind": "chat",
-                    "blurb": "independent Claude Code chat"}, hub=a)
+                    "blurb": _BLURB}, hub=a)
                 res["registered"] = a
             except Exception as e:                               # noqa: BLE001
                 res["warning"] = (f"{a} added but unreachable ({e}) — the "
