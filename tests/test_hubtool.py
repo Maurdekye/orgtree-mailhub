@@ -1232,6 +1232,94 @@ def sec_default_hub() -> None:
           "unreachable one", _reachability_is_reported)
 
 
+def sec_history() -> None:
+    print("\n§8  hub_history — recalling a conversation after a compaction")
+
+    def _a_v1_hub_says_it_needs_v2():
+        fresh_ident()
+        hubtool.register("history-v1")
+        one = json.loads(hubtool.dispatch("hub_history", {"peer": "someone"}))
+        listing = json.loads(hubtool.dispatch("hub_history", {}))
+        assert "v2.0" in one.get("error", ""), one
+        assert "v2.0" in listing.get("error", ""), listing
+        saved = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            rc = hubtool.cli(["history", "history-v1", "someone"])
+            printed = sys.stdout.getvalue()
+        finally:
+            sys.stdout = saved
+        assert rc == 1 and "v2.0" in printed, (rc, printed)
+    check("history · on a v1 hub (no history route) it says it needs v2, "
+          "as a tool and as a CLI verb", _a_v1_hub_says_it_needs_v2)
+
+    def _a_page_is_shaped_capped_and_read_only():
+        fresh_ident()
+        hubtool.register("history-shape")
+        me = hubtool._ident(mint=False)["slug"]
+        peer = "peer.someone.abcdef"
+        page = {"messages": [               # the hub answers newest first
+            {"id": "m3", "from": peer, "to": me, "body": "x" * 5000,
+             "received_at": "2026-10-09T00:03:00Z", "read_at": None},
+            {"id": "m2", "from": me, "to": peer, "body": "second",
+             "received_at": "2026-10-09T00:02:00Z",
+             "read_at": "2026-10-09T00:02:30Z",
+             "attachments": [{"id": "a1", "name": "notes.txt", "bytes": 9}]},
+            {"id": "m1", "from": peer, "to": me, "body": "first",
+             "received_at": "2026-10-09T00:01:00Z", "read_at": None}],
+            "before": "1760000000000-41"}
+        calls: list[tuple[str, str]] = []
+        real = hubtool._call
+
+        def fake(path, payload=None, method="POST", timeout=30.0, hub=None):
+            calls.append((method, path))
+            if path.startswith("/api/history"):
+                return page
+            return real(path, payload, method=method, timeout=timeout, hub=hub)
+        hubtool._call = fake
+        try:
+            out = json.loads(hubtool.dispatch(
+                "hub_history", {"peer": peer, "limit": 500,
+                                "before": "1760000000000-99"}))
+        finally:
+            hubtool._call = real
+        hist = [c for c in calls if c[1].startswith("/api/history")]
+        assert len(hist) == 1 and hist[0][0] == "GET", calls
+        assert "limit=50" in hist[0][1], f"the page cap was not applied: {hist}"
+        assert "before=1760000000000-99" in hist[0][1], hist
+        assert all(p.startswith(("/api/history", "/api/roster"))
+                   for _, p in calls), \
+            f"hub_history must not ack, poll or send receipts: {calls}"
+        rows = out["messages"]
+        assert [r["body"][:6] for r in rows] == ["first", "second", "xxxxxx"]
+        assert [r["direction"] for r in rows] == ["received", "sent", "received"]
+        assert rows[1]["read_at"] == "2026-10-09T00:02:30Z" and \
+            "read_at" not in rows[0], rows
+        assert rows[1]["attachments"] == [{"id": "a1", "name": "notes.txt",
+                                           "bytes": 9}], rows[1]
+        assert len(rows[2]["body"]) < 2100 and \
+            rows[2]["body"].endswith("[… 3000 more characters]"), \
+            rows[2]["body"][-60:]
+        assert out["older"] == "1760000000000-41" and "more" in out, out
+        assert "cut" in out.get("note", ""), out
+        bad = json.loads(hubtool.dispatch("hub_history",
+                                          {"peer": peer, "limit": "lots"}))
+        assert "whole number" in bad.get("error", ""), bad
+    check("history · a page is oldest to newest, capped (50 a page, 2,000 "
+          "characters a body), and reads only", _a_page_is_shaped_capped_and_read_only)
+
+    def _the_compaction_hint_is_where_a_session_looks():
+        fresh_ident()
+        hubtool.register("hint")
+        again = hubtool.register("hint")
+        assert "hub_history" in again.get("recall", ""), again
+        assert "hub_history" in hubtool._INSTRUCTIONS
+        desc = next(t for t in hubtool.TOOLS if t["name"] == "hub_history")
+        assert "compaction" in desc["description"], desc
+    check("history · the compaction hint is in the server's instructions, "
+          "the tool, and a resumed hub_register", _the_compaction_hint_is_where_a_session_looks)
+
+
 def main() -> int:
     print("orgtree · FR-06 hub chat clients (hub/hubtool.py)")
     sec_identity()
@@ -1246,6 +1334,7 @@ def main() -> int:
     sec_kind()
     sec_migration()
     sec_default_hub()
+    sec_history()
 
     print()
     if GAPS:

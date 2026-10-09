@@ -185,6 +185,31 @@ def run(s: Session) -> None:
     msgs = got if isinstance(got, list) else got.get("messages", got)
     s.check("mcp wait receives the mail", "from three via mcp" in json.dumps(msgs), got)
     s.note("mcp wait", s.norm(json.dumps(msgs, sort_keys=True)))
+    # ── hub_history: a v2 hub keeps the conversation; v1 has no history route
+    hist = call(4, "hub_history", {"peer": two})
+    convs = call(5, "hub_history", {})
+    if s.side.name == "rust":
+        rows = hist.get("messages", [])
+        s.check("history: one conversation, oldest to newest, all sent",
+                [m.get("body") for m in rows] == ["hello from one", "with a file", "another file"]
+                and all(m.get("direction") == "sent" for m in rows) and hist.get("older") is None, hist)
+        s.check("history: a message's files are named",
+                [a.get("name") for a in rows[1].get("attachments", [])] == ["report é.txt"] if len(rows) > 1 else False, hist)
+        page = call(6, "hub_history", {"peer": two, "limit": 2})
+        s.check("history: a page of 2 is the newest two, with a cursor",
+                [m.get("body") for m in page.get("messages", [])] == ["with a file", "another file"]
+                and bool(page.get("older")) and "more" in page, page)
+        older = call(7, "hub_history", {"peer": two, "limit": 2, "before": page.get("older")})
+        s.check("history: before= gives the page before it, and the start ends the paging",
+                [m.get("body") for m in older.get("messages", [])] == ["hello from one"] and older.get("older") is None, older)
+        s.check("history: with no peer, who this address has mail with",
+                sorted(c.get("with") for c in convs.get("conversations", [])) == sorted([two, s.slugs["interop-three"]]), convs)
+        wait = call(8, "hub_wait", {"timeout": 1})
+        s.check("history consumed nothing (hub_wait has nothing new)", not wait.get("messages"), wait)
+    else:
+        s.check("history on a v1 hub says it needs v2",
+                "v2.0" in str(hist.get("error")) and "v2.0" in str(convs.get("error")), (hist, convs))
+    s.note("mcp history", "checked per hub")
     mcp.stdin.close()
     mcp.wait(10)
     # ── unregister

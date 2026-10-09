@@ -31,7 +31,7 @@ function Install-OrgtreeHubtool {
     # The hubtool.py this installer accepts: the SHA-256 of the file released
     # beside it. tests/test_install_hubtool.py keeps it equal to the repo's
     # hubtool.py; tools/hubtool-assets.py refuses to build a release otherwise.
-    $HubtoolSha256 = 'df93e8317a53fd63a929502dfd1facb43b9c5bda978d51bf71e97ed79424288e'
+    $HubtoolSha256 = '863332626464d9e14d9fb3aaaa4d39ea6d3c942d3434d42102427913a7825806'
     $Base = if ($env:HUBTOOL_BASE_URL) { $env:HUBTOOL_BASE_URL.TrimEnd('/') }
             else { 'https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download' }
     $Server = 'mailhub'
