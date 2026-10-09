@@ -530,7 +530,7 @@ hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 ## The hub's version, to every client
 
 Every answer that names the hub (its `"name"`) also carries
-`"version"`: the hub's own version as a string (`"2.0.0"`), the same value
+`"version"`: the hub's own version as a string (`"2.0.1"`), the same value
 `/healthz` and `orgtree-mailhub --version` report. So a client sees it on
 the paths it already uses, without a separate call:
 

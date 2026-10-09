@@ -80,6 +80,16 @@ listed is meant to be byte-identical or behavior-identical to V1.
    history: `tests/v1_reference.py` extracts it for the side-by-side
    comparisons and for hubtool's suite. `hubtool.py` is unchanged.
 
+9. **v2.0.1: lazy history, and hubtool on several hubs** (2026-10-09,
+   coordinator rulings; docket items
+   `hubtool-hub-history-merges-every-hub-an-identity` and
+   `hubchat-time-based-lazy-history-fetch-across-hub`). `hub_history` reads
+   every hub on an identity's list and merges the conversation, with a
+   cursor that means the same on every hub. A new device can sync from now
+   (`start: "now"`) and page back by time (`before=<unix ms>`), and
+   `/healthz` and sync answers carry the hub's clock (`now`). All additive:
+   v2.0.0 clients see no change.
+
 ## Known V1 gaps carried across deliberately
 
 The V1 suites assert these as *known gaps/findings* and this import does not
