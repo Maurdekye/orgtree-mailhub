@@ -18,18 +18,21 @@ async fn drive(mode: &str) {
 async fn run_script(script: &str, extra: &[&str]) {
     let pg = TestPg::start();
     let url = pg.fresh_db("hubdiff").await;
+    // the two-hub script runs a second hub on a database of its own
+    let second = if script == "multi_hub.py" { Some(pg.fresh_db("hubdiff_b").await) } else { None };
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let python = std::env::var("HUB_TEST_PYTHON").unwrap_or_else(|_| "python".into());
     let status = tokio::process::Command::new(python)
         .arg(repo.join("tests").join("v2").join(script))
         .args(["--rust-bin", env!("CARGO_BIN_EXE_orgtree-mailhub"), "--database-url", &url])
+        .args(second.iter().flat_map(|u| ["--database-url-b", u.as_str()]))
         .args(extra)
         .args(std::env::var("HUB_DIFF_VERBOSE").ok().filter(|_| script == "differential.py").map(|_| "-v"))
         .status()
         .await
         .expect("run the driver");
     drop(pg);
-    assert!(status.success(), "the hubs answered differently (see the report above)");
+    assert!(status.success(), "the script found problems (see its report above)");
 }
 
 /// hubtool.py, the real chat client (CLI, listener, MCP server), against
@@ -38,6 +41,14 @@ async fn run_script(script: &str, extra: &[&str]) {
 #[ignore = "needs Python with the v1 hub's requirements; run with --ignored"]
 async fn hubtool_works_against_both_hubs() {
     run_script("client_interop.py", &[]).await;
+}
+
+/// hubtool.py on two v2 hubs at once: hub_history merges the conversation
+/// from both, pages without gaps or repeats, and names a hub that is down.
+#[tokio::test]
+#[ignore = "needs Python with httpx; run with --ignored"]
+async fn hubtool_reads_history_from_every_hub() {
+    run_script("multi_hub.py", &[]).await;
 }
 
 /// The same requests to both hubs, fresh.

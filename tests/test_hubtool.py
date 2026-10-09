@@ -31,6 +31,7 @@ request construction (paths, headers, payloads) is what gets exercised.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import io
 import json
 import os
@@ -40,6 +41,8 @@ import sqlite3
 import sys
 import tempfile
 import traceback
+import urllib.error
+import urllib.parse
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1491,51 +1494,85 @@ def sec_history() -> None:
           "hub_message say they need v2, as tools and CLI verbs",
           _a_v1_hub_says_it_needs_v2)
 
-    def with_pages(pages, fn):
-        """Run fn with the hub's history answers replaced: `pages` maps the
-        requested limit to an answer; every call is recorded."""
-        calls: list[tuple[str, str]] = []
-        real = hubtool._call
+    def at_ms(s):
+        t = datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=datetime.timezone.utc)
+        return (t - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)) \
+            // datetime.timedelta(milliseconds=1)
 
-        def fake(path, payload=None, method="POST", timeout=30.0, hub=None):
-            calls.append((method, path))
-            if path.startswith("/api/history"):
-                lim = int(re.search(r"limit=(\d+)", path).group(1))
-                return pages(lim)
-            return real(path, payload, method=method, timeout=timeout, hub=hub)
-        hubtool._call = fake
-        try:
-            return fn(), calls
-        finally:
-            hubtool._call = real
+    class FakeHubs:
+        """v2 hubs answering /api/history and /api/conversations from
+        memory the way the hub does: newest first by (received_at, row),
+        `limit` rows, the `<unix ms>-<row>` cursor in `before` (null at the
+        start). Hubs in `down` refuse the connection, hubs in `v1` answer
+        404. Every call is recorded as (hub, method, path)."""
+
+        def __init__(self, held, convs=None, down=(), v1=()):
+            self.held, self.convs = held, convs or {}
+            self.down, self.v1 = set(down), set(v1)
+            self.calls: list[tuple[str, str, str]] = []
+
+        def __call__(self, path, payload=None, method="POST", timeout=30.0,
+                     hub=None):
+            self.calls.append((hub, method, path))
+            if hub in self.down:
+                raise urllib.error.URLError("connection refused")
+            if hub in self.v1:
+                raise urllib.error.HTTPError(f"{hub}{path}", 404, "Not Found",
+                                             None, None)  # type: ignore[arg-type]
+            if path == "/api/conversations":
+                return {"conversations": self.convs.get(hub, [])}
+            assert path.startswith("/api/history?"), path
+            q = dict(urllib.parse.parse_qsl(path.split("?", 1)[1]))
+            rows = sorted(self.held.get(hub, []), reverse=True,
+                          key=lambda m: (at_ms(m["received_at"]), m["row"]))
+            if q.get("before"):
+                ms, row = (int(x) for x in q["before"].split("-"))
+                rows = [m for m in rows
+                        if (at_ms(m["received_at"]), m["row"]) < (ms, row)]
+            limit = min(int(q.get("limit", 50)), 200)
+            page = rows[:limit]
+            nxt = (f"{at_ms(page[-1]['received_at'])}-{page[-1]['row']}"
+                   if len(rows) > limit else None)
+            return {"messages": [{k: v for k, v in m.items() if k != "row"}
+                                 for m in page], "before": nxt}
+
+        def __enter__(self):
+            self.real, hubtool._call = hubtool._call, self
+            return self
+
+        def __exit__(self, *a):
+            hubtool._call = self.real
 
     def msg(i, sender, to, body, **extra):
         return {"id": f"m{i}", "from": sender, "to": to, "body": body,
-                "received_at": f"2026-10-09T00:{i:02d}:00.000Z", **extra}
+                "received_at": f"2026-10-09T00:{i:02d}:00.000Z", "row": i,
+                **extra}
+
+    def ids(page):
+        return [r["id"] for r in page.get("messages", [])]
 
     def _a_page_is_previews_oldest_to_newest_and_read_only():
         fresh_ident()
         hubtool.register("history-shape")
-        me = hubtool._ident(mint=False)["slug"]
+        d = hubtool._ident(mint=False)
+        me, hub = d["slug"], hubtool._hubs(d)[0]
         peer = "peer.someone.abcdef"
         long_body = "word \n\t " * 1000                 # 5,000+ characters
-        page = {"messages": [                          # the hub: newest first
-            msg(3, peer, me, long_body),
+        held = {hub: [
+            msg(1, peer, me, "first"),
             msg(2, me, peer, "second", reply_to="m1",
                 delivered_at="x", read_at="2026-10-09T00:02:30Z",
                 attachments=[{"id": "a1", "name": "notes.txt", "bytes": 9}]),
-            msg(1, peer, me, "first")],
-            "before": "1760000000000-41"}
-        out, calls = with_pages(lambda lim: page, lambda: json.loads(
-            hubtool.dispatch("hub_history", {"peer": peer, "limit": 500,
-                                             "cursor": "1760000000000-99"})))
-        hist = [c for c in calls if c[1].startswith("/api/history")]
-        assert len(hist) == 1 and hist[0][0] == "GET", calls
-        assert "limit=100" in hist[0][1], f"the cap of 100 was not applied: {hist}"
-        assert "before=1760000000000-99" in hist[0][1], hist
-        assert all(p.startswith(("/api/history", "/api/roster"))
-                   for _, p in calls), \
-            f"hub_history must not ack, poll or send receipts: {calls}"
+            msg(3, peer, me, long_body)]}
+        with FakeHubs(held) as f:
+            out = json.loads(hubtool.dispatch("hub_history",
+                                              {"peer": peer, "limit": 500}))
+        assert len(f.calls) == 1 and f.calls[0][1] == "GET", f.calls
+        assert "limit=101" in f.calls[0][2], \
+            f"100 a page, and one more to know if older mail exists: {f.calls}"
+        assert all(p.startswith("/api/history") for _, _, p in f.calls), \
+            f"hub_history must not ack, poll or send receipts: {f.calls}"
         rows = out["messages"]
         assert [r["id"] for r in rows] == ["m1", "m2", "m3"], rows
         assert [r["direction"] for r in rows] == ["received", "sent", "received"]
@@ -1550,10 +1587,20 @@ def sec_history() -> None:
         assert len(p) == 500 and p.endswith("…") and "  " not in p and \
             "\n" not in p, p[-40:]
         assert rows[2]["cut"] is True and rows[2]["chars"] == len(long_body)
-        assert out["has_more"] is True and \
-            out["next_cursor"] == "1760000000000-41", out
-        assert "cursor=1760000000000-41" in out["note"] and \
+        assert out["has_more"] is False and out["next_cursor"] is None, out
+        assert "This is the start of your mail" in out["note"] and \
             "hub_message" in out["note"], out["note"]
+        assert "hubs" not in out and "errors" not in out, out
+        with FakeHubs(held) as f:
+            newest = hubtool.history(d, peer, "", 2)
+            older = hubtool.history(d, peer, newest["next_cursor"], 2)
+        assert ids(newest) == ["m2", "m3"] and newest["has_more"] is True
+        cur = newest["next_cursor"]
+        assert cur.startswith("h1:") and f"cursor={cur}" in newest["note"], newest
+        edge = at_ms(held[hub][1]["received_at"])
+        assert f.calls[-1][2] == \
+            f"/api/history?with={peer}&limit=3&before={edge + 1}-0", f.calls
+        assert ids(older) == ["m1"] and older["has_more"] is False, older
         bad = json.loads(hubtool.dispatch("hub_history",
                                           {"peer": peer, "limit": "lots"}))
         assert "must be a number" in bad.get("error", ""), bad
@@ -1564,38 +1611,174 @@ def sec_history() -> None:
     def _the_page_budget_stops_early_and_says_so():
         fresh_ident()
         hubtool.register("history-budget")
-        me = hubtool._ident(mint=False)["slug"]
+        d = hubtool._ident(mint=False)
+        me, hub = d["slug"], hubtool._hubs(d)[0]
         peer = "peer.budget.abcdef"
-        many = [msg(i, peer, me, "x" * 600) for i in range(40, 0, -1)]
-
-        def pages(lim):
-            return {"messages": many[:lim], "before": f"cursor-after-{lim}"}
-        out, calls = with_pages(pages, lambda: hubtool.history(
-            hubtool._ident(mint=False), peer, "", 40))
-        assert len(out["messages"]) == 32, len(out["messages"])  # 32 x 500 = 16,000
-        assert [c[1] for c in calls if c[1].startswith("/api/history")] == \
-            [f"/api/history?with={peer}&limit=40",
-             f"/api/history?with={peer}&limit=32"], calls
-        assert out["next_cursor"] == "cursor-after-32" and out["has_more"]
-        assert "stopped there to stay within 16000" in out["note"], out["note"]
-        one, _ = with_pages(lambda lim: {"messages": [msg(1, peer, me, "y" * 40000)],
-                                         "before": None},
-                            lambda: hubtool.history(hubtool._ident(mint=False),
-                                                    peer, "", 20))
+        held = {hub: [msg(i, peer, me, "x" * 600) for i in range(1, 41)]}
+        with FakeHubs(held) as f:
+            out = hubtool.history(d, peer, "", 40)
+            first_calls = list(f.calls)
+            rest = hubtool.history(d, peer, out["next_cursor"], 40)
+        assert ids(out) == [f"m{i}" for i in range(9, 41)], ids(out)  # 32 x 500 = 16,000
+        assert [c[2] for c in first_calls] == \
+            [f"/api/history?with={peer}&limit=41"], \
+            f"one request: the cursor comes from the last message shown: {first_calls}"
+        assert out["has_more"] and \
+            "stopped there to stay within 16000" in out["note"], out["note"]
+        assert ids(rest) == [f"m{i}" for i in range(1, 9)] and \
+            rest["has_more"] is False, rest
+        with FakeHubs({hub: [msg(1, peer, me, "y" * 40000)]}):
+            one = hubtool.history(d, peer, "", 20)
         assert len(one["messages"]) == 1, "a page always shows one message"
-        start, _ = with_pages(lambda lim: {"messages": [msg(1, peer, me, "hi")],
-                                           "before": None},
-                              lambda: hubtool.history(hubtool._ident(mint=False),
-                                                      peer))
+        with FakeHubs({hub: [msg(1, peer, me, "hi")]}):
+            start = hubtool.history(d, peer)
         assert start["has_more"] is False and start["next_cursor"] is None
         assert "This is the start of your mail" in start["note"], start["note"]
-        none, _ = with_pages(lambda lim: {"messages": [], "before": None},
-                             lambda: hubtool.history(hubtool._ident(mint=False),
-                                                     peer))
+        with FakeHubs({hub: []}):
+            none = hubtool.history(d, peer)
         assert "You have no mail with" in none["note"], none
     check("history · a page holds at most 16,000 characters of previews "
           "(always one message), says when it stopped early, and says where "
           "the conversation starts", _the_page_budget_stops_early_and_says_so)
+
+    hub_a, hub_b = "http://hub-a.test:7370", "http://hub-b.test:7370"
+
+    def two_hubs(name):
+        fresh_ident()
+        hubtool.register(name)
+        d = dict(hubtool._ident(mint=False))
+        d["hubs"] = [hub_a, hub_b]
+        return d
+
+    def conversation(me, peer):
+        def m(mid, mine, at, row):
+            return {"id": mid, "from": me if mine else peer,
+                    "to": peer if mine else me, "body": f"text {mid}",
+                    "received_at": f"2026-10-09T01:00:{at}Z", "row": row}
+        # a's and b's mail interleave; "dup" is on both (b's copy is later);
+        # at .500 two messages tie across the hubs, and at .700 three tie on
+        # a with its rows against the order of their ids
+        return {hub_a: [m("a1", True, "00.100", 1), m("dup", True, "00.300", 2),
+                        m("t2", False, "00.500", 3), m("w3", False, "00.700", 4),
+                        m("w2", False, "00.700", 5), m("w1", False, "00.700", 6),
+                        m("a2", True, "00.900", 7)],
+                hub_b: [m("b1", False, "00.200", 1), m("dup", True, "00.350", 2),
+                        m("t1", True, "00.500", 3), m("b2", False, "00.800", 4)]}
+
+    whole = ["a1", "b1", "dup", "t1", "t2", "w1", "w2", "w3", "b2", "a2"]
+
+    def _several_hubs_merge_into_one_conversation():
+        d = two_hubs("history-merge")
+        peer = "peer.merge.abcdef"
+        held = conversation(d["slug"], peer)
+        for lim in (1, 2, 3, 4, 10, 20):
+            pages, cursor, out = [], "", {}
+            with FakeHubs(held) as f:
+                for _ in range(20):
+                    out = hubtool.history(d, peer, cursor, lim)
+                    pages.append(ids(out))
+                    if not out["has_more"]:
+                        break
+                    cursor = out["next_cursor"]
+            assert [i for p in reversed(pages) for i in p] == whole, (lim, pages)
+            assert all(len(p) <= lim for p in pages), (lim, pages)
+            assert "This is the start of your mail" in out["note"], out["note"]
+            assert out["hubs"] == [hub_a, hub_b] and "errors" not in out, out
+            if lim == 20:
+                assert len(f.calls) == 2, f"one request to each hub: {f.calls}"
+                dup = next(r for r in out["messages"] if r["id"] == "dup")
+                assert dup["at"] == "2026-10-09T01:00:00.350Z", dup
+    check("history · several hubs: one conversation merged by hub time then "
+          "id, each message once, in pages of any size without gaps or "
+          "repeats (a tie at one millisecond, a message held on both hubs)",
+          _several_hubs_merge_into_one_conversation)
+
+    def _a_hub_that_does_not_answer_is_named():
+        d = two_hubs("history-dark")
+        peer = "peer.dark.abcdef"
+        held = conversation(d["slug"], peer)
+        with FakeHubs(held, down={hub_b}):
+            out = hubtool.history(d, peer, "", 20)
+        assert ids(out) == ["a1", "dup", "t2", "w1", "w2", "w3", "a2"], out
+        assert hub_b in out["note"] and "did not answer" in out["note"] and \
+            "start of your mail" not in out["note"], out["note"]
+        assert out["hubs"] == [hub_a] and list(out["errors"]) == [hub_b], out
+        assert out["has_more"] is False, out
+        with FakeHubs(held, down={hub_b}):
+            page1 = hubtool.history(d, peer, "", 2)
+        with FakeHubs(held):
+            page2 = hubtool.history(d, peer, page1["next_cursor"], 20)
+            again = hubtool.history(d, peer, "", 2)
+        assert ids(page1) == ["w3", "a2"] and hub_b in page1["note"], page1
+        assert ids(page2) == ["a1", "b1", "dup", "t1", "t2", "w1", "w2"], \
+            f"b answers again: its mail older than page 1 is on page 2: {page2}"
+        assert ids(again) == ["b2", "a2"], \
+            f"asking again for page 1 brings b's newer mail: {again}"
+        with FakeHubs(held, v1={hub_b}):
+            old = hubtool.history(d, peer, "", 20)
+        assert ids(old) == ids(out) and "keeps no history" in old["note"] and \
+            "v2.0" in old["note"], old
+        with FakeHubs(held, down={hub_a, hub_b}):
+            dark = hubtool.history(d, peer, "", 20)
+        assert set(dark) == {"error"} and hub_a in dark["error"] and \
+            hub_b in dark["error"], dark
+    check("history · a hub that does not answer: the page holds the other "
+          "hubs' mail, the note names it and claims no start, the next page "
+          "gets its older mail and asking again its newer; a v1 hub is named "
+          "too; no hub answering is an error naming them",
+          _a_hub_that_does_not_answer_is_named)
+
+    def _a_cursor_belongs_to_its_conversation():
+        d = two_hubs("history-cursor")
+        peer = "peer.cursor.abcdef"
+        with FakeHubs(conversation(d["slug"], peer)):
+            first = hubtool.history(d, peer, "", 2)
+        cur = first["next_cursor"]
+        other = hubtool.history(d, "someone.else.abcdef", cur, 2)
+        assert "another conversation" in other.get("error", ""), other
+        old = hubtool.history(d, peer, "1760000000000-41", 2)
+        assert "older hubtool" in old.get("error", "") and \
+            "without a cursor" in old["error"], old
+        junk = hubtool.history(d, peer, "h1:nonsense", 2)
+        assert "next_cursor" in junk.get("error", ""), junk
+        odd = hubtool._write_cursor(peer, (1760000000123, "x:y%z é"), ["p:q"])
+        assert hubtool._read_cursor(peer, odd) == \
+            ((1760000000123, "x:y%z é"), {"p:q"}, ""), odd
+    check("history · a cursor belongs to its conversation; one from v2.0.0's "
+          "hubtool, or anything else, is refused saying what to do; any "
+          "message id survives the round trip",
+          _a_cursor_belongs_to_its_conversation)
+
+    def _conversations_one_row_per_address():
+        d = two_hubs("history-listing")
+        me, peer = d["slug"], "peer.listing.abcdef"
+
+        def row(who, unread, sender, body, at):
+            return {"with": who, "unread": unread,
+                    "last": {"id": body, "from": sender, "body": body,
+                             "received_at": f"2026-10-09T01:00:{at}.000Z"}}
+        convs = {hub_a: [row(peer, 1, peer, "newest, on a", "02"),
+                         row("other.x.abcdef", 0, me, "oldest", "00")],
+                 hub_b: [row("third.x.abcdef", 2, me, "on b only", "03"),
+                         row(peer, 3, me, "older, on b", "01")]}
+        with FakeHubs({}, convs=convs):
+            out = hubtool.history(d)
+        rows = out["conversations"]
+        assert [r["with"] for r in rows] == \
+            ["third.x.abcdef", peer, "other.x.abcdef"], rows
+        assert rows[1] == {"with": peer, "unread": 4,
+                           "last_at": "2026-10-09T01:00:02.000Z",
+                           "last_from": peer, "last": "newest, on a",
+                           "hubs": [hub_a, hub_b]}, rows[1]
+        assert "errors" not in out, out
+        with FakeHubs({}, convs=convs, down={hub_b}):
+            dark = hubtool.history(d)
+        assert [r["with"] for r in dark["conversations"]] == \
+            [peer, "other.x.abcdef"], dark
+        assert hub_b in dark["note"] and list(dark["errors"]) == [hub_b], dark
+    check("history · with no peer: one row per address across hubs (unread "
+          "summed, the newest last message, the hubs named); a hub that does "
+          "not answer is named", _conversations_one_row_per_address)
 
     def _a_message_s_whole_text():
         fresh_ident()

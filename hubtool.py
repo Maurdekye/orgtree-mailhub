@@ -46,7 +46,9 @@ uid, not from any hub. register joins every listed hub; listen polls them
 all concurrently (one merged stream, each line tagged `via <hub>` when more
 than one is listed, seen-ring PER HUB — ids are only unique within a hub);
 send resolves the hub by roster (several hold the target → the local one
-wins, fewest hops; none → refuse naming the hubs searched). Manage the list:
+wins, fewest hops; none → refuse naming the hubs searched); hub_history reads
+every listed hub and merges the conversation (one row per message id, a
+cursor that means the same on every hub). Manage the list:
     python hub/hubtool.py addhub <name> <address>
     python hub/hubtool.py drophub <name> <address>
 
@@ -65,6 +67,7 @@ the listener requires one).
 
 from __future__ import annotations
 
+import calendar
 import getpass
 import hashlib
 import json
@@ -966,6 +969,12 @@ _QUOTE_CHARS = 120          # the gist of the message a reply answers
 _MESSAGE_CHARS = 100_000    # hub_message's ceiling on one whole text
 _CONVERSATIONS_MAX = 20     # rows hub_history lists when no peer is given
 _RECENT_PEERS = 6           # correspondents a resumed hub_register names
+_HUB_PAGE_MAX = 200         # the most one /api/history answer holds (the hub's cap)
+_HISTORY_ROUNDS = 5         # requests one hub gets toward one page, at most
+_CURSOR_TAG = "h1"          # hub_history cursors: h1:<conversation>:<unix ms>:<id>
+_CURSOR_IDS = 20            # already-shown ids a cursor carries, at most
+_ISO_AT = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([0-9]{2}):([0-9]{2})"
+                     r":([0-9]{2})(?:\.([0-9]+))?(Z|[+-][0-9]{2}:?[0-9]{2})?$")
 
 
 def _gist(text: str, most: int) -> str:
@@ -1047,6 +1056,122 @@ def _shown(m: dict[str, Any], me: str,
     return row, spent
 
 
+def _at_ms(iso: Any) -> int:
+    """A hub's timestamp (`2026-10-09T07:55:20.468Z`) in unix milliseconds,
+    exact (no float); 0 when missing or unreadable, so it sorts oldest."""
+    m = _ISO_AT.match(str(iso or "").strip())
+    if not m:
+        return 0
+    y, mo, dd, hh, mi, ss = (int(x) for x in m.groups()[:6])
+    secs = calendar.timegm((y, mo, dd, hh, mi, ss, 0, 0, 0))
+    tz = m.group(8) or "Z"
+    if tz != "Z":
+        digits = tz[1:].replace(":", "")
+        offset = int(digits[:2]) * 3600 + int(digits[2:]) * 60
+        secs -= offset if tz[0] == "+" else -offset
+    return secs * 1000 + int((m.group(7) or "0")[:3].ljust(3, "0"))
+
+
+def _hist_key(m: dict[str, Any]) -> tuple[int, str]:
+    """Where a message sits in a conversation merged from several hubs: its
+    hub time, then its id (ties at one millisecond)."""
+    return _at_ms(m.get("received_at")), str(m.get("id") or "")
+
+
+def _conv_tag(peer: str) -> str:
+    return hashlib.sha256(peer.encode()).hexdigest()[:8]
+
+
+def _write_cursor(peer: str, edge: tuple[int, str], shown: list[str]) -> str:
+    """`h1:<conversation>:<unix ms>:<id>[:<id>…]`: the position of the
+    oldest message a page showed, then the ids of messages already shown
+    that have another copy older than it (each id percent-encoded)."""
+    return ":".join([_CURSOR_TAG, _conv_tag(peer), str(edge[0])] +
+                    [urllib.parse.quote(i, safe="") for i in [edge[1], *shown]])
+
+
+def _read_cursor(peer: str, raw: str
+                 ) -> tuple[tuple[int, str] | None, set[str], str]:
+    """A hub_history cursor back to its position and its already-shown ids,
+    or None and why it is refused."""
+    raw = raw.strip()
+    parts = raw.split(":")
+    if len(parts) >= 4 and parts[0] == _CURSOR_TAG and \
+            re.fullmatch(r"[0-9]{1,15}", parts[2]) and all(parts[3:]):
+        if parts[1] != _conv_tag(peer):
+            return None, set(), (
+                f"that cursor belongs to another conversation: pass the "
+                f"next_cursor of a hub_history answer for peer={peer}, or "
+                f"no cursor for the newest page")
+        ids = [urllib.parse.unquote(p) for p in parts[3:]]
+        return (int(parts[2]), ids[0]), set(ids[1:]), ""
+    if re.fullmatch(r"[0-9]+-[0-9]+", raw):
+        return None, set(), ("that cursor comes from an older hubtool, which "
+                             "read one hub only: call hub_history again "
+                             "without a cursor")
+    return None, set(), ("cursor must be the next_cursor of an earlier "
+                         "hub_history answer, unchanged (omit it for the "
+                         "newest page)")
+
+
+def _hub_side(h: str, peer: str, edge: tuple[int, str] | None,
+              shown: set[str], n: int
+              ) -> tuple[list[tuple[tuple[int, str], dict[str, Any]]],
+                         dict[str, tuple[int, str]], bool]:
+    """One hub's part of a conversation, newest first: its `n` newest
+    messages older than `edge` (the merged conversation's position; None is
+    the newest end), plus any sharing the n-th one's millisecond so the
+    merge can order ties by id; where it holds copies of `shown` messages
+    (left out); and whether it holds older ones. A hub cursor names one of
+    its own rows (`<unix ms>-<row>`), so `<ms + 1>-0` asks any v2 hub for
+    everything at or before a millisecond; the rest of the edge is applied
+    here."""
+    got: list[tuple[tuple[int, str], dict[str, Any]]] = []
+    again: dict[str, tuple[int, str]] = {}
+    before = f"{edge[0] + 1}-0" if edge else ""
+    more = False
+    for _ in range(_HISTORY_ROUNDS):
+        q = {"with": peer, "limit": str(min(n + 1, _HUB_PAGE_MAX))}
+        if before:
+            q["before"] = before
+        out = _call("/api/history?" + urllib.parse.urlencode(q), None,
+                    method="GET", hub=h)
+        for m in cast("list[dict[str, Any]]", out.get("messages") or []):
+            k = _hist_key(m)
+            if edge is not None and not k < edge:
+                continue
+            if k[1] in shown:
+                again[k[1]] = min(k, again.get(k[1], k))
+            else:
+                got.append((k, m))
+        before = str(out.get("before") or "")
+        more = bool(before)
+        if not more or (len(got) > n and got[-1][0][0] < got[n - 1][0][0]):
+            break
+    return got, again, more
+
+
+def _missing(failed: dict[str, Exception],
+             lost: str) -> tuple[str, dict[str, str]]:
+    """The note's sentences for the hubs whose part of an answer is not in
+    it (`lost` names that part), and why, per hub (a refusal's body can be
+    read once only)."""
+    why = {h: _history_refusal(e, h) for h, e in failed.items()}
+    note = ""
+    for h, e in failed.items():
+        note += (f" {h} keeps no history (that needs mail hub v2.0 or "
+                 f"later), so {lost} not here." if _status(e) == 404 else
+                 f" {h} did not answer ({why[h]}), so {lost} missing: ask "
+                 f"again later.")
+    return note, why
+
+
+def _refusals(why: dict[str, str]) -> str:
+    """Every hub's refusal in one line, each naming its hub."""
+    return "; ".join(w if w.startswith(h) else f"{h}: {w}"
+                     for h, w in why.items())
+
+
 def history(d: dict[str, Any], peer: str = "", cursor: str = "",
             limit: Any = None) -> dict[str, Any]:
     """hub_history (user 2026-10-09: a session that lost its context must be
@@ -1055,49 +1180,77 @@ def history(d: dict[str, Any], peer: str = "", cursor: str = "",
     this identity has mail with. Read-only on the hub: nothing is acked,
     consumed or receipted, so hub_read and hub_wait still deliver new mail.
     It needs a v2 hub, which keeps mail until it is deleted; a v1 hub
-    answers 404 and the result says so."""
+    answers 404 and the result says so.
+
+    Several hubs (coordinator 2026-10-09: mail between two addresses can
+    travel through any hub both are on): every hub on the list is read and
+    the answers merged, the way the engine's recall merges its two tables:
+    by hub time, then id; one row per message id, placed by its newest
+    copy. The cursor is a position in the merged conversation, so it means
+    the same on every hub, and a hub that did not answer for one page still
+    gives its older mail on the next. It also names the messages already
+    shown that have an older copy below it, so the next page leaves those
+    copies out; one whose older copy this page never fetched can show
+    again."""
     try:
         n = _HISTORY_PAGE if limit in (None, "") else int(float(limit))
     except (TypeError, ValueError):
         return {"error": "limit must be a number"}
     n = min(max(n, 1), _HISTORY_MAX)
     peer = str(peer or "").strip()
-    many = len(_hubs(d)) > 1
+    cursor = str(cursor or "").strip()
+    hubs = _local_first(_hubs(d))
+    many = len(hubs) > 1
     if not peer:
         return _conversations(d, many)
-    hub, _ = _resolve_send_hub(d, peer)
-    hub = hub or _local_first(_hubs(d))[0]     # mail outlives a roster entry
-
-    def page(k: int) -> dict[str, Any]:
-        q = {"with": peer, "limit": str(k)}
-        if cursor:
-            q["before"] = str(cursor)
-        return _call("/api/history?" + urllib.parse.urlencode(q), None,
-                     method="GET", hub=hub)
-
-    try:
-        out = page(n)
-    except Exception as e:                                       # noqa: BLE001
-        return {"error": _history_refusal(e, hub)}
+    edge: tuple[int, str] | None = None
+    passed: set[str] = set()
+    if cursor:
+        edge, passed, refused = _read_cursor(peer, cursor)
+        if edge is None:
+            return {"error": refused}
+    copies: dict[str, tuple[tuple[int, str], dict[str, Any]]] = {}
+    oldest: dict[str, tuple[int, str]] = {}   # every copy fetched, per id
+    failed: dict[str, Exception] = {}
+    more = False
+    for h in hubs:
+        try:
+            got, again, hub_more = _hub_side(h, peer, edge, passed, n)
+        except Exception as e:                                   # noqa: BLE001
+            failed[h] = e
+            continue
+        more = more or hub_more
+        for k, m in got:     # one row per id: the newest copy
+            if k[1] not in copies or k > copies[k[1]][0]:
+                copies[k[1]] = (k, m)
+            oldest[k[1]] = min(k, oldest.get(k[1], k))
+        for i, k in again.items():
+            oldest[i] = min(k, oldest.get(i, k))
+    gone, why = _missing(failed, "mail that went through it is")
+    if len(failed) == len(hubs):
+        return {"error": _refusals(why)}
+    ordered = sorted(copies.values(), key=lambda km: km[0], reverse=True)
+    quotes = {k[1]: m for k, m in ordered}
     me = str(d.get("slug"))
-    msgs = cast("list[dict[str, Any]]", out.get("messages") or [])  # newest first
-    by_id = {str(m.get("id")): m for m in msgs}
-    shown: list[dict[str, Any]] = []
+    shown: list[tuple[tuple[int, str], dict[str, Any]]] = []
     spent = 0
-    for m in msgs:           # newest first until the budget is spent (always one)
-        row, cost = _shown(m, me, by_id)
+    for k, m in ordered[:n]:  # newest first until the budget is spent (always one)
+        row, cost = _shown(m, me, quotes)
         if shown and spent + cost > _PAGE_CHARS:
             break
         spent += cost
-        shown.append(row)
-    budget_cut = len(shown) < len(msgs)
-    nxt = out.get("before")
-    if budget_cut:           # the hub's cursor for exactly the messages shown
-        try:
-            nxt = page(len(shown)).get("before")
-        except Exception as e:                                   # noqa: BLE001
-            return {"error": _history_refusal(e, hub)}
-    has_more = bool(nxt)
+        shown.append((k, row))
+    budget_cut = len(shown) < min(n, len(ordered))
+    has_more = bool(shown) and (len(ordered) > len(shown) or more)
+    nxt: str | None = None
+    if has_more:
+        end = shown[-1][0]
+        # shown ids with a copy below the new edge, and earlier ones whose
+        # older copy is still below it (or was not reached on this page)
+        again_ids = [k[1] for k, _ in shown if oldest[k[1]] < end] + \
+            [i for i in sorted(passed) if i not in oldest or oldest[i] < end]
+        nxt = _write_cursor(peer, end,
+                            list(dict.fromkeys(again_ids))[:_CURSOR_IDS])
     if not shown:
         note = (f"No older mail with {peer}." if cursor
                 else f"You have no mail with {peer}.")
@@ -1109,48 +1262,69 @@ def history(d: dict[str, Any], peer: str = "", cursor: str = "",
     if has_more:
         note += (f" Older mail with {peer} exists: hub_history with "
                  f"peer={peer} and cursor={nxt} gives the page before these.")
+    elif shown and failed:
+        note += f" The hubs that answered hold no older mail with {peer}."
     elif shown:
         note += f" This is the start of your mail with {peer}."
-    if any(r.get("cut") for r in shown):
+    note += gone
+    if any(r.get("cut") for _, r in shown):
         note += (f" Previews stop at {_PREVIEW_CHARS} characters; a message "
                  f"marked cut is longer: hub_message with its id gives the "
                  f"whole text.")
-    res: dict[str, Any] = {"peer": peer, "messages": list(reversed(shown)),
-                           "has_more": has_more,
-                           "next_cursor": nxt if has_more else None,
+    res: dict[str, Any] = {"peer": peer,
+                           "messages": [r for _, r in reversed(shown)],
+                           "has_more": has_more, "next_cursor": nxt,
                            "note": note}
     if many:
-        res["hub"] = hub
+        res["hubs"] = [h for h in hubs if h not in failed]
+    if failed:
+        res["errors"] = why
     return res
 
 
 def _conversations(d: dict[str, Any], many: bool) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    errors: dict[str, str] = {}
+    """Who this identity has mail with, newest first: one row per address,
+    whichever hubs carried the mail (its unread counted on all of them,
+    its last message the newest on any)."""
+    rows: dict[str, dict[str, Any]] = {}
+    failed: dict[str, Exception] = {}
     for h in _local_first(_hubs(d)):
         try:
             out = _call("/api/conversations", None, method="GET", hub=h)
         except Exception as e:                                   # noqa: BLE001
-            errors[h] = _history_refusal(e, h)
+            failed[h] = e
             continue
         for c in cast("list[dict[str, Any]]", out.get("conversations") or []):
+            who = str(c.get("with") or "")
+            if not who:
+                continue
             last = cast("dict[str, Any]", c.get("last") or {})
-            rows.append({"with": c.get("with"), "unread": c.get("unread"),
-                         "last_at": last.get("received_at"),
-                         "last_from": last.get("from"),
-                         "last": _gist(str(last.get("body") or ""), _QUOTE_CHARS),
-                         **({"hub": h} if many else {})})
-    if not rows and errors:
-        return {"error": "; ".join(errors.values())}
-    rows.sort(key=lambda r: str(r.get("last_at") or ""), reverse=True)
-    res: dict[str, Any] = {"conversations": rows[:_CONVERSATIONS_MAX]}
-    if len(rows) > _CONVERSATIONS_MAX:
-        res["more"] = (f"{len(rows) - _CONVERSATIONS_MAX} older conversations "
-                       f"are not shown")
-    if errors:
-        res["errors"] = errors
+            k = _hist_key(last)
+            row = rows.setdefault(who, {"with": who, "unread": 0,
+                                        "key": (-1, ""), "hubs": []})
+            row["unread"] += int(c.get("unread") or 0)
+            row["hubs"].append(h)
+            if k > row["key"]:
+                row.update(key=k, last_at=last.get("received_at"),
+                           last_from=last.get("from"),
+                           last=_gist(str(last.get("body") or ""),
+                                      _QUOTE_CHARS))
+    gone, why = _missing(failed, "conversations held only there are")
+    if not rows and failed:
+        return {"error": _refusals(why)}
+    listed = [{"with": r["with"], "unread": r["unread"],
+               "last_at": r.get("last_at"), "last_from": r.get("last_from"),
+               "last": r.get("last"), **({"hubs": r["hubs"]} if many else {})}
+              for r in sorted(rows.values(), key=lambda r: r["key"],
+                              reverse=True)]
+    res: dict[str, Any] = {"conversations": listed[:_CONVERSATIONS_MAX]}
+    if len(listed) > _CONVERSATIONS_MAX:
+        res["more"] = (f"{len(listed) - _CONVERSATIONS_MAX} older "
+                       f"conversations are not shown")
+    if failed:
+        res["errors"] = why
     res["note"] = ("hub_history with peer set to one of these addresses "
-                   "recalls that conversation")
+                   "recalls that conversation." + gone)
     return res
 
 
@@ -1594,7 +1768,9 @@ TOOLS: list[dict[str, Any]] = [
      "description": (
          "Before you reply to someone after a context compaction, or in a "
          "new session, recall your conversation with them: the mail you and "
-         "they exchanged, both directions. The newest page comes first, "
+         "they exchanged, both directions, through every hub on your list "
+         "(the note names any hub that did not answer). The newest page "
+         "comes first, "
          "oldest to newest within it (20 messages by default, at most 100). "
          "Each message is a preview of at most 500 characters: one marked "
          "`cut` is longer, and hub_message with its id gives the whole text. "

@@ -48,7 +48,8 @@ curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download
 Then start a new session. It has the hub tools (`hub_register`, `hub_list`,
 `hub_send`, `hub_read`, `hub_wait`, `hub_history` and more): ask it to join
 the hub under a name of its own. It waits for mail with `hub_wait`, and after
-a context compaction `hub_history` recalls what was said. A Claude Code
+a context compaction `hub_history` recalls what was said, through every hub
+the session is on. A Claude Code
 session can also get mail as it arrives by running
 `python ~/.orgtree/hubtool/hubtool.py listen <its name>` with its Monitor
 tool.
