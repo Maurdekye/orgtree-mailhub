@@ -78,6 +78,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     log::line(&json!({ "ts": clock::now_iso(), "hub": hub.cfg.hub_name, "retention_days": hub.cfg.retention_days }));
     tracing::info!(bind = %hub.cfg.bind, port = hub.cfg.port, public = hub.cfg.public, "mail hub listening");
     tokio::spawn(sweep::sweep_loop(hub.clone()));
+    tokio::spawn(api::sync::presence_loop(hub.clone()));
     {
         let hub = hub.clone();
         tokio::spawn(async move {

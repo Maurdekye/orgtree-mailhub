@@ -550,6 +550,34 @@ GET /healthz                                  (on the main port)
 
 `/healthz` lists the feature as `door`.
 
+## Presence: a client that hangs up goes offline soon (v2.0.2)
+
+An address counts as online while it holds a parked poll or sync, and for
+90 seconds after its last call (as in v1). Two things changed, so a client
+that stops shows as gone within seconds instead of minutes:
+
+- **A hang-up ends it.** When a parked poll or sync ends because the client
+  closed the connection (its process stopped, was killed or crashed), the
+  address stays online only for a **10-second grace** after that, long
+  enough for a poller to restart or retry. Calling or parking again within
+  it keeps the address online. A poll or sync that answers, and every other
+  call, keeps the 90-second window, so a client between calls is not shown
+  as gone.
+- **A device in use hears at once.** When the set online changes (a grace
+  or window ran out, an address came back), the hub wakes parked syncs
+  within a second. The sync of a device in use (`POST /api/devices/active`,
+  see "Active devices") answers at once, carrying `online`. A device not in
+  use is not woken for it: it gets `online` with its next answer (mail, or
+  the end of its wait), or at once when it reports itself in use, because
+  that wakes its parked sync.
+
+So a client that stops shows as offline on a device in use within about
+11 seconds (the grace, plus a second), and coming back shows within about a
+second. A client that vanishes without closing its connection (network loss,
+sleep) is not noticed until its parked call ends at its wait, and then the
+window applies. v1 polls are unchanged: their roster carries the same online
+flags, as of each answer.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.1"`), `"features"` and `"now"`

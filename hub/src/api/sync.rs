@@ -24,7 +24,7 @@ use super::mail::{authed, authed_callers, envelope_v2, mark_seen, one_address, r
 use super::{ok, refuse, ApiResult, Hub, Req};
 use crate::clock;
 use crate::db;
-use crate::presence::PRESENCE_WINDOW;
+use crate::presence::{Woke, PRESENCE_WINDOW};
 use crate::wire::{pg_text, py_strip};
 
 /// Message changes one sync answer carries at most; `more` says to sync
@@ -513,23 +513,75 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         let senders = take_custody(&c, &slug, cur.mail, cur.base.unwrap_or(0)).await?;
         hub.presence.wake(senders.iter().map(String::as_str));
     }
-    let _parked = hub.presence.park(std::slice::from_ref(&slug));
+    let parked = hub.presence.park(std::slice::from_ref(&slug));
     let slot = hub.presence.slot_of(&slug);
-    let mut stop = false;
+    let answer = async {
+        let mut stop = false;
+        loop {
+            let mut listener = hub.presence.sync_listener(&slot);
+            let batch = sync_check(hub, &slug, cur).await?;
+            let in_use = {
+                let c = hub.db.get().await?;
+                // signed out while parked: refused from now on
+                if signed_out(&c, &slug, &device).await? {
+                    return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
+                }
+                device_in_use(&c, &slug, &device).await?
+            };
+            // v2.0.2: a device in use hears at once when the set online
+            // changed; the rest learn it with their next answer (a phone in
+            // a pocket is not woken for it)
+            let online_news = || in_use && cur.online.is_some_and(|p| p != online_print(&hub.presence.online_now()));
+            if batch.news() || start_now || stop || online_news() || Instant::now() >= deadline {
+                return sync_answer(hub, &slug, &device, cur, batch, start_now).await;
+            }
+            loop {
+                let woke = tokio::select! {
+                    w = listener.wait() => w,
+                    _ = tokio::time::sleep_until(deadline.into()) => Woke::Changed,
+                    _ = hub.shutdown.cancelled() => {
+                        stop = true;
+                        Woke::Changed
+                    }
+                };
+                // a presence wake needs no database check
+                if woke == Woke::Changed {
+                    break;
+                }
+                if online_news() {
+                    return sync_answer(hub, &slug, &device, cur, batch, start_now).await;
+                }
+            }
+        }
+    }
+    .await;
+    parked.finish();
+    answer
+}
+
+/// The device says it is in use (`POST /api/devices/active`) and that has
+/// not lapsed.
+async fn device_in_use(c: &impl GenericClient, slug: &str, device: &str) -> ApiResult<bool> {
+    let row = db::query_opt(c, "SELECT active_until FROM devices WHERE slug = $1 AND device_id = $2", &[&slug, &device]).await?;
+    let until: Option<chrono::DateTime<chrono::Utc>> = row.and_then(|r| r.get(0));
+    Ok(until.is_some_and(|u| u > clock::now()))
+}
+
+/// Every second: when the set of addresses online changed (a window or a
+/// grace ran out, an address came or went), wake the parked syncs; a device
+/// in use answers with the new `online` (v2.0.2).
+pub async fn presence_loop(hub: Arc<Hub>) {
+    let mut last = online_print(&hub.presence.online_now());
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
-        let listener = hub.presence.sync_listener(&slot);
-        let batch = sync_check(hub, &slug, cur).await?;
-        // signed out while parked: refused from now on
-        if signed_out(&hub.db.get().await?, &slug, &device).await? {
-            return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
-        }
-        if batch.news() || start_now || stop || Instant::now() >= deadline {
-            return sync_answer(hub, &slug, &device, cur, batch, start_now).await;
-        }
         tokio::select! {
-            _ = listener.wait() => {}
-            _ = tokio::time::sleep_until(deadline.into()) => {}
-            _ = hub.shutdown.cancelled() => stop = true,
+            _ = tick.tick() => {}
+            _ = hub.shutdown.cancelled() => return,
+        }
+        let now = online_print(&hub.presence.online_now());
+        if now != last {
+            last = now;
+            hub.presence.online_changed();
         }
     }
 }
@@ -610,6 +662,11 @@ pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let until = on.then(|| clock::now() + chrono::Duration::from_std(ACTIVE_FOR).unwrap_or_default());
     db::execute(&c, "UPDATE devices SET active_until = $3 WHERE slug = $1 AND device_id = $2", &[&slug, &device, &until]).await?;
+    if on {
+        // its parked sync, if any, now answers for a change in the set
+        // online that it was not woken for while not in use (v2.0.2)
+        hub.presence.wake_sync([slug.as_str()]);
+    }
     ok(json!({ "slug": slug, "device_id": device, "active": on, "active_until": until.map(clock::iso) }))
 }
 

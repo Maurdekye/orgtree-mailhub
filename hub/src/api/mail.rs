@@ -386,20 +386,26 @@ pub async fn poll(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     let wait = if wait.is_nan() { 0.0 } else { wait.clamp(0.0, POLL_CEILING) };
     let deadline = Instant::now() + Duration::from_secs_f64(wait);
-    let _parked = hub.presence.park(&slugs);
-    loop {
-        let slots = hub.presence.slots_for(&slugs);
-        let listener = Listener::new(&slots);
-        let (messages, receipts) = poll_check(hub, &slugs).await?;
-        if !messages.is_empty() || !receipts.is_empty() || Instant::now() >= deadline {
-            return poll_answer(hub, &slugs, messages, receipts).await;
-        }
-        tokio::select! {
-            _ = listener.wait() => {}
-            _ = tokio::time::sleep_until(deadline.into()) => return poll_answer(hub, &slugs, Vec::new(), Vec::new()).await,
-            _ = hub.shutdown.cancelled() => return poll_answer(hub, &slugs, Vec::new(), Vec::new()).await,
+    let parked = hub.presence.park(&slugs);
+    // dropped before it answers, the client hung up (v2.0.2: gone soon)
+    let answer = async {
+        loop {
+            let slots = hub.presence.slots_for(&slugs);
+            let listener = Listener::new(&slots);
+            let (messages, receipts) = poll_check(hub, &slugs).await?;
+            if !messages.is_empty() || !receipts.is_empty() || Instant::now() >= deadline {
+                return poll_answer(hub, &slugs, messages, receipts).await;
+            }
+            tokio::select! {
+                _ = listener.wait() => {}
+                _ = tokio::time::sleep_until(deadline.into()) => return poll_answer(hub, &slugs, Vec::new(), Vec::new()).await,
+                _ = hub.shutdown.cancelled() => return poll_answer(hub, &slugs, Vec::new(), Vec::new()).await,
+            }
         }
     }
+    .await;
+    parked.finish();
+    answer
 }
 
 #[tracing::instrument(level = "debug", skip(hub))]
