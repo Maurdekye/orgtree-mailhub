@@ -122,33 +122,42 @@ makes it automatic.
 
 ## Connect Hubchat
 
-Hubchat needs only the hub's address and port: type `home-pc:7370`, say
-(7370 is the default port). Newer Hubchat versions find the port themselves
-when you type only the machine's name or address: they try 7370, then the
-relay-only door's 7378 and 7371, then https. Hubchat reads `/healthz` and
-otherwise uses only `/api/*` routes, so it works on the hub's main port and
-on its relay-only door (below) alike.
+Connect Hubchat to the hub's relay-only door, not its main port: type
+`home-pc:7371`, say (`home-pc:7378` for a docker compose hub). Newer Hubchat
+versions find the port themselves when you type only the machine's name or
+address: they try 7370, then the relay-only door's 7378 and 7371, then https.
+Hubchat reads `/healthz` and otherwise uses only `/api/*` routes, so the door
+(below) serves everything it needs.
 
 **Run a hub**, either one:
 
 - **Orgtree's built-in hub.** Every Orgtree installation runs one. In
-  Orgtree, open **App settings › Mail hub**, set **Hosting › Listen on** to
-  **This computer and the local network**, then click **Save hosting
-  settings**. Hubchat on the same PC connects to `localhost:7370`; other
-  devices on the network use the PC's address, `<pc-address>:7370`.
+  Orgtree, open **App settings › Mail hub**, turn on **Public access › Also
+  serve a relay-only door on port 7371**, then click **Save hosting
+  settings**. Leave **Hosting › Listen on** at **This computer only**.
+  Hubchat connects to `<pc-address>:7371`; on that PC itself, to
+  `localhost:7371` (a phone linked from it is then handed the PC's names at
+  that port, which it can reach).
 - **Standalone.** Follow [Run it](#run-it): copy `.env.example` to `.env`,
-  set `HUB_DB_PASSWORD`, then `docker compose up -d --build`. The hub listens
-  on port 7370 on every interface (`HUB_BIND`).
+  set `HUB_DB_PASSWORD`, `HUB_PUBLIC=1` and `HUB_BIND=127.0.0.1`, then
+  `docker compose up -d --build`. Hubchat connects to the door on host port
+  7378: `<host-address>:7378`.
+
+**Why not "This computer and the local network" (or `HUB_BIND=0.0.0.0`)?**
+That opens the hub's main port, whose page shows every message on the hub,
+so anyone on your Wi-Fi could read them all. The relay-only door only
+relays mail: it has no such page, and reading an address's mail needs that
+address's own secret.
 
 **From outside your local network, use [Tailscale](https://tailscale.com).**
 It is the safer, simpler choice: nothing is opened to the internet, only
 devices in your tailnet can reach the hub, and Tailscale encrypts the
 traffic (the hub has no TLS of its own). Install Tailscale on the hub
-machine and on each phone or PC that runs Hubchat, keep the hub listening
-on the network as above, and point Hubchat at the hub machine's Tailscale
-name, for example `home-pc:7370` (or its `100.x.y.z` Tailscale address). If
-a device cannot connect, check that the hub machine's firewall lets the port
-in (on Windows, allow the hub if Windows asks).
+machine and on each phone or PC that runs Hubchat, and point Hubchat at the
+door on the hub machine's Tailscale name, for example `home-pc:7371` (or its
+`100.x.y.z` Tailscale address). If a device cannot connect, check that the
+hub machine's firewall lets the port in (on Windows, allow the hub if
+Windows asks).
 
 **The open internet: only through the relay-only door.** Without Tailscale,
 expose the hub's relay-only door, never the main port. The door serves
