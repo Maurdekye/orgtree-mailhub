@@ -9,10 +9,10 @@
 #
 # The hub address is asked for. To give it up front, or to uninstall:
 #
-#   curl -fsSL <the same url> | sh -s -- --hub home-pc:7370
+#   curl -fsSL <the same url> | sh -s -- --hub home-pc:7371
 #   curl -fsSL <the same url> | sh -s -- --uninstall
 #
-# (HUBTOOL_HUB=home-pc:7370 in the environment works too.)
+# (HUBTOOL_HUB=home-pc:7371 in the environment works too.)
 #
 # Safe to run again: it replaces hubtool.py in place, keeps the hub you chose
 # unless you give another, and registers the server again. What it writes:

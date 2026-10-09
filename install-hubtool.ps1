@@ -9,10 +9,10 @@ and no admin rights are needed; Python 3.8+ is.
 
 The hub address is asked for. To give it up front, or to uninstall:
 
-    & ([scriptblock]::Create((irm <the same url>))) -Hub home-pc:7370
+    & ([scriptblock]::Create((irm <the same url>))) -Hub home-pc:7371
     & ([scriptblock]::Create((irm <the same url>))) -Uninstall
 
-($env:HUBTOOL_HUB = 'home-pc:7370' before the first form works too.)
+($env:HUBTOOL_HUB = 'home-pc:7371' before the first form works too.)
 
 Safe to run again: it replaces hubtool.py in place, keeps the hub you chose
 unless you give another, and registers the server again. What it writes:
