@@ -207,6 +207,7 @@ enum Route {
     Profile,
     Sync,
     Devices,
+    Active,
     Enrol,
     SignOut,
     IdentityGet,
@@ -248,6 +249,15 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/devices" => return get_or_post(Devices, Enrol),
         "/api/identity" => return get_or_post(IdentityGet, IdentitySet),
         _ => {}
+    }
+    // POST here is the active signal; DELETE still signs out a device that
+    // happens to be called "active" (device ids are the client's own)
+    if path == "/api/devices/active" {
+        return Some(match *method {
+            Method::POST => Ok(Active),
+            Method::DELETE => Ok(SignOut),
+            _ => Err("POST, DELETE"),
+        });
     }
     if let Some(device) = path.strip_prefix("/api/devices/") {
         if device.is_empty() {
@@ -423,6 +433,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Profile => mail::profile(hub, req).await,
         Route::Sync => sync::sync(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
+        Route::Active => sync::active(hub, req).await,
         Route::Enrol => keys::enrol(hub, req).await,
         Route::SignOut => {
             let device = req.path.strip_prefix("/api/devices/").unwrap_or_default().to_string();

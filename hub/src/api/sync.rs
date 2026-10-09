@@ -226,6 +226,25 @@ async fn seen_device(c: &impl GenericClient, slug: &str, device: &str, name: Opt
     Ok(())
 }
 
+/// How long one "active" lasts: a device in use renews it (about once a
+/// minute), so one that crashes or sleeps stops counting on its own.
+pub const ACTIVE_FOR: Duration = Duration::from_secs(90);
+
+/// The address's other devices in use now (never the asking one, never a
+/// signed-out one).
+#[tracing::instrument(level = "debug", skip(c), err(level = "debug", Debug))]
+async fn active_others(c: &impl GenericClient, slug: &str, device: &str) -> Result<Vec<String>, tokio_postgres::Error> {
+    let rows = db::query(
+        c,
+        "SELECT device_id FROM devices
+          WHERE slug = $1 AND device_id <> $2 AND active_until > $3 AND revoked_at IS NULL
+          ORDER BY device_id LIMIT $4",
+        &[&slug, &device, &clock::now(), &DEVICES_MAX],
+    )
+    .await?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
 /// Was this device signed out (G5)?
 async fn signed_out(c: &impl GenericClient, slug: &str, device: &str) -> Result<bool, tokio_postgres::Error> {
     Ok(db::query_opt(c, "SELECT 1 FROM devices WHERE slug = $1 AND device_id = $2 AND revoked_at IS NOT NULL", &[&slug, &device])
@@ -376,11 +395,14 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn sync_answer(hub: &Hub, slug: &str, cur: Cursor, b: Batch) -> ApiResult {
+async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
     let online = hub.presence.online_now();
     let print = online_print(&online);
+    // in every answer, read now: a device deciding whether to notify about
+    // the mail in this answer sees who is in use as of this answer
+    let active = active_others(&c, slug, device).await?;
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
@@ -390,6 +412,7 @@ async fn sync_answer(hub: &Hub, slug: &str, cur: Cursor, b: Batch) -> ApiResult 
         "roster_removed": b.removed,
         "more": b.more,
         "identity_key_version": b.key_version,
+        "active": active,
     });
     if b.reset || cur.online != Some(print) {
         out["online"] = json!(online);
@@ -447,7 +470,7 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
             return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
         }
         if batch.news() || stop || Instant::now() >= deadline {
-            return sync_answer(hub, &slug, cur, batch).await;
+            return sync_answer(hub, &slug, &device, cur, batch).await;
         }
         tokio::select! {
             _ = listener.wait() => {}
@@ -470,7 +493,7 @@ pub async fn devices(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let rows = db::query(
         &c,
-        "SELECT device_id, name, created_at, last_seen, public_key, revoked_at FROM devices WHERE slug = $1
+        "SELECT device_id, name, created_at, last_seen, public_key, revoked_at, active_until FROM devices WHERE slug = $1
           ORDER BY created_at, device_id LIMIT $2",
         &[&slug, &DEVICES_MAX],
     )
@@ -481,18 +504,59 @@ pub async fn devices(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         .iter()
         .map(|r| {
             let seen: chrono::DateTime<chrono::Utc> = r.get(3);
+            let revoked: Option<chrono::DateTime<chrono::Utc>> = r.get(5);
+            // the time it lapses while it is in use, null otherwise
+            let active_until = r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(6).filter(|u| *u > now && revoked.is_none());
             json!({
                 "device_id": r.get::<_, String>(0),
                 "name": r.get::<_, String>(1),
                 "created_at": clock::iso(r.get(2)),
                 "last_seen": clock::iso(seen),
-                "online": now - seen < window && r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(5).is_none(),
+                "online": now - seen < window && revoked.is_none(),
+                "active": active_until.is_some(),
+                "active_until": active_until.map(clock::iso),
                 "public_key": r.get::<_, Option<String>>(4),
-                "signed_out_at": r.get::<_, Option<chrono::DateTime<chrono::Utc>>>(5).map(clock::iso),
+                "signed_out_at": revoked.map(clock::iso),
             })
         })
         .collect();
     ok(json!({ "slug": slug, "devices": devices }))
+}
+
+/// `POST /api/devices/active {device_id, active, slug?}`: this device is
+/// the one in use (`true`, for `ACTIVE_FOR` from now, renewed by sending it
+/// again) or no longer (`false`, at once). The address's other devices see
+/// it in their sync answers; nothing wakes a parked sync for it. The same
+/// credentials, device rules and refusals as sync, and the device is seen
+/// as at a sync (made on first sight).
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
+pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
+    let body = req.json_object_strict().await?;
+    let callers = authed_callers(hub, req).await?;
+    if callers.is_empty() {
+        return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+    }
+    let slugs: Vec<String> = callers.iter().map(|c| c.slug.clone()).collect();
+    let slug = one_address(&slugs, body.get("slug"))?;
+    let device = device_id(body.get("device_id"))?;
+    let signer = callers.iter().find(|c| c.slug == slug && c.device.is_some()).and_then(|c| c.device.clone());
+    if signer.as_ref().is_some_and(|s| s != &device) && !callers.iter().any(|c| c.slug == slug && c.device.is_none()) {
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "device_id must be the signing device's own");
+    }
+    let on = match body.get("active") {
+        Some(Value::Bool(b)) => *b,
+        None | Some(Value::Null) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "active is required: true or false"),
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "active must be true or false"),
+    };
+    let c = hub.db.get().await?;
+    if signed_out(&c, &slug, &device).await? {
+        return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
+    }
+    seen_device(&c, &slug, &device, None).await?;
+    mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
+    let until = on.then(|| clock::now() + chrono::Duration::from_std(ACTIVE_FOR).unwrap_or_default());
+    db::execute(&c, "UPDATE devices SET active_until = $3 WHERE slug = $1 AND device_id = $2", &[&slug, &device, &until]).await?;
+    ok(json!({ "slug": slug, "device_id": device, "active": on, "active_until": until.map(clock::iso) }))
 }
 
 #[cfg(test)]

@@ -88,6 +88,7 @@ X-Org-Auth: <slug>:<secret>
   "roster": [<roster entries that joined or changed>],
   "roster_removed": ["<addresses that left>"],
   "online": ["<every address online now>"],      (only when it changed since the cursor)
+  "active": ["<this address's other devices in use>"],   (every answer; see "Active devices")
   "more": false,
   "reset": true                                   (only when the cursor was not this hub's; see below)
 }
@@ -425,12 +426,49 @@ counts as the address being seen, a parked sync keeps it online, and `POST
 `GET /api/devices` also shows each device's `public_key` (null for a device
 that only syncs with the shared secret) and `signed_out_at`.
 
+## Active devices (notifications follow the device in use)
+
+When a person uses one of their devices, the others should not also pop
+notifications. The device in use says so, and every sync answer tells the
+other devices who that is.
+
+```
+POST /api/devices/active
+X-Org-Auth: <slug>:<secret>            (or the device's own signed call)
+{"device_id": "pixel-7f3a", "active": true, "slug": "<when the header carries several>"}
+→ 200 {"slug": "...", "device_id": "pixel-7f3a", "active": true, "active_until": "<hub time + 90 s>"}
+```
+
+- `true` means "this device is in use" for **90 seconds** from now. A
+  client sends it when its window gains focus (or its app comes to the
+  foreground) and about once a minute while it stays in use. `false` ends
+  it at once (blur, idle, lock, background). Nothing sweeps: a device that
+  crashes or sleeps stops counting when its 90 seconds run out.
+- **Every sync answer** carries `"active"`: the address's other devices in
+  use as of that answer, never the asking device and never a signed-out one.
+  It is read when the answer is built, so a device deciding whether to
+  notify about the mail in an answer sees who was active as of that same
+  answer. A change of `active` never ends a parked sync by itself; the next
+  answer carries it.
+- `GET /api/devices` shows each device's `active` (true or false) and
+  `active_until` (when it lapses, or null when the device is not in use).
+- The call takes the same credentials, `slug` and `device_id` rules as
+  sync: a call signed by a device speaks only for that device (422 `device_id
+  must be the signing device's own`), a signed-out device is refused (401
+  `this device was signed out`), and a device never seen before is made, as
+  at its first sync. Refusals (422): `active is required: true or false`,
+  `active must be true or false`, and sync's own `device_id` refusals.
+- `/healthz` lists the feature as `active`. A client that does not find it
+  (a v1 hub, or an older v2) notifies as before. Clients that never send it
+  are unaffected: no device of theirs is ever active.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
 additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
 `devices`, `history`, `delete`, `long_messages`, `message_limit`,
-`directory`, `uploads`, `link`, `device_keys`. A v1 hub reports neither.
+`directory`, `uploads`, `link`, `device_keys`, `active`. A v1 hub reports
+neither.
 
 ## The hub's version, to every client
 
