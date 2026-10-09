@@ -306,9 +306,10 @@ SESSION_PROMPT = """This is an automated end-to-end test of the `mailhub` MCP to
 4. hub_wait with timeout 45 (a reply is on its way).
 5. hub_read.
 6. hub_history with peer "{peer}".
+7. hub_message with the id of the first message hub_history listed.
 Then answer with one short line per step saying what it returned. Do nothing else.
 """
-SESSION_TOOLS = ["hub_register", "hub_list", "hub_send", "hub_wait", "hub_read", "hub_history"]
+SESSION_TOOLS = ["hub_register", "hub_list", "hub_send", "hub_wait", "hub_read", "hub_history", "hub_message"]
 
 
 class Responder:
@@ -404,6 +405,8 @@ def judge_session(harness: str, calls: list[tuple[str, str]], peer: Responder, n
     assert "reply 1 from the e2e peer" in got, ("no reply reached hub_wait/hub_read", got[:400])
     assert f"hello from a real {harness} session" in first["hub_history"] and "reply 1" in first["hub_history"], \
         ("hub_history did not recall the conversation", first["hub_history"][:600])
+    assert f"hello from a real {harness} session" in first["hub_message"] and '"error"' not in first["hub_message"], \
+        ("hub_message did not give the first message's whole text", first["hub_message"][:400])
     assert any(s.startswith(name + ".") for s in peer.answered), (peer.answered, peer.seen[-5:])
 
 
@@ -428,6 +431,8 @@ def real_sessions(rig: Rig, evidence: str) -> None:
                 prompt = SESSION_PROMPT.format(name=name, peer=peer.slug, harness="Claude Code")
                 argv = [rig.claude, "-p", "--model", "haiku", "--setting-sources", "project",
                         "--strict-mcp-config", "--mcp-config", cfg, "--allowedTools", "mcp__mailhub",
+                        # only the mailhub tools: no shell, no file or web tools
+                        "--disallowedTools", "Bash,PowerShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent",
                         "--no-session-persistence", "--output-format", "stream-json", "--verbose"]
                 r = subprocess.run(argv, input=prompt, env=session_env(), cwd=cwd, capture_output=True, text=True,
                                    encoding="utf-8", errors="replace", timeout=600)
@@ -439,7 +444,7 @@ def real_sessions(rig: Rig, evidence: str) -> None:
                 assert r.returncode == 0, (r.returncode, r.stderr[-800:])
                 judge_session("Claude Code", calls, peer, name)
             check("real session: Claude Code (haiku) calls hub_register, hub_list, hub_send, hub_wait, "
-                  "hub_read and hub_history through the installed server", _claude_session)
+                  "hub_read, hub_history and hub_message through the installed server", _claude_session)
         if rig.codex and "codex" in SESSIONS:
             def _codex_session():
                 entry = rig.codex_entry()
@@ -468,7 +473,7 @@ def real_sessions(rig: Rig, evidence: str) -> None:
                 assert r.returncode == 0, (r.returncode, r.stderr[-800:])
                 judge_session("Codex", calls, peer, name)
             check("real session: Codex (gpt-6-luna) calls hub_register, hub_list, hub_send, hub_wait, "
-                  "hub_read and hub_history through the installed server's entry", _codex_session)
+                  "hub_read, hub_history and hub_message through the installed server's entry", _codex_session)
     finally:
         peer.close()
         with open(os.path.join(evidence, "peer-listener.txt"), "w", encoding="utf-8") as f:

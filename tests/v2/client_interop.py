@@ -190,25 +190,30 @@ def run(s: Session) -> None:
     convs = call(5, "hub_history", {})
     if s.side.name == "rust":
         rows = hist.get("messages", [])
-        s.check("history: one conversation, oldest to newest, all sent",
-                [m.get("body") for m in rows] == ["hello from one", "with a file", "another file"]
-                and all(m.get("direction") == "sent" for m in rows) and hist.get("older") is None, hist)
+        s.check("history: one conversation, oldest to newest, all sent, from the start",
+                [m.get("preview") for m in rows] == ["hello from one", "with a file", "another file"]
+                and all(m.get("direction") == "sent" for m in rows) and hist.get("has_more") is False
+                and hist.get("next_cursor") is None and "This is the start" in str(hist.get("note")), hist)
         s.check("history: a message's files are named",
                 [a.get("name") for a in rows[1].get("attachments", [])] == ["report é.txt"] if len(rows) > 1 else False, hist)
         page = call(6, "hub_history", {"peer": two, "limit": 2})
         s.check("history: a page of 2 is the newest two, with a cursor",
-                [m.get("body") for m in page.get("messages", [])] == ["with a file", "another file"]
-                and bool(page.get("older")) and "more" in page, page)
-        older = call(7, "hub_history", {"peer": two, "limit": 2, "before": page.get("older")})
-        s.check("history: before= gives the page before it, and the start ends the paging",
-                [m.get("body") for m in older.get("messages", [])] == ["hello from one"] and older.get("older") is None, older)
+                [m.get("preview") for m in page.get("messages", [])] == ["with a file", "another file"]
+                and page.get("has_more") is True and bool(page.get("next_cursor")), page)
+        older = call(7, "hub_history", {"peer": two, "limit": 2, "cursor": page.get("next_cursor")})
+        s.check("history: cursor= gives the page before it, and the start ends the paging",
+                [m.get("preview") for m in older.get("messages", [])] == ["hello from one"] and older.get("has_more") is False, older)
         s.check("history: with no peer, who this address has mail with",
                 sorted(c.get("with") for c in convs.get("conversations", [])) == sorted([two, s.slugs["interop-three"]]), convs)
-        wait = call(8, "hub_wait", {"timeout": 1})
+        whole = call(8, "hub_message", {"id": rows[0].get("id") if rows else ""})
+        s.check("hub_message: a message's whole text", whole.get("body") == "hello from one" and whole.get("chars") == 14, whole)
+        wait = call(9, "hub_wait", {"timeout": 1})
         s.check("history consumed nothing (hub_wait has nothing new)", not wait.get("messages"), wait)
     else:
-        s.check("history on a v1 hub says it needs v2",
-                "v2.0" in str(hist.get("error")) and "v2.0" in str(convs.get("error")), (hist, convs))
+        whole = call(8, "hub_message", {"id": "anything"})
+        s.check("history and whole texts on a v1 hub say they need v2",
+                "v2.0" in str(hist.get("error")) and "v2.0" in str(convs.get("error")) and "v2.0" in str(whole.get("error")),
+                (hist, convs, whole))
     s.note("mcp history", "checked per hub")
     mcp.stdin.close()
     mcp.wait(10)

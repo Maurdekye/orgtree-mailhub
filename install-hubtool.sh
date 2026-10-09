@@ -28,7 +28,7 @@ set -eu
 # The hubtool.py this installer accepts: the SHA-256 of the file released
 # beside it. tests/test_install_hubtool.py keeps it equal to the repo's
 # hubtool.py; tools/hubtool-assets.py refuses to build a release otherwise.
-HUBTOOL_SHA256=26dc2828e6c842ccaefd4ea9d5d73da5bf8c347dbdf79173ec46f01d810deba6
+HUBTOOL_SHA256=d7c04122f487d8faba533c7bec83a91797230e6be8ca18556fb3a8585b073008
 SERVER=mailhub
 
 say() { printf '%s\n' "$*"; }
