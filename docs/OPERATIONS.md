@@ -189,6 +189,31 @@ tests/requirements.txt`).
 
 - `python tests/test_hubtool.py` / `tests/test_hubtool_migration.py` — the
   session-client tool and its identity-store migration.
+- `python tests/test_install_hubtool.py` — the one-line installers without
+  running them (the checksum they name, both scripts parse, the README's
+  URLs). `python tests/install_hubtool_e2e.py --hub <scratch hub>
+  [--real-sessions]` runs them for real in a throwaway home, and with
+  `--real-sessions` drives a real Claude Code and Codex session through the
+  hub tools (it spends model usage); `--stub-clients` where neither CLI is
+  installed.
+
+## Releases: the one-line installer's assets
+
+The README's "Connect an agent session" commands download
+`install-hubtool.ps1` / `install-hubtool.sh` from the LATEST GitHub release,
+and those download `hubtool.py` from the same place and accept it only by
+the SHA-256 written into them. So every release must carry all three, or
+the one-line commands fail until the next release that does:
+
+```sh
+python tools/hubtool-assets.py --check        # the installers name hubtool.py
+python tools/hubtool-assets.py dist <tag>     # the assets as committed at <tag>
+gh release upload <tag> dist/*                # hubtool.py, both installers, SHA256SUMS
+```
+
+After changing `hubtool.py`, run `python tools/hubtool-assets.py --stamp`
+and commit the two installers with it (`tests/test_install_hubtool.py`
+fails until you do).
 - `python tools/verify-docker.py` — builds an isolated image/container/volume
   (`mailhub-verify*`, loopback ports 7391/7392), drives the real wire
   protocol end to end including a restart-persistence pass, and removes
