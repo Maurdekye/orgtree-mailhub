@@ -56,6 +56,9 @@ http://127.0.0.1:7370. The one-line installer (README: Connect an agent
 session) stores the default, so the MCP server and a listener started by hand
 agree without sharing an environment:
     python hub/hubtool.py defaulthub [<address>|--clear]
+It also lets Claude Code and Codex sessions call the mailhub tools without
+asking each time (only those tools; --remove takes it back):
+    python hub/hubtool.py preapprove claude|codex [--remove]
 Env: MAILHUB_URL (see above) · MAILHUB_NAME (pre-seeds / selects the name;
 the listener requires one).
 """
@@ -1358,6 +1361,172 @@ def default_hub(arg: str | None = None) -> dict[str, Any]:
     return res
 
 
+# ─────────────────────────────────────── pre-approving the mailhub tools
+# The one-line installer registers this file as the "mailhub" MCP server
+# and, by the user's choice (2026-10-09), lets sessions call its tools
+# without asking each time. Neither CLI's `mcp add` can say that, so
+# `preapprove` writes the one setting each client reads, and nothing else:
+#   Claude Code  "mcp__mailhub" (every tool of the mailhub server and no
+#                other) in permissions.allow of its user settings.json
+#   Codex        default_tools_approval_mode = "approve" in its
+#                [mcp_servers.mailhub] table (`codex mcp remove` drops it
+#                together with the table)
+#     python hubtool.py preapprove claude|codex [--remove]
+
+_SERVER = "mailhub"
+_CLAUDE_RULE = "mcp__" + _SERVER
+_CODEX_KEY = "default_tools_approval_mode"
+_CODEX_TABLE = re.compile(
+    r"""^[ \t]*\[[ \t]*mcp_servers[ \t]*\.[ \t]*(?:mailhub|"mailhub"|'mailhub')"""
+    r"""[ \t]*\][ \t]*(?:#.*)?$""")
+_TOML_HEADER = re.compile(r"^[ \t]*\[")
+_CODEX_LINE = re.compile(r"^[ \t]*" + _CODEX_KEY + r"[ \t]*=")
+
+
+def _claude_settings() -> str:
+    """Claude Code's user settings, where Claude Code looks for them."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude")
+    return os.path.join(base, "settings.json")
+
+
+def _codex_config() -> str:
+    """Codex's config.toml, where Codex looks for it."""
+    base = os.environ.get("CODEX_HOME") or os.path.join(
+        os.path.expanduser("~"), ".codex")
+    return os.path.join(base, "config.toml")
+
+
+def _replace_file(path: str, text: str) -> None:
+    """`path` now holds `text`, swapped in by one rename (a reader sees the
+    old file or the new one, never half of it), keeping its permissions."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".hubtool-tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    try:
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+
+
+def _preapprove_claude(remove: bool) -> dict[str, Any]:
+    path = _claude_settings()
+    out: dict[str, Any] = {"client": "claude", "file": path,
+                           "rule": _CLAUDE_RULE}
+    by_hand = (f"{'remove' if remove else 'add'} \"{_CLAUDE_RULE}\" "
+               f"{'from' if remove else 'to'} permissions.allow in it yourself")
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raw = ""
+    except OSError as e:
+        return {**out, "error": f"{path} could not be read ({e}); {by_hand}"}
+    try:
+        data: Any = json.loads(raw) if raw.strip() else {}
+    except ValueError as e:
+        return {**out, "error": f"{path} is not plain JSON ({e}), so it was "
+                                f"left as it is; {by_hand}"}
+    perms: Any = data.get("permissions", {}) if isinstance(data, dict) else None
+    allow: Any = perms.get("allow", []) if isinstance(perms, dict) else None
+    if not isinstance(allow, list):
+        return {**out, "error": f"{path} has no permissions.allow list where "
+                                f"one belongs, so it was left as it is; "
+                                f"{by_hand}"}
+    settings = cast("dict[str, Any]", data)
+    rules = cast("list[Any]", allow)
+    if (_CLAUDE_RULE in rules) != remove:
+        return {**out, "changed": False}           # already as asked
+    if remove:
+        rules = [r for r in rules if r != _CLAUDE_RULE]
+    else:
+        rules = rules + [_CLAUDE_RULE]
+    block = cast("dict[str, Any]", perms)
+    if rules:
+        block["allow"] = rules
+    else:
+        block.pop("allow", None)
+    if block or not remove:
+        settings["permissions"] = block
+    else:
+        settings.pop("permissions", None)
+    _replace_file(path, json.dumps(settings, indent=2, ensure_ascii=False)
+                  + "\n")
+    return {**out, "changed": True}
+
+
+def _preapprove_codex(remove: bool) -> dict[str, Any]:
+    path = _codex_config()
+    want = f'{_CODEX_KEY} = "approve"'
+    out: dict[str, Any] = {"client": "codex", "file": path,
+                           "setting": f"[mcp_servers.{_SERVER}] {want}"}
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raw = b""
+    except OSError as e:
+        return {**out, "error": f"{path} could not be read ({e})"}
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    try:
+        text = raw[3 if bom else 0:].decode("utf-8")
+    except UnicodeDecodeError as e:
+        return {**out, "error": f"{path} is not UTF-8 ({e}), so it was left "
+                                f"as it is"}
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines)
+                  if _CODEX_TABLE.match(ln.rstrip("\r\n"))), None)
+    if start is None:
+        if remove:
+            return {**out, "changed": False}
+        return {**out, "error": f"{path} has no [mcp_servers.{_SERVER}] table "
+                                f"to pre-approve: register the server first"}
+    end = next((i for i in range(start + 1, len(lines))
+                if _TOML_HEADER.match(lines[i])), len(lines))
+    body = lines[start + 1:end]
+    kept = [ln for ln in body if not _CODEX_LINE.match(ln)]
+    header = lines[start]
+    nl = "\r\n" if header.endswith("\r\n") else "\n"
+    new_body = kept if remove else [want + nl] + kept
+    if new_body == body:
+        return {**out, "changed": False}           # already as asked
+    if not header.endswith("\n"):
+        header += nl                               # the table was the last line
+    new_text = "".join(lines[:start] + [header] + new_body + lines[end:])
+    try:
+        import tomllib                       # Python 3.11+ reads it back first
+    except ModuleNotFoundError:
+        pass
+    else:
+        try:
+            parsed: Any = tomllib.loads(new_text)
+            got: Any = parsed["mcp_servers"][_SERVER].get(_CODEX_KEY)
+        except Exception as e:                                   # noqa: BLE001
+            return {**out, "error": f"{path} would not read back as TOML "
+                                    f"after the change ({e}), so it was left "
+                                    f"as it is"}
+        if got != (None if remove else "approve"):
+            return {**out, "error": f"{path} reads back {_CODEX_KEY} = "
+                                    f"{got!r} after the change, so it was "
+                                    f"left as it is"}
+    _replace_file(path, ("﻿" if bom else "") + new_text)
+    return {**out, "changed": True}
+
+
+def preapprove(client: str, remove: bool = False) -> dict[str, Any]:
+    """Let `client` (claude or codex) call the mailhub server's tools without
+    asking, or with `remove` take that back. Idempotent: `changed` says
+    whether the file was written. Refuses, leaving the file as it is, when
+    it cannot be read as the client writes it."""
+    if client == "claude":
+        return _preapprove_claude(remove)
+    if client == "codex":
+        return _preapprove_codex(remove)
+    return {"error": f"unknown client {client!r}: claude or codex"}
+
+
 # ──────────────────────────────────────────────────────────── the MCP server
 
 TOOLS: list[dict[str, Any]] = [
@@ -1735,6 +1904,14 @@ def cli(argv: list[str]) -> int:
         out = default_hub(argv[1] if len(argv) > 1 else None)
         print(json.dumps(out), flush=True)
         return 1 if out.get("error") else 0
+    if verb == "preapprove":
+        if len(argv) < 2 or argv[2:] not in ([], ["--remove"]):
+            print("usage: hubtool.py preapprove claude|codex [--remove]",
+                  flush=True)
+            return 2
+        out = preapprove(argv[1], remove=argv[2:] == ["--remove"])
+        print(json.dumps(out), flush=True)
+        return 1 if out.get("error") else 0
     if verb in ("history", "message"):
         if len(argv) < (2 if verb == "history" else 3):
             print("usage: hubtool.py history <name> [<peer-slug> [<cursor>]]"
@@ -1766,8 +1943,8 @@ def cli(argv: list[str]) -> int:
     # missing — the verb was real, the advertisement was not). A verb added
     # above belongs here in the same commit.
     print("usage: hubtool.py [listen|register|unregister|send|list|fetch|"
-          "history|message|hubs|addhub|drophub|defaulthub] …  (no verb = MCP "
-          "server on stdio)", flush=True)
+          "history|message|hubs|addhub|drophub|defaulthub|preapprove] …  (no "
+          "verb = MCP server on stdio)", flush=True)
     return 2
 
 

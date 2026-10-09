@@ -51,13 +51,16 @@ session can also get mail as it arrives by running
 `python ~/.orgtree/hubtool/hubtool.py listen <its name>` with its Monitor
 tool.
 
-Both CLIs ask before a session first uses a mailhub tool. A non-interactive
-run cannot ask, so allow the tools up front:
+The installer also pre-approves the mailhub tools, so sessions use them
+without asking each time, non-interactive runs (`claude -p`, `codex exec`)
+included. It allows those tools and no others:
 
-```sh
-claude -p --allowedTools mcp__mailhub "…"
-codex exec -c 'mcp_servers.mailhub.default_tools_approval_mode="approve"' "…"
-```
+- **Claude Code:** `"mcp__mailhub"` in `permissions.allow` of
+  `~/.claude/settings.json`.
+- **Codex:** `default_tools_approval_mode = "approve"` in the
+  `[mcp_servers.mailhub]` table of `~/.codex/config.toml`.
+
+Remove that entry to be asked again. Re-running the installer puts it back.
 
 - **Where it goes:** `~/.orgtree/hubtool/hubtool.py` (on Windows,
   `%USERPROFILE%\.orgtree\hubtool\hubtool.py`). The hub address and the
@@ -66,8 +69,9 @@ codex exec -c 'mcp_servers.mailhub.default_tools_approval_mode="approve"' "…"
   it installed. To change only the hub:
   `python ~/.orgtree/hubtool/hubtool.py defaulthub <address>`.
 - **Uninstall:** the PowerShell form above with `-Uninstall` instead of
-  `-Hub …`, or `sh -s -- --uninstall`. It removes the `mailhub` server from
-  Claude Code and Codex and deletes `~/.orgtree/hubtool`. It keeps
+  `-Hub …`, or `sh -s -- --uninstall`. It removes the `mailhub` server and
+  the pre-approval of its tools from Claude Code and Codex, and deletes
+  `~/.orgtree/hubtool`. It keeps
   `~/.orgtree/hub-clients`, which holds the secrets of your sessions'
   addresses; delete that folder yourself if you no longer want them.
 - **Checked download:** each installer accepts only the `hubtool.py` released

@@ -1232,8 +1232,237 @@ def sec_default_hub() -> None:
           "unreachable one", _reachability_is_reported)
 
 
+def sec_preapprove() -> None:
+    print("\n§8  pre-approving the mailhub tools (what the one-line installer "
+          "writes)")
+    root = os.path.join(_TMP, "preapprove")
+
+    def clients(fn):
+        """Run fn with CLAUDE_CONFIG_DIR and CODEX_HOME pointed at fresh
+        folders of its own, then put the environment back."""
+        def run():
+            shutil.rmtree(root, ignore_errors=True)
+            os.makedirs(os.path.join(root, "claude"))
+            os.makedirs(os.path.join(root, "codex"))
+            saved = {k: os.environ.get(k) for k in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+            os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(root, "claude")
+            os.environ["CODEX_HOME"] = os.path.join(root, "codex")
+            try:
+                fn()
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+        return run
+
+    try:
+        import tomllib
+        toml = tomllib.loads
+    except ModuleNotFoundError:                  # Python 3.10 and older
+        toml = None
+    settings = lambda: os.path.join(root, "claude", "settings.json")  # noqa: E731
+    config = lambda: os.path.join(root, "codex", "config.toml")       # noqa: E731
+
+    def read_bytes(path):
+        with open(path, "rb") as f:
+            return f.read()
+
+    def write_bytes(path, data):
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def cli_out(*argv):
+        saved = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            rc = hubtool.cli(list(argv))
+            printed = sys.stdout.getvalue()
+        finally:
+            sys.stdout = saved
+        return rc, printed
+
+    # what `codex mcp add mailhub -- python <path>` writes (measured with
+    # codex-cli 0.160.0, an apostrophe in the path)
+    codex_added = ("[mcp_servers.mailhub]\n"
+                   'command = "python"\n'
+                   "args = ['''C:\\Users\\O'Brien X\\.orgtree\\hubtool\\hubtool.py''']\n")
+
+    def _claude_new_settings():
+        out = hubtool.preapprove("claude")
+        assert out.get("changed") is True and "error" not in out, out
+        assert out["file"] == settings(), out
+        with open(settings(), encoding="utf-8") as f:
+            assert json.load(f) == {"permissions": {"allow": ["mcp__mailhub"]}}
+        assert hubtool.preapprove("claude").get("changed") is False, \
+            "a second run must change nothing"
+        with open(settings(), encoding="utf-8") as f:
+            assert json.load(f)["permissions"]["allow"] == ["mcp__mailhub"]
+    check("preapprove · claude: settings.json gets exactly mcp__mailhub in "
+          "permissions.allow, once", clients(_claude_new_settings))
+
+    def _claude_keeps_everything_else():
+        before = {"model": "opus", "env": {"GRÜSSE": "naïve ✓"},
+                  "permissions": {"allow": ["Bash(git status)"],
+                                  "deny": ["WebFetch"], "defaultMode": "default"},
+                  "hooks": {"Stop": [{"hooks": [{"type": "command",
+                                                 "command": "echo done"}]}]}}
+        write_bytes(settings(), b"\xef\xbb\xbf"
+                    + json.dumps(before, indent=2, ensure_ascii=False).encode())
+        assert hubtool.preapprove("claude").get("changed") is True
+        with open(settings(), encoding="utf-8") as f:
+            text = f.read()
+        after = json.loads(text)
+        assert "naïve ✓" in text, "non-ASCII must stay as written, not \\u-escaped"
+        assert list(after) == list(before), "top-level order must not move"
+        assert after["permissions"]["allow"] == ["Bash(git status)", "mcp__mailhub"]
+        after["permissions"]["allow"].remove("mcp__mailhub")
+        assert after == before, "nothing but the one rule may change"
+        assert hubtool.preapprove("claude", remove=True).get("changed") is True
+        with open(settings(), encoding="utf-8") as f:
+            assert json.load(f) == before, "--remove must give the old settings back"
+    check("preapprove · claude: every other setting is kept (non-ASCII as "
+          "written, a BOM-led file reads); --remove gives the old settings back",
+          clients(_claude_keeps_everything_else))
+
+    def _claude_remove_tidies_what_it_made():
+        assert hubtool.preapprove("claude").get("changed") is True
+        assert hubtool.preapprove("claude", remove=True).get("changed") is True
+        with open(settings(), encoding="utf-8") as f:
+            assert json.load(f) == {}, "an empty permissions block must not stay"
+        assert hubtool.preapprove("claude", remove=True).get("changed") is False
+    check("preapprove · claude: --remove after a fresh install leaves no "
+          "empty permissions block", clients(_claude_remove_tidies_what_it_made))
+
+    def _claude_refuses_what_it_cannot_read():
+        for bad in (b'{\n  // my comment\n  "model": "opus"\n}\n',
+                    b'{"model": "opus",}',
+                    b'{"permissions": {"allow": "mcp__x"}}',
+                    b'{"permissions": ["allow"]}',
+                    b'["not", "an", "object"]'):
+            write_bytes(settings(), bad)
+            out = hubtool.preapprove("claude")
+            assert "error" in out and "yourself" in out["error"], (bad, out)
+            assert read_bytes(settings()) == bad, ("it touched the file", bad)
+            assert not os.path.exists(settings() + ".hubtool-tmp")
+        rc, printed = cli_out("preapprove", "claude")
+        assert rc == 1 and "mcp__mailhub" in printed, (rc, printed)
+    check("preapprove · claude: settings it cannot read as plain JSON are "
+          "left byte for byte, with what to add by hand",
+          clients(_claude_refuses_what_it_cannot_read))
+
+    def _claude_default_location():
+        del os.environ["CLAUDE_CONFIG_DIR"]
+        out = hubtool.preapprove("claude")
+        home_settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+        try:
+            assert out.get("file") == home_settings and out.get("changed") is True, out
+            assert os.path.isfile(home_settings)
+        finally:
+            shutil.rmtree(os.path.dirname(home_settings), ignore_errors=True)
+    check("preapprove · claude: without CLAUDE_CONFIG_DIR it is "
+          "~/.claude/settings.json", clients(_claude_default_location))
+
+    def _codex_adds_the_key_to_the_table():
+        other = '\n[mcp_servers.mailhub2]\ncommand = "x"\n\n[mcp_servers.other]\ncommand = "y"\n'
+        original = ('model = "gpt-6"\n\n' + codex_added + other).encode()
+        write_bytes(config(), original)
+        out = hubtool.preapprove("codex")
+        assert out.get("changed") is True and "error" not in out, out
+        text = read_bytes(config()).decode()
+        assert text == ('model = "gpt-6"\n\n[mcp_servers.mailhub]\n'
+                        'default_tools_approval_mode = "approve"\n'
+                        + codex_added.split("\n", 1)[1] + other), text
+        if toml:
+            cfg = toml(text)
+            assert cfg["mcp_servers"]["mailhub"]["default_tools_approval_mode"] == "approve"
+            assert "default_tools_approval_mode" not in cfg["mcp_servers"]["mailhub2"]
+            assert cfg["mcp_servers"]["mailhub"]["args"] == [
+                "C:\\Users\\O'Brien X\\.orgtree\\hubtool\\hubtool.py"]
+        assert hubtool.preapprove("codex").get("changed") is False
+        assert hubtool.preapprove("codex", remove=True).get("changed") is True
+        assert read_bytes(config()) == original, "--remove must give the old file back"
+    check("preapprove · codex: the key goes into [mcp_servers.mailhub] only, "
+          "once; --remove gives the old file back", clients(_codex_adds_the_key_to_the_table))
+
+    def _codex_replaces_a_prompt_setting():
+        write_bytes(config(), (codex_added + 'default_tools_approval_mode = "prompt"\n'
+                               "\n[mcp_servers.mailhub.env]\nX = \"1\"\n").encode())
+        assert hubtool.preapprove("codex").get("changed") is True
+        text = read_bytes(config()).decode()
+        assert text.count("default_tools_approval_mode") == 1, text
+        assert text.index("default_tools_approval_mode") < text.index("[mcp_servers.mailhub.env]")
+        if toml:
+            cfg = toml(text)["mcp_servers"]["mailhub"]
+            assert cfg["default_tools_approval_mode"] == "approve" and cfg["env"] == {"X": "1"}, cfg
+    check("preapprove · codex: an existing approval mode is replaced, a "
+          "sub-table after it is untouched", clients(_codex_replaces_a_prompt_setting))
+
+    def _codex_keeps_line_ends_and_bom():
+        crlf = b"\xef\xbb\xbf" + codex_added.replace("\n", "\r\n").encode()
+        write_bytes(config(), crlf)
+        assert hubtool.preapprove("codex").get("changed") is True
+        got = read_bytes(config())
+        assert got.startswith(b"\xef\xbb\xbf[mcp_servers.mailhub]\r\n"
+                              b'default_tools_approval_mode = "approve"\r\n'), got
+        assert b"\n" not in got.replace(b"\r\n", b""), "a bare LF crept in"
+        assert hubtool.preapprove("codex", remove=True).get("changed") is True
+        assert read_bytes(config()) == crlf
+        write_bytes(config(), b'model = "x"\n[mcp_servers.mailhub]')   # no newline at the end
+        assert hubtool.preapprove("codex").get("changed") is True
+        assert read_bytes(config()) == (b'model = "x"\n[mcp_servers.mailhub]\n'
+                                        b'default_tools_approval_mode = "approve"\n')
+    check("preapprove · codex: CRLF line ends, a BOM and a table on the last "
+          "line are handled", clients(_codex_keeps_line_ends_and_bom))
+
+    def _codex_needs_the_server():
+        out = hubtool.preapprove("codex")
+        assert "error" in out and "register the server first" in out["error"], out
+        assert not os.path.exists(config()), "it created a config without a server"
+        write_bytes(config(), b'[mcp_servers.mailhub2]\ncommand = "x"\n')
+        assert "error" in hubtool.preapprove("codex")
+        assert read_bytes(config()) == b'[mcp_servers.mailhub2]\ncommand = "x"\n'
+        assert hubtool.preapprove("codex", remove=True).get("changed") is False
+        if toml:                                     # the read-back needs tomllib
+            write_bytes(config(), codex_added.encode() + b"args = [\n")    # broken TOML
+            out = hubtool.preapprove("codex")
+            assert "would not read back as TOML" in out.get("error", ""), out
+            assert read_bytes(config()) == codex_added.encode() + b"args = [\n"
+    check("preapprove · codex: without a mailhub table, or when the result "
+          "would not parse, it refuses and writes nothing", clients(_codex_needs_the_server))
+
+    def _codex_without_tomllib():
+        write_bytes(config(), codex_added.encode())
+        saved = sys.modules.get("tomllib")
+        sys.modules["tomllib"] = None                # as on Python 3.8 to 3.10
+        try:
+            out = hubtool.preapprove("codex")
+        finally:
+            if saved is None:
+                sys.modules.pop("tomllib", None)
+            else:
+                sys.modules["tomllib"] = saved
+        assert out.get("changed") is True, out
+        assert read_bytes(config()).decode().startswith(
+            '[mcp_servers.mailhub]\ndefault_tools_approval_mode = "approve"\n')
+    check("preapprove · codex: works where tomllib is missing (Python 3.8 "
+          "to 3.10)", clients(_codex_without_tomllib))
+
+    def _cli_shape():
+        assert cli_out("preapprove")[0] == 2
+        assert cli_out("preapprove", "claude", "--bogus")[0] == 2
+        rc, printed = cli_out("preapprove", "cursor")
+        assert rc == 1 and "unknown client" in printed, (rc, printed)
+        rc, printed = cli_out("preapprove", "claude")
+        assert rc == 0 and json.loads(printed)["changed"] is True, printed
+        assert "preapprove" in cli_out("no-such-verb")[1], "the usage line must list it"
+    check("preapprove · the CLI verb: usage, unknown clients, exit codes",
+          clients(_cli_shape))
+
+
 def sec_history() -> None:
-    print("\n§8  hub_history — recalling a conversation after a compaction "
+    print("\n§9  hub_history — recalling a conversation after a compaction "
           "(the engine's caps)")
 
     def silent_cli(argv):
@@ -1439,6 +1668,7 @@ def main() -> int:
     sec_kind()
     sec_migration()
     sec_default_hub()
+    sec_preapprove()
     sec_history()
 
     print()

@@ -19,13 +19,19 @@ only read, before and after, to show they gained no mailhub entry.
                    real CLIs are exercised where they are installed)
   --real-sessions  also run one REAL session of each installed CLI (Claude
                    Code on haiku, Codex on gpt-6-luna) that calls
-                   hub_register, hub_list, hub_send, hub_wait, hub_read and
-                   hub_history through the server the installer registered,
-                   while a scripted peer answers. The sessions use the CLI's
-                   own login from the real profile (nothing is read from or
-                   written to its credential or MCP config files: the server
-                   entry is passed per session, user settings and hooks are
-                   not loaded, and nothing is persisted). Spends model usage.
+                   hub_register, hub_list, hub_send, hub_wait, hub_read,
+                   hub_history and hub_message through the server the
+                   installer registered, while a scripted peer answers, with
+                   NO approval given on the command line: Claude Code loads
+                   the settings.json the installer wrote (--settings, with
+                   anything that would ask refused), Codex the mailhub table
+                   the installer wrote. A short control session of each,
+                   without the installer's pre-approval, shows the same CLI
+                   refusing the tool. The sessions use the CLI's own login
+                   from the real profile (nothing is read from or written to
+                   its credential or MCP config files: the server entry is
+                   passed per session, user settings and hooks are not
+                   loaded, and nothing is persisted). Spends model usage.
   --evidence DIR   where the sessions' event streams are written
   --keep           leave the throwaway folder for inspection
 
@@ -98,12 +104,29 @@ class Quiet(http.server.SimpleHTTPRequestHandler):
 
 
 # one line per call, each argument ended by a unit separator (0x1f), so an
-# argument with a space in it stays one argument
+# argument with a space in it stays one argument. The codex stand-in also
+# keeps its [mcp_servers.<name>] table in config.toml, as `codex mcp add` /
+# `codex mcp remove` do, for the installer's pre-approval to find.
 STUB = r"""#!/bin/sh
 { for a in "$@"; do printf '%s\037' "$a"; done; printf '\n'; } >> "$STUB_LOG_DIR/{name}.calls"
+cfg="$CODEX_HOME/config.toml"
+if [ "{name}" = codex ] && [ "$1" = mcp ] && [ "$2" = remove ] && [ -f "$cfg" ]; then
+    awk -v h="[mcp_servers.$3]" '$0 == h { skip = 1; next } /^\[/ { skip = 0 } !skip' "$cfg" > "$cfg.stub" && mv "$cfg.stub" "$cfg"
+fi
+if [ "{name}" = codex ] && [ "$1" = mcp ] && [ "$2" = add ]; then
+    name=$3; shift 3; [ "$1" = -- ] && shift
+    esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+    command=$(esc "$1"); shift
+    args=; for a in "$@"; do args="$args${args:+, }\"$(esc "$a")\""; done
+    printf '[mcp_servers.%s]\ncommand = "%s"\nargs = [%s]\n' "$name" "$command" "$args" >> "$cfg"
+fi
 exit 0
 """
 US = "\x1f"
+# what the throwaway profile holds before the first install: the installer
+# must add to it, keep it, and on uninstall give it back
+SETTINGS_SEED = {"model": "haiku", "permissions": {"allow": ["Bash(git status)"]}}
+CODEX_SEED = '# the user\'s own settings\nmodel = "gpt-6-luna"\n'
 
 
 class Rig:
@@ -120,6 +143,12 @@ class Rig:
         self.stub_dir = os.path.join(self.tmp, "stub-bin") if stub else ""
         for d in (self.assets, self.home, self.claude_dir, self.codex_dir):
             os.makedirs(d)
+        self.claude_settings = os.path.join(self.claude_dir, "settings.json")
+        self.codex_config = os.path.join(self.codex_dir, "config.toml")
+        with open(self.claude_settings, "w", encoding="utf-8") as f:
+            json.dump(SETTINGS_SEED, f, indent=2)
+        with open(self.codex_config, "w", encoding="utf-8", newline="\n") as f:
+            f.write(CODEX_SEED)
         for name in ("hubtool.py", "install-hubtool.ps1", "install-hubtool.sh"):
             shutil.copyfile(os.path.join(_REPO, name), os.path.join(self.assets, name))
         with open(os.path.join(self.assets, "healthz"), "w", encoding="utf-8") as f:
@@ -209,9 +238,17 @@ class Rig:
             body = m.group(1)
             cmd = re.search(r'^command\s*=\s*"((?:[^"\\]|\\.)*)"', body, re.M)
             args = re.search(r"^args\s*=\s*\[(.*?)\]", body, re.M | re.S)
+            mode = re.search(r'^default_tools_approval_mode\s*=\s*"([^"]*)"', body, re.M)
             unq = lambda s: json.loads('"' + s + '"')        # noqa: E731
-            return {"command": unq(cmd.group(1)) if cmd else None,
-                    "args": [unq(a) for a in re.findall(r'"((?:[^"\\]|\\.)*)"', args.group(1))] if args else []}
+            out = {"command": unq(cmd.group(1)) if cmd else None,
+                   "args": [unq(a) for a in re.findall(r'"((?:[^"\\]|\\.)*)"', args.group(1))] if args else []}
+            if mode:
+                out["default_tools_approval_mode"] = mode.group(1)
+            return out
+
+    def claude_settings_now(self) -> dict[str, Any]:
+        with open(self.claude_settings, encoding="utf-8") as f:
+            return json.load(f)
 
     def stub_argv(self, name: str) -> list[list[str]]:
         p = os.path.join(self.stub_dir, f"{name}.calls")
@@ -236,7 +273,8 @@ class Rig:
 
 
 def real_configs() -> dict[str, bool]:
-    """Whether the REAL user configs carry a mailhub entry (read only)."""
+    """Whether the REAL user configs carry a mailhub entry or its
+    pre-approval (read only)."""
     out = {}
     p = os.path.join(os.path.expanduser("~"), ".claude.json")
     try:
@@ -244,6 +282,13 @@ def real_configs() -> dict[str, bool]:
             out["claude"] = "mailhub" in (json.load(f).get("mcpServers") or {})
     except (OSError, ValueError):
         out["claude"] = False
+    p = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            allow = (json.load(f).get("permissions") or {}).get("allow") or []
+        out["claude_settings"] = any("mailhub" in str(r) for r in allow)
+    except (OSError, ValueError):
+        out["claude_settings"] = False
     p = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
     try:
         with open(p, encoding="utf-8") as f:
@@ -310,6 +355,9 @@ SESSION_PROMPT = """This is an automated end-to-end test of the `mailhub` MCP to
 Then answer with one short line per step saying what it returned. Do nothing else.
 """
 SESSION_TOOLS = ["hub_register", "hub_list", "hub_send", "hub_wait", "hub_read", "hub_history", "hub_message"]
+# the control: the same CLI and server without the installer's pre-approval
+CONTROL_PROMPT = """This is an automated test of the `mailhub` MCP tools. Call the mailhub tool hub_list exactly once, then answer with one word: done. Do nothing else.
+"""
 
 
 class Responder:
@@ -394,6 +442,33 @@ def tool_calls_codex(lines: list[str]) -> list[tuple[str, str]]:
     return out
 
 
+def claude_result(lines: list[str]) -> dict[str, Any]:
+    """The closing `result` event of Claude Code's stream-json (it lists the
+    permission_denials: every tool call that would have asked)."""
+    for ln in reversed(lines):
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            return ev
+    return {}
+
+
+def toml_value(v: Any) -> str:
+    """A -c override's value: TOML literal strings where they can be (no
+    escapes for Windows paths), basic strings otherwise."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return "'" + v + "'" if "'" not in v and "\n" not in v else json.dumps(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{json.dumps(k)} = {toml_value(x)}" for k, x in v.items()) + "}"
+    return str(v)
+
+
 def judge_session(harness: str, calls: list[tuple[str, str]], peer: Responder, name: str) -> None:
     names = [t for t, _ in calls]
     it = iter(names)
@@ -413,67 +488,103 @@ def judge_session(harness: str, calls: list[tuple[str, str]], peer: Responder, n
 def real_sessions(rig: Rig, evidence: str) -> None:
     os.makedirs(evidence, exist_ok=True)
     peer = Responder(rig)
+
+    def save(name: str, text: str) -> None:
+        with open(os.path.join(evidence, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def claude_run(prompt: str, preapproved: bool) -> subprocess.CompletedProcess[str]:
+        entry = rig.claude_entry()
+        assert entry, "the installer registered nothing with Claude Code"
+        cfg = os.path.join(rig.tmp, "claude-session-mcp.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": {"mailhub": {
+                "type": "stdio", "command": entry["command"], "args": entry.get("args", []),
+                # the installer's entry, with hubtool's home pointed at the
+                # throwaway one (the session itself runs on the real login)
+                "env": {**(entry.get("env") or {}), "USERPROFILE": rig.home, "HOME": rig.home}}}}, f)
+        cwd = os.path.join(rig.tmp, "claude-session")
+        os.makedirs(cwd, exist_ok=True)
+        argv = [rig.claude, "-p", "--model", "haiku", "--setting-sources", "project",
+                "--strict-mcp-config", "--mcp-config", cfg,
+                # nothing here allows a mailhub tool and nobody can be asked:
+                # only the settings.json the installer wrote can let one run
+                "--permission-prompts", "none",
+                # only the mailhub tools: no shell, no file or web tools
+                "--disallowedTools", "Bash,PowerShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent",
+                "--no-session-persistence", "--output-format", "stream-json", "--verbose"]
+        if preapproved:
+            argv += ["--settings", rig.claude_settings]
+        return subprocess.run(argv, input=prompt, env=session_env(), cwd=cwd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=600)
+
+    def codex_run(prompt: str, preapproved: bool) -> subprocess.CompletedProcess[str]:
+        entry = rig.codex_entry()
+        assert entry, "the installer registered nothing with Codex"
+        # the installed table, key by key (the approval mode the installer
+        # wrote among them), with hubtool's home pointed at the throwaway one
+        table = dict(entry)
+        if not preapproved:
+            table.pop("default_tools_approval_mode", None)
+        table["env"] = {**(table.get("env") or {}), "USERPROFILE": rig.home, "HOME": rig.home}
+        cwd = os.path.join(rig.tmp, "codex-session")
+        os.makedirs(cwd, exist_ok=True)
+        argv = [rig.codex, "exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
+                "-m", "gpt-6-luna", "-c", 'model_reasoning_effort="low"', "-s", "read-only"]
+        for k, v in table.items():
+            argv += ["-c", f"mcp_servers.mailhub.{k}={toml_value(v)}"]
+        argv.append("-")
+        return subprocess.run(argv, input=prompt, env=session_env(), cwd=cwd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=600)
+
     try:
         if rig.claude and "claude" in SESSIONS:
             def _claude_session():
-                entry = rig.claude_entry()
-                assert entry, "the installer registered nothing with Claude Code"
-                cfg = os.path.join(rig.tmp, "claude-session-mcp.json")
-                with open(cfg, "w", encoding="utf-8") as f:
-                    json.dump({"mcpServers": {"mailhub": {
-                        "type": "stdio", "command": entry["command"], "args": entry.get("args", []),
-                        # the installer's entry, with hubtool's home pointed at the
-                        # throwaway one (the session itself runs on the real login)
-                        "env": {**(entry.get("env") or {}), "USERPROFILE": rig.home, "HOME": rig.home}}}}, f)
-                cwd = os.path.join(rig.tmp, "claude-session")
-                os.makedirs(cwd, exist_ok=True)
                 name = "e2e-claude-session"
-                prompt = SESSION_PROMPT.format(name=name, peer=peer.slug, harness="Claude Code")
-                argv = [rig.claude, "-p", "--model", "haiku", "--setting-sources", "project",
-                        "--strict-mcp-config", "--mcp-config", cfg, "--allowedTools", "mcp__mailhub",
-                        # only the mailhub tools: no shell, no file or web tools
-                        "--disallowedTools", "Bash,PowerShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Agent",
-                        "--no-session-persistence", "--output-format", "stream-json", "--verbose"]
-                r = subprocess.run(argv, input=prompt, env=session_env(), cwd=cwd, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=600)
-                with open(os.path.join(evidence, "claude-code-session.jsonl"), "w", encoding="utf-8") as f:
-                    f.write(r.stdout)
-                calls = tool_calls_claude(r.stdout.splitlines())
-                with open(os.path.join(evidence, "claude-code-tool-calls.json"), "w", encoding="utf-8") as f:
-                    json.dump(calls, f, indent=1, ensure_ascii=False)
+                r = claude_run(SESSION_PROMPT.format(name=name, peer=peer.slug, harness="Claude Code"), True)
+                save("claude-code-session.jsonl", r.stdout)
+                lines = r.stdout.splitlines()
+                calls = tool_calls_claude(lines)
+                save("claude-code-tool-calls.json", json.dumps(calls, indent=1, ensure_ascii=False))
                 assert r.returncode == 0, (r.returncode, r.stderr[-800:])
+                denied = claude_result(lines).get("permission_denials")
+                assert denied == [], ("a mailhub tool would have asked", denied)
                 judge_session("Claude Code", calls, peer, name)
-            check("real session: Claude Code (haiku) calls hub_register, hub_list, hub_send, hub_wait, "
-                  "hub_read, hub_history and hub_message through the installed server", _claude_session)
+            check("real session: Claude Code (haiku), allowed only by the settings.json the installer wrote, "
+                  "calls hub_register, hub_list, hub_send, hub_wait, hub_read, hub_history and hub_message "
+                  "with no approval asked", _claude_session)
+
+            def _claude_control():
+                r = claude_run(CONTROL_PROMPT, False)
+                save("claude-code-control.jsonl", r.stdout)
+                denied = [d.get("tool_name") for d in claude_result(r.stdout.splitlines()).get("permission_denials") or []]
+                assert "mcp__mailhub__hub_list" in denied, ("the control was not refused", denied, r.stdout[-800:])
+            check("control: the same Claude Code session without that settings.json is refused hub_list "
+                  "(it would have asked)", _claude_control)
         if rig.codex and "codex" in SESSIONS:
             def _codex_session():
-                entry = rig.codex_entry()
-                assert entry, "the installer registered nothing with Codex"
-                lit = lambda v: "'" + str(v) + "'"           # noqa: E731  TOML literal string
-                cwd = os.path.join(rig.tmp, "codex-session")
-                os.makedirs(cwd, exist_ok=True)
                 name = "e2e-codex-session"
-                prompt = SESSION_PROMPT.format(name=name, peer=peer.slug, harness="Codex")
-                argv = [rig.codex, "exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
-                        "-m", "gpt-6-luna", "-c", 'model_reasoning_effort="low"', "-s", "read-only",
-                        "-c", "mcp_servers.mailhub.command=" + lit(entry["command"]),
-                        "-c", "mcp_servers.mailhub.args=[" + ", ".join(lit(a) for a in entry.get("args", [])) + "]",
-                        "-c", "mcp_servers.mailhub.env={USERPROFILE = " + lit(rig.home) + ", HOME = " + lit(rig.home) + "}",
-                        # a non-interactive run cannot ask: allow the tools up
-                        # front, as `--allowedTools mcp__mailhub` does for Claude
-                        "-c", 'mcp_servers.mailhub.default_tools_approval_mode="approve"',
-                        "-"]
-                r = subprocess.run(argv, input=prompt, env=session_env(), cwd=cwd, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=600)
-                with open(os.path.join(evidence, "codex-session.jsonl"), "w", encoding="utf-8") as f:
-                    f.write(r.stdout)
+                assert (rig.codex_entry() or {}).get("default_tools_approval_mode") == "approve", rig.codex_entry()
+                r = codex_run(SESSION_PROMPT.format(name=name, peer=peer.slug, harness="Codex"), True)
+                save("codex-session.jsonl", r.stdout)
                 calls = tool_calls_codex(r.stdout.splitlines())
-                with open(os.path.join(evidence, "codex-tool-calls.json"), "w", encoding="utf-8") as f:
-                    json.dump(calls, f, indent=1, ensure_ascii=False)
+                save("codex-tool-calls.json", json.dumps(calls, indent=1, ensure_ascii=False))
                 assert r.returncode == 0, (r.returncode, r.stderr[-800:])
+                asked = [t for t, res in calls if "requires approval" in res]
+                assert not asked, ("a mailhub tool would have asked", asked)
                 judge_session("Codex", calls, peer, name)
-            check("real session: Codex (gpt-6-luna) calls hub_register, hub_list, hub_send, hub_wait, "
-                  "hub_read, hub_history and hub_message through the installed server's entry", _codex_session)
+            check("real session: Codex (gpt-6-luna), allowed only by the mailhub table the installer wrote, "
+                  "calls hub_register, hub_list, hub_send, hub_wait, hub_read, hub_history and hub_message "
+                  "with no approval asked", _codex_session)
+
+            def _codex_control():
+                r = codex_run(CONTROL_PROMPT, False)
+                save("codex-control.jsonl", r.stdout)
+                calls = tool_calls_codex(r.stdout.splitlines())
+                assert calls and all("requires approval" in res for _, res in calls), \
+                    ("the control was not refused", calls, r.stdout[-800:])
+            check("control: the same Codex session without the approval mode is refused hub_list "
+                  "(it would have asked)", _codex_control)
     finally:
         peer.close()
         with open(os.path.join(evidence, "peer-listener.txt"), "w", encoding="utf-8") as f:
@@ -482,6 +593,8 @@ def real_sessions(rig: Rig, evidence: str) -> None:
 
 def run(rig: Rig) -> None:
     hub_norm = rig.hub_url.rstrip("/")
+    has_claude = bool(rig.claude or rig.stub_dir)       # the installer will find one
+    has_codex = bool(rig.codex or rig.stub_dir)
     before = real_configs()
     print(f"assets {rig.base} · hub {rig.hub_url} · claude {rig.claude or ('stub' if rig.stub_dir else 'absent')}"
           f" · codex {rig.codex or ('stub' if rig.stub_dir else 'absent')}", flush=True)
@@ -493,8 +606,8 @@ def run(rig: Rig) -> None:
         if VERBOSE:
             print(r.stdout)
         return r
-    check("install: the README's one-liner (" + ("irm | iex" if WINDOWS else "curl | sh") +
-          ") installs and says the hub answers", _first_install)
+    first = check("install: the README's one-liner (" + ("irm | iex" if WINDOWS else "curl | sh") +
+                  ") installs and says the hub answers", _first_install)
 
     def _file():
         assert os.path.isfile(rig.dest), rig.dest
@@ -525,10 +638,29 @@ def run(rig: Rig) -> None:
             assert e and e.get("args", [])[-1] == rig.dest, e
     check("install: Claude Code (user scope) and Codex were given the mailhub server", _clients)
 
+    def _preapproved():
+        allow = SETTINGS_SEED["permissions"]["allow"] + (["mcp__mailhub"] if has_claude else [])
+        assert rig.claude_settings_now() == {**SETTINGS_SEED, "permissions": {"allow": allow}}, \
+            rig.claude_settings_now()
+        with open(rig.codex_config, encoding="utf-8") as f:
+            text = f.read()
+        assert text.startswith(CODEX_SEED), text
+        assert text.count("default_tools_approval_mode") == (1 if has_codex else 0), text
+        if has_codex:
+            e = rig.codex_entry()
+            assert e and e.get("default_tools_approval_mode") == "approve", e
+            assert "registered, its tools pre-approved" in first.stdout, first.stdout
+        if has_claude:
+            assert "registered (user scope), its tools pre-approved" in first.stdout, first.stdout
+    check("install: the mailhub tools, and no others, are pre-approved: mcp__mailhub added to Claude "
+          "Code's settings.json (the rest kept), default_tools_approval_mode in Codex's mailhub table",
+          _preapproved)
+
     def _real_configs_untouched():
         after = real_configs()
-        assert after == before and not after["claude"] and not after["codex"], (before, after)
-    check("install: the REAL ~/.claude.json and ~/.codex/config.toml gained no mailhub", _real_configs_untouched)
+        assert after == before and not any(after.values()), (before, after)
+    check("install: the REAL ~/.claude.json, ~/.claude/settings.json and ~/.codex/config.toml "
+          "gained no mailhub", _real_configs_untouched)
 
     def _mcp_round_trip():
         env = dict(rig.env)
@@ -607,15 +739,18 @@ def run(rig: Rig) -> None:
         if rig.claude:
             with open(os.path.join(rig.claude_dir, ".claude.json"), encoding="utf-8") as f:
                 assert list((json.load(f).get("mcpServers") or {}).keys()) == ["mailhub"]
-        if rig.codex:
-            with open(os.path.join(rig.codex_dir, "config.toml"), encoding="utf-8") as f:
-                assert len(re.findall(r"^\[mcp_servers\.mailhub\]", f.read(), re.M)) == 1
+        with open(rig.codex_config, encoding="utf-8") as f:
+            text = f.read()
+        assert len(re.findall(r"^\[mcp_servers\.mailhub\]", text, re.M)) == int(has_codex), text
+        assert text.count("default_tools_approval_mode") == int(has_codex), text
+        assert rig.claude_settings_now()["permissions"]["allow"].count("mcp__mailhub") == int(has_claude)
+        assert "its tools pre-approved" in r.stdout, r.stdout
         if rig.stub_dir:
             adds = [c for c in rig.stub_calls("claude") if c.startswith("mcp add")]
             removes = [c for c in rig.stub_calls("claude") if c.startswith("mcp remove")]
             assert len(adds) == 2 and len(removes) == 2, rig.stub_calls("claude")
-    check("re-run: with no address it keeps the stored hub and leaves ONE mailhub entry per client",
-          _rerun_keeps_the_hub)
+    check("re-run: with no address it keeps the stored hub and leaves ONE mailhub entry and ONE "
+          "pre-approval per client", _rerun_keeps_the_hub)
 
     def _rerun_changes_the_hub():
         r = rig.install(hub="dark-hub.invalid:7399", form="block")
@@ -682,13 +817,19 @@ def run(rig: Rig) -> None:
             "uninstall must keep the identities"
         if rig.claude:
             assert rig.claude_entry() is None, rig.claude_entry()
-        if rig.codex:
-            assert rig.codex_entry() is None, rig.codex_entry()
+        assert rig.codex_entry() is None, rig.codex_entry()
         if rig.stub_dir:
             assert rig.stub_calls("claude")[-1] == "mcp remove -s user mailhub", rig.stub_calls("claude")
             assert rig.stub_calls("codex")[-1] == "mcp remove mailhub", rig.stub_calls("codex")
+        assert rig.claude_settings_now() == SETTINGS_SEED, rig.claude_settings_now()
+        if has_claude:
+            assert "removed the pre-approval of the mailhub tools" in r.stdout, r.stdout
+        with open(rig.codex_config, encoding="utf-8") as f:
+            text = f.read()
+        assert "default_tools_approval_mode" not in text and "gpt-6-luna" in text, text
         assert real_configs() == before
-    check("uninstall: removes the server entries and ~/.orgtree/hubtool, keeps the identities", _uninstall)
+    check("uninstall: removes the server entries, their pre-approval and ~/.orgtree/hubtool, keeps the "
+          "identities and every other setting", _uninstall)
 
 
 VERBOSE = "-v" in sys.argv

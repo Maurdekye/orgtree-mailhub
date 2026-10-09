@@ -1,8 +1,9 @@
 <#
 install-hubtool.ps1: connect the Claude Code and Codex sessions on this
 computer to an orgtree mail hub. It installs only hubtool.py (one file,
-Python standard library only) and registers it as the "mailhub" MCP server.
-No Orgtree, no hub and no admin rights are needed; Python 3.8+ is.
+Python standard library only), registers it as the "mailhub" MCP server and
+lets sessions use its tools without asking each time. No Orgtree, no hub
+and no admin rights are needed; Python 3.8+ is.
 
     irm https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.ps1 | iex
 
@@ -19,6 +20,9 @@ unless you give another, and registers the server again. What it writes:
   %USERPROFILE%\.orgtree\hub-clients\            hubtool's identities and the
                                                  hub address (kept on uninstall)
   the "mailhub" entry in Claude Code's user MCP config and in Codex's config
+  the pre-approval of the mailhub tools, and of no other: "mcp__mailhub" in
+  permissions.allow of Claude Code's settings.json, and
+  default_tools_approval_mode = "approve" in Codex's [mcp_servers.mailhub]
 #>
 param(
     [string]$Hub = $env:HUBTOOL_HUB,
@@ -31,7 +35,7 @@ function Install-OrgtreeHubtool {
     # The hubtool.py this installer accepts: the SHA-256 of the file released
     # beside it. tests/test_install_hubtool.py keeps it equal to the repo's
     # hubtool.py; tools/hubtool-assets.py refuses to build a release otherwise.
-    $HubtoolSha256 = 'd7c04122f487d8faba533c7bec83a91797230e6be8ca18556fb3a8585b073008'
+    $HubtoolSha256 = '48490cecf8516aaaa965c99ac2c423802c2b0cc5179d48b08c976720e37cef3b'
     $Base = if ($env:HUBTOOL_BASE_URL) { $env:HUBTOOL_BASE_URL.TrimEnd('/') }
             else { 'https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download' }
     $Server = 'mailhub'
@@ -53,17 +57,54 @@ function Install-OrgtreeHubtool {
             Select-Object -First 1
     }
 
+    # Python 3.8 or newer, as this user's PowerShell would run it.
+    function Find-Python {
+        foreach ($candidate in @(@('python'), @('python3'), @('py', '-3'))) {
+            $cmd = Find-Program $candidate[0]
+            if (-not $cmd) { continue }
+            $extra = @($candidate | Select-Object -Skip 1)
+            $out = @(& $cmd.Source @extra -c 'import sys; print(sys.version_info[0]); print(sys.version_info[1])' 2> $null)
+            if ($LASTEXITCODE -ne 0 -or $out.Count -lt 2) { continue }
+            if (($out[0] -as [int]) -eq 3 -and ($out[1] -as [int]) -ge 8) {
+                return @{ Exe = $cmd.Source; Args = $extra; Version = "$($out[0]).$($out[1])" }
+            }
+        }
+        return $null
+    }
+
+    # Sessions use the mailhub tools without asking each time (the user's
+    # choice): hubtool.py writes the one setting a client reads for that.
+    # Its JSON answer, which carries `error` when nothing could be written.
+    function Approve([string]$Client, [switch]$Remove) {
+        $verb = @('preapprove', $Client)
+        if ($Remove) { $verb += '--remove' }
+        $text = (& $python.Exe @($python.Args) $Dest @verb 2> $null) -join "`n"
+        try { $r = $text | ConvertFrom-Json } catch { $r = $null }
+        if (-not $r -or -not ($r.client -or $r.error)) {
+            $r = [pscustomobject]@{ error = "hubtool.py preapprove answered: $text" }
+        }
+        $r
+    }
+
     $claude = Find-Program 'claude'
     $codex = Find-Program 'codex'
 
     if ($Uninstall) {
+        $python = Find-Python
+        $approval = $null
+        if ($python -and (Test-Path $Dest)) { $approval = Approve 'claude' -Remove }
         if ($claude) {
             & $claude.Source mcp remove $Server -s user *> $null
             Say "Claude Code: removed the $Server MCP server."
         }
+        if ($approval -and $approval.changed) {
+            Say "Claude Code: removed the pre-approval of the $Server tools from $($approval.file)."
+        } elseif ($approval -and $approval.error) {
+            Fail "Claude Code: the pre-approval of the $Server tools stays: $($approval.error)"
+        }
         if ($codex) {
             & $codex.Source mcp remove $Server *> $null
-            Say "Codex: removed the $Server MCP server."
+            Say "Codex: removed the $Server MCP server and the pre-approval of its tools."
         }
         if (Test-Path $Dir) {
             Remove-Item -Recurse -Force $Dir
@@ -74,19 +115,7 @@ function Install-OrgtreeHubtool {
         return
     }
 
-    # Python 3.8 or newer, as this user's PowerShell would run it.
-    $python = $null
-    foreach ($candidate in @(@('python'), @('python3'), @('py', '-3'))) {
-        $cmd = Find-Program $candidate[0]
-        if (-not $cmd) { continue }
-        $extra = @($candidate | Select-Object -Skip 1)
-        $out = @(& $cmd.Source @extra -c 'import sys; print(sys.version_info[0]); print(sys.version_info[1])' 2> $null)
-        if ($LASTEXITCODE -ne 0 -or $out.Count -lt 2) { continue }
-        if (($out[0] -as [int]) -eq 3 -and ($out[1] -as [int]) -ge 8) {
-            $python = @{ Exe = $cmd.Source; Args = $extra; Version = "$($out[0]).$($out[1])" }
-            break
-        }
-    }
+    $python = Find-Python
     if (-not $python) {
         Fail 'Python 3.8 or newer is needed and was not found.'
         Say 'Install it from https://www.python.org/downloads/ (no admin rights needed; tick'
@@ -140,19 +169,37 @@ function Install-OrgtreeHubtool {
         if ($who) { "$($res.default_hub) (it answers: $($who -join ', '))" } else { "$($res.default_hub) (it answers)" }
     } else { "$($res.default_hub) (no answer from it right now; it is used once it answers)" }
 
-    # The MCP server, registered with whichever client is installed.
+    # The MCP server, registered with whichever client is installed, and its
+    # tools pre-approved there.
     $launch = @($python.Exe) + @($python.Args) + @($Dest)
     $lines = @()
+    $notes = @()
     if ($claude) {
         & $claude.Source mcp remove $Server -s user *> $null
         $out = & $claude.Source mcp add -s user $Server -- @launch 2>&1
-        if ($LASTEXITCODE -eq 0) { $lines += "  Claude Code  the $Server MCP server is registered (user scope)" }
+        if ($LASTEXITCODE -eq 0) {
+            $ok = Approve 'claude'
+            if ($ok.error) {
+                $lines += "  Claude Code  the $Server MCP server is registered (user scope)"
+                $notes += "Claude Code will ask before each mailhub tool call: $($ok.error)"
+            } else {
+                $lines += "  Claude Code  the $Server MCP server is registered (user scope), its tools pre-approved"
+            }
+        }
         else { Fail "Claude Code refused the server: $($out -join ' ')" }
     }
     if ($codex) {
         & $codex.Source mcp remove $Server *> $null
         $out = & $codex.Source mcp add $Server -- @launch 2>&1
-        if ($LASTEXITCODE -eq 0) { $lines += "  Codex        the $Server MCP server is registered" }
+        if ($LASTEXITCODE -eq 0) {
+            $ok = Approve 'codex'
+            if ($ok.error) {
+                $lines += "  Codex        the $Server MCP server is registered"
+                $notes += "Codex will ask before each mailhub tool call: $($ok.error)"
+            } else {
+                $lines += "  Codex        the $Server MCP server is registered, its tools pre-approved"
+            }
+        }
         else { Fail "Codex refused the server: $($out -join ' ')" }
     }
 
@@ -162,6 +209,7 @@ function Install-OrgtreeHubtool {
     Say "  hub          $hubLine"
     if ($res.note) { Say "  note         $($res.note)" }
     $lines | ForEach-Object { Say $_ }
+    $notes | ForEach-Object { Say "  note         $_" }
     $quoted = ($launch | ForEach-Object { "`"$_`"" }) -join ' '
     if (-not $claude -and -not $codex) {
         Say ''

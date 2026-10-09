@@ -194,8 +194,9 @@ tests/requirements.txt`).
   URLs). `python tests/install_hubtool_e2e.py --hub <scratch hub>
   [--real-sessions]` runs them for real in a throwaway home, and with
   `--real-sessions` drives a real Claude Code and Codex session through the
-  hub tools (it spends model usage); `--stub-clients` where neither CLI is
-  installed.
+  hub tools, allowed only by the pre-approval the installer wrote, beside a
+  control session without it that the CLI refuses (it spends model usage);
+  `--stub-clients` where neither CLI is installed.
 
 ## Releases: the one-line installer's assets
 

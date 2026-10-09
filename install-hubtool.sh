@@ -1,8 +1,9 @@
 #!/bin/sh
 # install-hubtool.sh: connect the Claude Code and Codex sessions on this
 # computer to an orgtree mail hub. It installs only hubtool.py (one file,
-# Python standard library only) and registers it as the "mailhub" MCP server.
-# No Orgtree, no hub and no sudo are needed; Python 3.8+ is.
+# Python standard library only), registers it as the "mailhub" MCP server and
+# lets sessions use its tools without asking each time. No Orgtree, no hub
+# and no sudo are needed; Python 3.8+ is.
 #
 #   curl -fsSL https://github.com/Maurdekye/orgtree-mailhub/releases/latest/download/install-hubtool.sh | sh
 #
@@ -19,6 +20,9 @@
 #   ~/.orgtree/hub-clients/         hubtool's identities and the hub address
 #                                   (kept on uninstall)
 #   the "mailhub" entry in Claude Code's user MCP config and in Codex's config
+#   the pre-approval of the mailhub tools, and of no other: "mcp__mailhub" in
+#   permissions.allow of Claude Code's settings.json, and
+#   default_tools_approval_mode = "approve" in Codex's [mcp_servers.mailhub]
 #
 # Everything runs from main() on the last line, so a download cut short
 # runs nothing.
@@ -28,7 +32,7 @@ set -eu
 # The hubtool.py this installer accepts: the SHA-256 of the file released
 # beside it. tests/test_install_hubtool.py keeps it equal to the repo's
 # hubtool.py; tools/hubtool-assets.py refuses to build a release otherwise.
-HUBTOOL_SHA256=d7c04122f487d8faba533c7bec83a91797230e6be8ca18556fb3a8585b073008
+HUBTOOL_SHA256=48490cecf8516aaaa965c99ac2c423802c2b0cc5179d48b08c976720e37cef3b
 SERVER=mailhub
 
 say() { printf '%s\n' "$*"; }
@@ -74,14 +78,37 @@ except ValueError:
 print("" if v is None or v is False else ("yes" if v is True else v))' "$2"
 }
 
+# Sessions use the mailhub tools without asking each time (the user's
+# choice): hubtool.py writes the one setting a client reads for that. Sets
+# APPROVAL_ERROR ('' when it worked), APPROVAL_CHANGED (yes or '') and
+# APPROVAL_FILE.
+approve() {
+    res=$("$PY" "$DEST" preapprove "$@" 2>/dev/null) || true
+    APPROVAL_ERROR=$(field "$res" error)
+    APPROVAL_CHANGED=$(field "$res" changed)
+    APPROVAL_FILE=$(field "$res" file)
+    if [ -z "$APPROVAL_ERROR" ] && [ -z "$(field "$res" client)" ]; then
+        APPROVAL_ERROR="hubtool.py preapprove answered: $res"
+    fi
+}
+
 uninstall() {
+    APPROVAL_ERROR= APPROVAL_CHANGED= APPROVAL_FILE=
+    if [ -f "$DEST" ] && find_python; then
+        approve claude --remove
+    fi
     if command -v claude >/dev/null 2>&1; then
         claude mcp remove -s user "$SERVER" >/dev/null 2>&1 || true
         say "Claude Code: removed the $SERVER MCP server."
     fi
+    if [ -n "$APPROVAL_CHANGED" ]; then
+        say "Claude Code: removed the pre-approval of the $SERVER tools from $APPROVAL_FILE."
+    elif [ -n "$APPROVAL_ERROR" ]; then
+        fail "Claude Code: the pre-approval of the $SERVER tools stays: $APPROVAL_ERROR"
+    fi
     if command -v codex >/dev/null 2>&1; then
         codex mcp remove "$SERVER" >/dev/null 2>&1 || true
-        say "Codex: removed the $SERVER MCP server."
+        say "Codex: removed the $SERVER MCP server and the pre-approval of its tools."
     fi
     if [ -d "$DIR" ]; then
         rm -rf "$DIR"
@@ -178,15 +205,25 @@ main() {
     fi
     note=$(field "$res" note)
 
-    # The MCP server, registered with whichever client is installed.
+    # The MCP server, registered with whichever client is installed, and its
+    # tools pre-approved there.
     lines=
+    notes=
     found=
     if command -v claude >/dev/null 2>&1; then
         found=1
         claude mcp remove -s user "$SERVER" >/dev/null 2>&1 || true
         if out=$(claude mcp add -s user "$SERVER" -- "$PY" "$DEST" 2>&1); then
-            lines="$lines  Claude Code  the $SERVER MCP server is registered (user scope)
+            approve claude
+            if [ -z "$APPROVAL_ERROR" ]; then
+                lines="$lines  Claude Code  the $SERVER MCP server is registered (user scope), its tools pre-approved
 "
+            else
+                lines="$lines  Claude Code  the $SERVER MCP server is registered (user scope)
+"
+                notes="$notes  note         Claude Code will ask before each mailhub tool call: $APPROVAL_ERROR
+"
+            fi
         else
             fail "Claude Code refused the server: $out"
         fi
@@ -195,8 +232,16 @@ main() {
         found=1
         codex mcp remove "$SERVER" >/dev/null 2>&1 || true
         if out=$(codex mcp add "$SERVER" -- "$PY" "$DEST" 2>&1); then
-            lines="$lines  Codex        the $SERVER MCP server is registered
+            approve codex
+            if [ -z "$APPROVAL_ERROR" ]; then
+                lines="$lines  Codex        the $SERVER MCP server is registered, its tools pre-approved
 "
+            else
+                lines="$lines  Codex        the $SERVER MCP server is registered
+"
+                notes="$notes  note         Codex will ask before each mailhub tool call: $APPROVAL_ERROR
+"
+            fi
         else
             fail "Codex refused the server: $out"
         fi
@@ -207,7 +252,7 @@ main() {
     say "  hubtool.py   $DEST (Python $PYVER)"
     say "  hub          $hubline"
     [ -z "$note" ] || say "  note         $note"
-    printf '%s' "$lines"
+    printf '%s' "$lines$notes"
     if [ -z "$found" ]; then
         say ""
         say "Neither Claude Code nor Codex was found on PATH. Once one is installed,"
