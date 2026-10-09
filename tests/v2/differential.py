@@ -55,7 +55,7 @@ EXPECTED = {
 
 
 # keys v2's /healthz adds beside v1's (checked present, then set aside)
-HEALTHZ_ADDITIONS = ("version", "features", "max_message_bytes")
+HEALTHZ_ADDITIONS = ("version", "features", "max_message_bytes", "now")
 # what a v1 route shows after the first 20,000 characters of a longer body:
 # v1 cut such a body silently, v2 keeps it whole and says so (G6)
 CONTINUES = re.compile(r"\n\n\[message continues: (\d+) bytes — open it in a client that supports long messages\]$")
@@ -237,14 +237,16 @@ class Diff:
 
     def set_aside_additions(self, va: dict[str, Any], vb: dict[str, Any]) -> None:
         """v2's /healthz also says what it supports (`version`, `features`:
-        docs/v2-additions.md), and every other answer that names the hub
-        (`name`) also gives its `version`. Present on v2 and absent on v1,
-        they are set aside so the rest of the answer still compares exactly."""
+        docs/v2-additions.md) and its clock (`now`), and every other answer
+        that names the hub (`name`) also gives its `version`. Present on v2
+        and absent on v1, they are set aside so the rest of the answer still
+        compares exactly."""
         ba, bb = va.get("body"), vb.get("body")
         if not (isinstance(ba, dict) and isinstance(bb, dict)):
             return
         if "max_attachment_bytes" in bb and all(k in bb and k not in ba for k in HEALTHZ_ADDITIONS) and isinstance(bb["features"], list):
             assert bb["max_message_bytes"] == bb["max_attachment_bytes"], bb
+            assert isinstance(bb["now"], int) and abs(bb["now"] - time.time() * 1000) < 600_000, bb
             for k in HEALTHZ_ADDITIONS:
                 bb.pop(k)
             self.additions += 1
@@ -777,7 +779,7 @@ def main() -> int:
                 s.proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\nagree: {d.same} · deliberate differences seen: {len(d.expected_seen)} · UNEXPECTED: {len(d.unexpected)}"
-          f" · v2 additions set aside in {d.additions} answers (the hub's version beside its name; /healthz features, max_message_bytes)"
+          f" · v2 additions set aside in {d.additions} answers (the hub's version beside its name; /healthz features, max_message_bytes, now)"
           f" and {d.continuations} bodies (the \"message continues\" line)")
     for u in d.unexpected:
         print(f"\n✗ {u}")

@@ -137,8 +137,11 @@ X-Org-Auth: <slug>:<secret>
 - **Refusals** (422 unless said): `device_id is required`, `device_id must be
   1 to 64 printable ASCII characters without spaces`, `device_name must be a
   string`, `device_name is longer than 64 characters`, `cursor is not a sync
-  cursor from this hub`, `wait must be a number of seconds`; 400 for a body
-  that is not a JSON object; 401 without valid credentials.
+  cursor from this hub`, `wait must be a number of seconds`, and the two
+  `start` refusals ("Lazy history" below); 400 for a body that is not a JSON
+  object; 401 without valid credentials.
+- **Starting from now** instead of from the beginning: see "Lazy history"
+  below (v2.0.1).
 - `/api/poll` and `/api/ack` are unchanged: a v1 client on its own address
   sees exactly v1.
 
@@ -186,7 +189,8 @@ recipient took custody, hub time), `delivered_at` and `read_at` (the
 recipient's receipts, as it sent them), each `null` until it happens.
 Refusals (422): `with is required: the address of the conversation`,
 `limit must be a whole number`, `before is not a history cursor from this
-hub`.
+hub` (neither a cursor nor a time). Since v2.0.1, `before` may also be a
+time ("Lazy history" below).
 
 ```
 DELETE /api/messages/{id}[?slug=]             → 200 {"deleted": 1}   (0: already deleted)
@@ -462,13 +466,66 @@ X-Org-Auth: <slug>:<secret>            (or the device's own signed call)
   (a v1 hub, or an older v2) notifies as before. Clients that never send it
   are unaffected: no device of theirs is ever active.
 
+## Lazy history: a new device starts from now (v2.0.1)
+
+A device that syncs from the beginning first downloads every message its
+address ever had, and kept history only grows. A device can instead start
+from now and fetch older mail page by page, as its user scrolls back.
+
+```
+POST /api/sync
+{"device_id": "pixel-7f3a", "start": "now", "wait": 0}       (a device's first sync: no cursor)
+→ 200 {..., "changes": [], "roster": [<the whole roster>], "online": [...], "start": "now", "now": 1760000000123}
+```
+
+- **The first answer** carries none of the address's mail so far. It
+  carries the whole roster (paged by `more`, as any first sync), `online`
+  and `active`, and says `"start": "now"` back. A hub without this feature
+  ignores `start` and syncs from the beginning; the missing echo says so.
+- **After it**, the device's answers carry what happens from then on: new
+  mail, mail sent from the address's other devices, and changes to older
+  messages (a receipt, a deletion). Apply those to the copies the device
+  holds, and store or ignore the rest.
+- **Older mail** comes from `GET /api/history`, one page at a time, and the
+  chat list from `GET /api/conversations` (each entry has its newest
+  message and its unread count).
+- **Custody**: a device that started from now holds nothing from before its
+  start. Mail still in v1's queue from before then stays there: v1 polls on
+  the address still return it, and its v1 senders see no `fetched`. Mail
+  after the start is handed over as for any device.
+- **Its cursor** stays opaque. It records where the device started, for
+  the device's whole life. A cursor this hub did not write starts the device
+  over **from now** (not from the beginning), with `"reset": true`.
+- **Refusals** (422): `start is only for a device's first sync (send no
+  cursor)`, `start must be "now"`.
+
+```
+GET /api/history?with=<address>&before=<unix ms>[&limit=50]
+```
+
+- A bare whole number in `before` is a time: the page holds what this hub
+  received strictly before that millisecond (`received_at < ms`), newest
+  first. To include that millisecond, ask for ms + 1. The answer is as
+  ever: its `before` is the exact cursor for the page before (null at the
+  conversation's start), so a client goes on from there with the cursor.
+- The exact cursor (`<ms>-<n>` from an answer) works as before. Anything
+  that is neither is refused as before: 422 `before is not a history cursor
+  from this hub`.
+
+**The hub's clock**: `/healthz` and every sync answer carry `"now"`, the
+hub's time in unix milliseconds when the answer was made. A client on
+several hubs can estimate each hub's clock offset from it (and the round
+trip), since received times are each hub's own.
+
+`/healthz` lists the feature as `lazy_history`.
+
 ## Telling what a hub supports
 
-`/healthz` also reports `"version"` (`"2.0.0"`) and `"features"`, the
-additions this hub serves: `person`, `profile`, `reply_to`, `sync`,
-`devices`, `history`, `delete`, `long_messages`, `message_limit`,
-`directory`, `uploads`, `link`, `device_keys`, `active`. A v1 hub reports
-neither.
+`/healthz` also reports `"version"` (`"2.0.1"`), `"features"` and `"now"`
+(the hub's clock, unix milliseconds). The features are the additions this
+hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
+`delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
+`device_keys`, `active`, `lazy_history`. A v1 hub reports none of them.
 
 ## The hub's version, to every client
 

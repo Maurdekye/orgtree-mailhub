@@ -40,13 +40,16 @@ pub async fn healthz(hub: &Arc<Hub>) -> ApiResult {
         "max_message_bytes": limit,
         "version": crate::VERSION,
         "features": FEATURES,
+        // the hub's clock in unix milliseconds, so a client on several hubs
+        // can estimate each one's offset (lazy history orders by hub times)
+        "now": clock::now().timestamp_millis(),
     }))
 }
 
 /// The protocol additions this hub serves (docs/v2-additions.md), so a
 /// client can tell what a hub supports without probing routes.
 pub const FEATURES: &[&str] =
-    &["person", "profile", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active"];
+    &["person", "profile", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history"];
 
 /// v1 read the page in text mode, so line endings reached the browser as
 /// `\n` whatever the checkout's were; the embedded copy is served the same.

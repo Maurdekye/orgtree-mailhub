@@ -133,12 +133,14 @@ pub async fn remove_addresses(db: &db::Db, slugs: &[String]) -> anyhow::Result<V
 
 /// A sync position: the address's change log, the roster, and the online
 /// set the device was last told (`<mail>-<roster>-<16 hex>`; opaque to
-/// clients).
+/// clients). A device that started from now (lazy history) also carries
+/// where it started (`-<base>`): it was never sent what lies at or below.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Cursor {
     mail: i64,
     roster: i64,
     online: Option<u64>,
+    base: Option<i64>,
 }
 
 impl Cursor {
@@ -151,16 +153,34 @@ impl Cursor {
             Some(_) => return bad(),
         };
         let parts: Vec<&str> = s.split('-').collect();
-        let [m, r, p] = parts.as_slice() else { return bad() };
+        let (m, r, p, b) = match parts.as_slice() {
+            [m, r, p] => (m, r, p, None),
+            [m, r, p, b] => (m, r, p, Some(b)),
+            _ => return bad(),
+        };
         let num = |x: &str| x.bytes().all(|b| b.is_ascii_digit()).then(|| x.parse::<i64>().ok()).flatten();
+        let base = match b.map(|b| num(b)) {
+            None => None,
+            Some(Some(b)) => Some(b),
+            Some(None) => return bad(),
+        };
         match (num(m), num(r), (p.len() == 16).then(|| u64::from_str_radix(p, 16).ok()).flatten()) {
-            (Some(mail), Some(roster), Some(online)) => Ok(Cursor { mail, roster, online: Some(online) }),
+            (Some(mail), Some(roster), Some(online)) if base.is_none_or(|b| b <= mail) => Ok(Cursor { mail, roster, online: Some(online), base }),
             _ => bad(),
         }
     }
 
     fn render(&self, online: u64) -> String {
-        format!("{}-{}-{online:016x}", self.mail, self.roster)
+        match self.base {
+            Some(base) => format!("{}-{}-{online:016x}-{base}", self.mail, self.roster),
+            None => format!("{}-{}-{online:016x}", self.mail, self.roster),
+        }
+    }
+
+    /// A device's first position when it starts from now: the address's
+    /// change log as it stands (`head`), the whole roster still to come.
+    fn now(head: i64) -> Cursor {
+        Cursor { mail: head, roster: 0, online: None, base: Some(head) }
     }
 }
 
@@ -254,12 +274,14 @@ async fn signed_out(c: &impl GenericClient, slug: &str, device: &str) -> Result<
 
 /// Custody, as an ack: the device's cursor says it holds everything up to
 /// there, so mail to the address still queued below it is handed over
-/// (and the senders' v1 polls are owed a "fetched" receipt). A message
-/// another writer holds right now is left for the next sync, never waited
-/// for, so this can never deadlock with a receipt or an ack.
+/// (and the senders' v1 polls are owed a "fetched" receipt). A device that
+/// started from now holds nothing at or below its start (`base`), so mail
+/// queued there stays in v1's queue. A message another writer holds right
+/// now is left for the next sync, never waited for, so this can never
+/// deadlock with a receipt or an ack.
 #[tracing::instrument(level = "debug", skip(c), err(level = "debug", Debug))]
-async fn take_custody(c: &impl GenericClient, slug: &str, upto: i64) -> Result<Vec<String>, tokio_postgres::Error> {
-    if upto <= 0 {
+async fn take_custody(c: &impl GenericClient, slug: &str, upto: i64, base: i64) -> Result<Vec<String>, tokio_postgres::Error> {
+    if upto <= base {
         return Ok(Vec::new());
     }
     let rows = db::query(
@@ -268,12 +290,12 @@ async fn take_custody(c: &impl GenericClient, slug: &str, upto: i64) -> Result<V
             SELECT m.n FROM messages m
              WHERE m.to_slug = $1 AND m.state = 'queued'
                AND $2 <= COALESCE((SELECT seq FROM mailbox_heads WHERE slug = $1), 0)
-               AND EXISTS (SELECT 1 FROM mailbox_log l WHERE l.slug = $1 AND l.message_n = m.n AND l.seq <= $2)
+               AND EXISTS (SELECT 1 FROM mailbox_log l WHERE l.slug = $1 AND l.message_n = m.n AND l.seq <= $2 AND l.seq > $4)
              ORDER BY m.n FOR UPDATE SKIP LOCKED)
          UPDATE messages m SET state = 'fetched', fetched_at = $3, receipts_pushed = false
            FROM due WHERE m.n = due.n AND m.state = 'queued'
          RETURNING m.from_slug",
-        &[&slug, &upto, &clock::now()],
+        &[&slug, &upto, &clock::now(), &base],
     )
     .await?;
     Ok(rows.iter().map(|r| r.get(0)).collect())
@@ -312,9 +334,14 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     .await?;
     let (mail_head, roster_head, key_version): (i64, i64, i32) = (heads.get(0), heads.get(1), heads.get(2));
     // a cursor beyond what this hub has written comes from another history
-    // (a restored database, a re-created store): start the device over
+    // (a restored database, a re-created store): start the device over, from
+    // now again if that is how it started
     let reset = cur.mail > mail_head || cur.roster > roster_head;
-    let from = if reset { Cursor { online: None, ..Cursor::default() } } else { cur };
+    let from = match (reset, cur.base) {
+        (false, _) => cur,
+        (true, Some(_)) => Cursor::now(mail_head),
+        (true, None) => Cursor::default(),
+    };
 
     let rows = db::query(
         &c,
@@ -395,7 +422,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch) -> ApiResult {
+async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch, start_now: bool) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
     let online = hub.presence.online_now();
@@ -413,6 +440,8 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch)
         "more": b.more,
         "identity_key_version": b.key_version,
         "active": active,
+        // the hub's clock in unix milliseconds, as in /healthz
+        "now": clock::now().timestamp_millis(),
     });
     if b.reset || cur.online != Some(print) {
         out["online"] = json!(online);
@@ -420,10 +449,28 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch)
     if b.reset {
         out["reset"] = json!(true);
     }
+    if start_now {
+        out["start"] = json!("now");
+    }
     ok(out)
 }
 
-/// `POST /api/sync {device_id, device_name?, cursor?, wait?, slug?}`.
+/// `start`: absent, or `"now"` on a device's first sync (lazy history:
+/// none of the address's mail so far, only what happens from now on).
+fn parse_start(v: Option<&Value>, cur: Cursor) -> ApiResult<bool> {
+    match v {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::String(s)) if s == "now" => {
+            if cur != Cursor::default() {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "start is only for a device's first sync (send no cursor)");
+            }
+            Ok(true)
+        }
+        Some(_) => refuse(StatusCode::UNPROCESSABLE_ENTITY, "start must be \"now\""),
+    }
+}
+
+/// `POST /api/sync {device_id, device_name?, cursor?, start?, wait?, slug?}`.
 #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let wait_query = req.query_float("wait", 25.0)?;
@@ -441,7 +488,8 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         return refuse(StatusCode::UNPROCESSABLE_ENTITY, "device_id must be the signing device's own");
     }
     let name = device_name(body.get("device_name"))?;
-    let cur = Cursor::parse(body.get("cursor"))?;
+    let mut cur = Cursor::parse(body.get("cursor"))?;
+    let start_now = parse_start(body.get("start"), cur)?;
     let wait = match body.get("wait") {
         None | Some(Value::Null) => wait_query,
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
@@ -456,7 +504,13 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         }
         seen_device(&c, &slug, &device, name.as_deref()).await?;
         mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
-        let senders = take_custody(&c, &slug, cur.mail).await?;
+        if start_now {
+            // a change that commits after this read is numbered above it
+            // (heads are drawn under the row lock), so it still comes
+            let head = db::query_one(&c, "SELECT COALESCE((SELECT seq FROM mailbox_heads WHERE slug = $1), 0)", &[&slug]).await?;
+            cur = Cursor::now(head.get(0));
+        }
+        let senders = take_custody(&c, &slug, cur.mail, cur.base.unwrap_or(0)).await?;
         hub.presence.wake(senders.iter().map(String::as_str));
     }
     let _parked = hub.presence.park(std::slice::from_ref(&slug));
@@ -469,8 +523,8 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         if signed_out(&hub.db.get().await?, &slug, &device).await? {
             return refuse(StatusCode::UNAUTHORIZED, "this device was signed out");
         }
-        if batch.news() || stop || Instant::now() >= deadline {
-            return sync_answer(hub, &slug, &device, cur, batch).await;
+        if batch.news() || start_now || stop || Instant::now() >= deadline {
+            return sync_answer(hub, &slug, &device, cur, batch, start_now).await;
         }
         tokio::select! {
             _ = listener.wait() => {}
@@ -567,11 +621,39 @@ mod tests {
     fn cursors() {
         assert_eq!(Cursor::parse(None).ok(), Some(Cursor::default()));
         assert_eq!(Cursor::parse(Some(&json!(""))).ok(), Some(Cursor::default()));
-        let c = Cursor { mail: 12, roster: 3, online: Some(0xabc) };
+        let c = Cursor { mail: 12, roster: 3, online: Some(0xabc), base: None };
         assert_eq!(c.render(0xabc), "12-3-0000000000000abc");
         assert_eq!(Cursor::parse(Some(&json!("12-3-0000000000000abc"))).ok(), Some(c));
-        for bad in [json!("12-3"), json!("x-3-0000000000000abc"), json!("-1-3-0000000000000abc"), json!("1-3-abc"), json!("+1-3-0000000000000abc"), json!(5)] {
+        // a device that started from now carries its start
+        let lazy = Cursor { base: Some(7), ..c };
+        assert_eq!(lazy.render(0xabc), "12-3-0000000000000abc-7");
+        assert_eq!(Cursor::parse(Some(&json!("12-3-0000000000000abc-7"))).ok(), Some(lazy));
+        assert_eq!(Cursor::now(9), Cursor { mail: 9, roster: 0, online: None, base: Some(9) });
+        for bad in [
+            json!("12-3"),
+            json!("x-3-0000000000000abc"),
+            json!("-1-3-0000000000000abc"),
+            json!("1-3-abc"),
+            json!("+1-3-0000000000000abc"),
+            json!(5),
+            json!("12-3-0000000000000abc-13"),
+            json!("12-3-0000000000000abc-x"),
+            json!("12-3-0000000000000abc-"),
+            json!("12-3-0000000000000abc-1-2"),
+        ] {
             assert!(Cursor::parse(Some(&bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn starting_from_now() {
+        assert_eq!(parse_start(None, Cursor::default()).ok(), Some(false));
+        assert_eq!(parse_start(Some(&Value::Null), Cursor::default()).ok(), Some(false));
+        assert_eq!(parse_start(Some(&json!("now")), Cursor::default()).ok(), Some(true));
+        let held = Cursor { mail: 1, roster: 1, online: Some(0), base: None };
+        assert!(parse_start(Some(&json!("now")), held).is_err(), "start with a cursor");
+        for bad in [json!("then"), json!(""), json!(true), json!(0)] {
+            assert!(parse_start(Some(&bad), Cursor::default()).is_err(), "{bad}");
         }
     }
 

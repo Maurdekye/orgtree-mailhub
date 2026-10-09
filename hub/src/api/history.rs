@@ -93,11 +93,13 @@ pub async fn conversations(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 }
 
 /// A history position: the (received_at, n) of the oldest message a page
-/// returned, as `<unix ms>-<n>`.
+/// returned, as `<unix ms>-<n>`; or a bare `<unix ms>`, a time (lazy
+/// history): what the hub received before it, as the position `(ms, 0)`
+/// (no row is numbered 0).
 fn parse_before(v: Option<&str>) -> ApiResult<Option<(DateTime<Utc>, i64)>> {
     let Some(v) = v.filter(|v| !v.is_empty()) else { return Ok(None) };
     let bad = || refuse(StatusCode::UNPROCESSABLE_ENTITY, "before is not a history cursor from this hub");
-    let Some((ms, n)) = v.split_once('-') else { return bad() };
+    let (ms, n) = v.split_once('-').unwrap_or((v, "0"));
     let num = |x: &str| x.bytes().all(|b| b.is_ascii_digit()).then(|| x.parse::<i64>().ok()).flatten();
     match (num(ms).and_then(|ms| Utc.timestamp_millis_opt(ms).single()), num(n)) {
         (Some(t), Some(n)) => Ok(Some((t, n))),
@@ -105,10 +107,11 @@ fn parse_before(v: Option<&str>) -> ApiResult<Option<(DateTime<Utc>, i64)>> {
     }
 }
 
-/// `GET /api/history?with=<address>[&before=<cursor>][&limit=<n>][&slug=]`:
+/// `GET /api/history?with=<address>[&before=<cursor>|<unix ms>][&limit=<n>][&slug=]`:
 /// one conversation, newest first, `limit` (default 50, at most 200) per
 /// page; `before` in the answer fetches the next older page (null at the
-/// start of the conversation).
+/// start of the conversation). A bare time starts the paging there: what
+/// the hub received before that millisecond.
 #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn history(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let me = caller(hub, req).await?;
@@ -314,7 +317,9 @@ mod tests {
         assert_eq!(parse_before(Some("")).ok(), Some(None));
         let t = Utc.timestamp_millis_opt(1_760_000_000_123).single().unwrap();
         assert_eq!(parse_before(Some("1760000000123-42")).ok(), Some(Some((t, 42))));
-        for bad in ["x", "1-", "-1", "1-x", "+1-2", "1-2-3"] {
+        // a bare time: before row 0 at that millisecond, so strictly before it
+        assert_eq!(parse_before(Some("1760000000123")).ok(), Some(Some((t, 0))));
+        for bad in ["x", "1-", "-1", "1-x", "+1-2", "1-2-3", "12x", "1.5", "99999999999999999999"] {
             assert!(parse_before(Some(bad)).is_err(), "{bad}");
         }
     }
