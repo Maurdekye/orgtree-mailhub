@@ -23,6 +23,56 @@ const CONCURRENCY: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const WAKE: &[u8] = b"wake";
 
+/// Explicit operator opt-in. Hosts match exactly, never by suffix or wildcard.
+#[derive(Clone, Debug)]
+pub enum Allowed {
+    Host(String),
+    Network(ipnet::IpNet),
+}
+
+pub fn parse_allowlist(value: &str) -> anyhow::Result<Vec<Allowed>> {
+    let mut out = Vec::new();
+    for entry in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if out.len() >= 64 {
+            anyhow::bail!("HUB_PUSH_ALLOW accepts at most 64 hosts or CIDRs");
+        }
+        if let Ok(net) = entry.parse::<ipnet::IpNet>() {
+            out.push(Allowed::Network(net));
+        } else {
+            // A bare host (including a literal IP), no URL/userinfo/port/path.
+            if entry.len() > 253
+                || entry.contains(['/', '\\', '@', '?', '#', '*'])
+                || (entry.contains(':') && !(entry.starts_with('[') && entry.ends_with(']')))
+                || entry.bytes().any(|b| b.is_ascii_whitespace())
+            {
+                anyhow::bail!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs");
+            }
+            let url = reqwest::Url::parse(&format!("https://{entry}/")).map_err(|_| anyhow::anyhow!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs"))?;
+            if url.port().is_some() || url.host_str().is_none() {
+                anyhow::bail!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs");
+            }
+            out.push(Allowed::Host(
+                url.host_str().unwrap().trim_matches(['[', ']']).trim_end_matches('.').to_string(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn address_allowed(host: &str, ip: IpAddr, allow: &[Allowed]) -> bool {
+    public_address(ip)
+        || allow.iter().any(|entry| match entry {
+            Allowed::Host(name) => name.eq_ignore_ascii_case(host.trim_end_matches('.')),
+            Allowed::Network(net) => {
+                net.contains(&ip)
+                    || match ip {
+                        IpAddr::V6(ip) => ip.to_ipv4_mapped().is_some_and(|ip| net.contains(&IpAddr::V4(ip))),
+                        _ => false,
+                    }
+            }
+        })
+}
+
 /// Never derive Debug/Serialize: the URL and auth bytes are capabilities.
 struct Subscription {
     endpoint: String,
@@ -72,7 +122,7 @@ fn public_address(ip: IpAddr) -> bool {
 
 /// Resolve immediately before connecting and pin the validated results in
 /// the HTTP client. No second DNS lookup, proxies, redirects or local targets.
-async fn addresses(url: &reqwest::Url) -> Result<Vec<SocketAddr>, &'static str> {
+async fn addresses(url: &reqwest::Url, allow: &[Allowed]) -> Result<Vec<SocketAddr>, &'static str> {
     let host = url.host_str().ok_or("endpoint has no host")?.trim_matches(['[', ']']);
     let port = url.port_or_known_default().ok_or("endpoint has no port")?;
     let resolved = tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((host, port)))
@@ -81,8 +131,8 @@ async fn addresses(url: &reqwest::Url) -> Result<Vec<SocketAddr>, &'static str> 
         .map_err(|_| "endpoint DNS failed")?;
     let mut out = Vec::new();
     for addr in resolved.take(32) {
-        if !public_address(addr.ip()) && !(cfg!(feature = "push-test") && addr.ip().is_loopback()) {
-            return Err("endpoint must resolve only to public Internet addresses");
+        if !address_allowed(host, addr.ip(), allow) && !(cfg!(feature = "push-test") && addr.ip().is_loopback()) {
+            return Err("endpoint must resolve to public addresses or be allowed by the hub operator (HUB_PUSH_ALLOW)");
         }
         out.push(addr);
     }
@@ -155,7 +205,7 @@ pub async fn registration(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiRes
             Ok(s) => s,
             Err(e) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, e),
         };
-        if let Err(e) = addresses(&endpoint_url(&sub.endpoint).expect("validated endpoint")).await {
+        if let Err(e) = addresses(&endpoint_url(&sub.endpoint).expect("validated endpoint"), &hub.cfg.push_allow).await {
             return refuse(StatusCode::UNPROCESSABLE_ENTITY, e);
         }
         Some(sub)
@@ -278,10 +328,10 @@ enum Delivery {
     Retry,
 }
 
-async fn deliver(s: &Subscription) -> Delivery {
+async fn deliver(s: &Subscription, allow: &[Allowed]) -> Delivery {
     let request = async {
         let url = endpoint_url(&s.endpoint).ok()?;
-        let addresses = addresses(&url).await.ok()?;
+        let addresses = addresses(&url, allow).await.ok()?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -360,7 +410,7 @@ pub async fn dispatch_due(hub: &Arc<Hub>) -> anyhow::Result<usize> {
     let count = wakes.len();
     let results = stream::iter(wakes)
         .map(|wake| async move {
-            let result = deliver(&wake.subscription).await;
+            let result = deliver(&wake.subscription, &hub.cfg.push_allow).await;
             finish(hub, &wake, result).await
         })
         .buffer_unordered(CONCURRENCY)
@@ -424,6 +474,15 @@ mod tests {
         }
         for s in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
             assert!(public_address(s.parse().unwrap()));
+        }
+        let allow = parse_allowlist("push.example,100.64.0.0/10,fd00::/8").unwrap();
+        assert!(address_allowed("push.example", "192.168.1.9".parse().unwrap(), &allow));
+        assert!(address_allowed("other.example", "100.64.1.2".parse().unwrap(), &allow));
+        assert!(address_allowed("other.example", "fd00::1".parse().unwrap(), &allow));
+        assert!(!address_allowed("evil.push.example", "192.168.1.9".parse().unwrap(), &allow));
+        assert!(!address_allowed("other.example", "169.254.169.254".parse().unwrap(), &allow));
+        for s in ["https://example.com", "*.example.com", "host:1234", "x@y", "10.0.0.0/99"] {
+            assert!(parse_allowlist(s).is_err(), "{s}");
         }
     }
 }

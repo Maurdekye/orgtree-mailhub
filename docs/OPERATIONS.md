@@ -231,13 +231,15 @@ fails until you do).
 
 Clients opt in using the `unifiedpush` API feature; see
 [v2-additions.md](v2-additions.md#optional-unifiedpush-feature-unifiedpush).
-No operator relay, central server, API key or extra environment variable is
-needed. Allow outbound HTTPS to the chosen distributor. Endpoint and Web Push
+No operator relay, central server or API key is needed. Allow outbound HTTPS to
+the chosen distributor. For private self-hosted endpoints, set `HUB_PUSH_ALLOW`
+to comma-separated exact hosts or CIDRs (empty by default), such as
+`ntfy.example.ts.net,100.64.5.6/32`. Allowed endpoints still require valid HTTPS;
+DNS results are pinned, redirects are refused, and timeouts remain in force. Endpoint and Web Push
 auth values are secrets in PostgreSQL; protect backups as you protect hub data.
 They are absent from API listings and logs.
 
 For an isolated local HTTP test receiver only, compile debug tests with
 `--features push-test`. That feature allows literal HTTP loopback endpoints and
 loopback resolution; release builds explicitly refuse to compile it. Never use
-that debug test binary to host a real hub. Regular builds allow public HTTPS
-only. No proxy environment variable overrides the outbound destination policy.
+that debug test binary to host a real hub. Regular builds allow public HTTPS and explicitly allowed private HTTPS. No proxy environment variable overrides the outbound destination policy.

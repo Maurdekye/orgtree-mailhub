@@ -46,6 +46,8 @@ pub struct Config {
     pub verbose: bool,
     /// import `<data>/hub.sqlite3` on startup when the database is empty
     pub import_sqlite: bool,
+    /// Explicit operator permission for private distributor hosts/networks.
+    pub push_allow: Vec<crate::push::Allowed>,
 }
 
 impl std::fmt::Debug for Config {
@@ -67,6 +69,7 @@ impl std::fmt::Debug for Config {
             .field("pool_size", &self.pool_size)
             .field("verbose", &self.verbose)
             .field("import_sqlite", &self.import_sqlite)
+            .field("push_allow", &self.push_allow)
             .finish()
     }
 }
@@ -156,6 +159,7 @@ impl Config {
             pool_size,
             verbose: flag("HUB_LOG_VERBOSE", false),
             import_sqlite: flag("HUB_IMPORT_SQLITE", true),
+            push_allow: crate::push::parse_allowlist(get("HUB_PUSH_ALLOW").unwrap_or(""))?,
         })
     }
 

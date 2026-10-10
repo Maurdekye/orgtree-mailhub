@@ -658,7 +658,7 @@ new mail does not bypass a pending retry's backoff. HTTP 404/410 deletes the
 subscription. Other failures retain it. Endpoint replacement cannot be erased
 by the old endpoint's late response. No response body is consumed.
 
-Endpoints must be publicly routable HTTPS URLs, without credentials or fragments,
+By default, endpoints must be publicly routable HTTPS URLs, without credentials or fragments,
 at most 1000 bytes. Loopback, LAN, tailnet, link-local and other special IP ranges
 are refused, including through DNS. Every delivery resolves and pins validated
 addresses; redirects and environment proxies are disabled. Connect timeout is
@@ -666,5 +666,10 @@ three seconds; the entire delivery attempt has an eight-second deadline.
 
 A tailnet-only **hub** works if it can reach the distributor's public server.
 The device must still be able to reach its hub when woken (for example, Tailscale
-must stay enabled). A push cannot itself restore that network path. Self-hosted
-distributors need a publicly routable HTTPS endpoint under the policy above.
+must stay enabled). A push cannot itself restore that network path. For a self-hosted distributor on a LAN or tailnet, the operator may set
+`HUB_PUSH_ALLOW` to a comma-separated list of exact hostnames or CIDRs, for example
+`ntfy.example.ts.net,100.64.5.6/32`. These destinations may resolve to private
+addresses. HTTPS with valid TLS, DNS pinning, no redirects and all timeouts still
+apply. Keep entries narrow: an allowed hostname authorizes whichever addresses it
+resolves to, and a CIDR authorizes any endpoint in that range. Restart the hub after
+changing its allowlist. There are no wildcard or suffix host matches.
