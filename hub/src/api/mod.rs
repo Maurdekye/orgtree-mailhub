@@ -49,6 +49,8 @@ pub struct Hub {
     pub door: std::sync::OnceLock<std::net::SocketAddr>,
     /// Bounds resolver work, including OS lookups that outlive our timeout.
     pub push_dns: Arc<tokio::sync::Semaphore>,
+    pub push_delivery_dns: Arc<tokio::sync::Semaphore>,
+    pub push_dns_addresses: Arc<papaya::HashSet<String>>,
 }
 
 pub type Resp = Response<Body>;

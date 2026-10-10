@@ -33,7 +33,7 @@ pub async fn prepare(cfg: Config) -> Result<Arc<Hub>> {
     if removed > 0 {
         tracing::info!(removed, "removed partial uploads left by a previous run");
     }
-    Ok(Arc::new(Hub { cfg, db, presence: Presence::default(), shutdown: CancellationToken::new(), writing: papaya::HashSet::new(), door: std::sync::OnceLock::new(), push_dns: Arc::new(tokio::sync::Semaphore::new(8)) }))
+    Ok(Arc::new(Hub { cfg, db, presence: Presence::default(), shutdown: CancellationToken::new(), writing: papaya::HashSet::new(), door: std::sync::OnceLock::new(), push_dns: Arc::new(tokio::sync::Semaphore::new(8)), push_delivery_dns: Arc::new(tokio::sync::Semaphore::new(4)), push_dns_addresses: Arc::new(papaya::HashSet::new()) }))
 }
 
 /// The relay-only door's listener, when `HUB_PUBLIC` asks for one. Where it

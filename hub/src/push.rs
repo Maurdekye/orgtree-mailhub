@@ -20,6 +20,8 @@ use crate::{auth, clock, db};
 compile_error!("push-test permits local HTTP endpoints and must not be used in a release build");
 
 const CONCURRENCY: usize = 4;
+// Keep below the five-second registration cooldown. An identical registration
+// can pull its lease forward; the per-host busy set also holds through finish.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const WAKE: &[u8] = b"wake";
 
@@ -171,51 +173,73 @@ fn public_address(ip: IpAddr) -> bool {
 
 /// Resolve immediately before connecting and pin the validated results in
 /// the HTTP client. No second DNS lookup, proxies, redirects or local targets.
+#[derive(Clone, Copy)]
+enum ResolveError {
+    Busy,
+    Refused,
+}
+
+struct AddressLookup(Arc<papaya::HashSet<String>>, String);
+
+impl Drop for AddressLookup {
+    fn drop(&mut self) {
+        self.0.pin().remove(&self.1);
+    }
+}
+
 async fn addresses(
     url: &reqwest::Url,
     allow: &[Allowed],
     dns: &Arc<tokio::sync::Semaphore>,
-) -> Result<Vec<SocketAddr>, &'static str> {
-    const REFUSED: &str =
-        "endpoint cannot be reached under this hub's endpoint policy (HUB_PUSH_ALLOW)";
+    registration: Option<(Arc<papaya::HashSet<String>>, String)>,
+) -> Result<Vec<SocketAddr>, ResolveError> {
     let host = url
         .host_str()
-        .ok_or("endpoint has no host")?
+        .ok_or(ResolveError::Refused)?
         .trim_matches(['[', ']']);
-    let port = url.port_or_known_default().ok_or("endpoint has no port")?;
+    let port = url.port_or_known_default().ok_or(ResolveError::Refused)?;
     let resolved: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, port)]
     } else {
+        let address = if let Some((set, slug)) = registration {
+            if !set.pin().insert(slug.clone()) {
+                return Err(ResolveError::Busy);
+            }
+            Some(AddressLookup(set, slug))
+        } else {
+            None
+        };
         let permit = dns
             .clone()
             .try_acquire_owned()
-            .map_err(|_| "push resolver busy; retry later")?;
+            .map_err(|_| ResolveError::Busy)?;
         let name = host.to_string();
         let lookup = tokio::task::spawn_blocking(move || {
             // Dropping the timeout future does not cancel getaddrinfo. Keep
             // its permit inside the blocking task until the OS call returns.
             let _permit = permit;
+            let _address = address;
             (name.as_str(), port)
                 .to_socket_addrs()
                 .map(|v| v.take(32).collect::<Vec<_>>())
         });
         tokio::time::timeout(Duration::from_secs(3), lookup)
             .await
-            .map_err(|_| REFUSED)?
-            .map_err(|_| REFUSED)?
-            .map_err(|_| REFUSED)?
+            .map_err(|_| ResolveError::Refused)?
+            .map_err(|_| ResolveError::Refused)?
+            .map_err(|_| ResolveError::Refused)?
     };
     let mut out = Vec::new();
     for addr in resolved {
         if !address_allowed(host, addr.ip(), allow)
             && !(cfg!(feature = "push-test") && addr.ip().is_loopback())
         {
-            return Err(REFUSED);
+            return Err(ResolveError::Refused);
         }
         out.push(addr);
     }
     if out.is_empty() {
-        return Err(REFUSED);
+        return Err(ResolveError::Refused);
     }
     Ok(out)
 }
@@ -312,15 +336,21 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
             &endpoint_url(&sub.endpoint).expect("validated endpoint"),
             &hub.cfg.push_allow,
             &hub.push_dns,
+            Some((hub.push_dns_addresses.clone(), slug.clone())),
         )
         .await
         {
-            let status = if e == "push resolver busy; retry later" {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::UNPROCESSABLE_ENTITY
+            let (status, message) = match e {
+                ResolveError::Busy => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "push resolver busy; retry later",
+                ),
+                ResolveError::Refused => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "endpoint cannot be reached under this hub's endpoint policy (HUB_PUSH_ALLOW)",
+                ),
             };
-            return refuse(status, e);
+            return refuse(status, message);
         }
         Some(sub)
     };
@@ -464,14 +494,18 @@ enum Delivery {
     Accepted,
     Gone,
     Retry,
+    Deferred,
 }
 
 async fn deliver(s: &Subscription, hub: &Hub) -> Delivery {
     let request = async {
         let url = endpoint_url(&s.endpoint).ok()?;
-        let addresses = addresses(&url, &hub.cfg.push_allow, &hub.push_dns)
-            .await
-            .ok()?;
+        let addresses =
+            match addresses(&url, &hub.cfg.push_allow, &hub.push_delivery_dns, None).await {
+                Ok(addresses) => addresses,
+                Err(ResolveError::Busy) => return Some(Delivery::Deferred),
+                Err(ResolveError::Refused) => return None,
+            };
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -520,6 +554,12 @@ async fn finish(hub: &Hub, wake: &Wake, result: Delivery) -> anyhow::Result<()> 
     let c = hub.db.get().await?;
     let now = clock::now();
     match result {
+        Delivery::Deferred => {
+            let retry_at = now + chrono::Duration::seconds(5);
+            db::execute(&c,
+                "UPDATE device_push SET next_attempt = $4 WHERE slug = $1 AND device_id = $2 AND registration = $3",
+                &[&wake.slug, &wake.device, &wake.registration, &retry_at]).await?;
+        }
         Delivery::Gone => {
             db::execute(
                 &c,

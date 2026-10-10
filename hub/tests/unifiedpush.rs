@@ -129,6 +129,9 @@ async fn unifiedpush() {
     named["endpoint"] = json!("https://resolver-budget.example/wake");
     assert_eq!(register(&hub, &alice_auth, &named).await.code(), 503);
     drop(permits);
+    assert!(hub.push_dns_addresses.pin().insert(alice.clone()));
+    assert_eq!(register(&hub, &alice_auth, &named).await.code(), 503);
+    hub.push_dns_addresses.pin().remove(&alice);
     assert_eq!(register(&hub, "", &registration).await.code(), 401);
     assert_eq!(register(&hub, &bob_auth, &registration).await.code(), 409);
     assert_eq!(
@@ -160,6 +163,33 @@ async fn unifiedpush() {
         assert_eq!(register(&hub, &alice_auth, &body).await.code(), 422);
     }
     println!("ok 1 registration authenticated, device-scoped, idempotent; malformed/private endpoints refused");
+
+    // A saturated worker resolver is local backpressure, not evidence that
+    // this endpoint failed. Preserve its retry count and retry promptly.
+    sql.execute(
+        "UPDATE device_push SET endpoint = 'https://localhost/synthetic', attempts = 3",
+        &[],
+    )
+    .await
+    .unwrap();
+    let delivery_permits = hub.push_delivery_dns.acquire_many(4).await.unwrap();
+    assert_eq!(mailhub::push::dispatch_due(&hub).await.unwrap(), 1);
+    let row = sql
+        .query_one(
+            "SELECT attempts, next_attempt < now() + interval '6 seconds' FROM device_push",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i32>(0), 3);
+    assert!(row.get::<_, bool>(1));
+    drop(delivery_permits);
+    sql.execute(
+        "UPDATE device_push SET endpoint = $1, attempts = 0, next_attempt = now()",
+        &[&endpoint],
+    )
+    .await
+    .unwrap();
 
     for path in ["/api/devices", "/ui/data"] {
         let r = Call::new("GET", path).auth(&alice_auth).send(&hub).await;

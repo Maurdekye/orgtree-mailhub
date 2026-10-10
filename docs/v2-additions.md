@@ -670,8 +670,11 @@ at most 1000 bytes. Loopback, LAN, tailnet, link-local and other special IP rang
 are refused, including through DNS. Every delivery resolves and pins validated
 addresses; redirects and environment proxies are disabled. Connect timeout is
 three seconds; the entire delivery attempt has a four-second deadline. DNS work
-is bounded to eight OS lookups, including timed-out lookups still running in the
-resolver. Registration releases its database connection before DNS and answers
+uses separate budgets of eight registration lookups (one per authenticated
+address) and four delivery lookups, including timed-out lookups still running
+until the OS resolver returns. A busy delivery resolver defers the wake by five
+seconds without increasing the endpoint's failure count. Registration releases
+its database connection before DNS and answers
 503 when resolver capacity is busy. Other DNS failures have one generic response.
 Registration alone does not mark the address online; normal sync does that.
 
