@@ -184,3 +184,25 @@ async fn moved_hash_and_abandoned_blob_cleanup() {
         assert_eq!(count, 0, "{mode} published damaged bytes");
     }
 }
+
+#[tokio::test]
+async fn cleanup_error_does_not_fail_cancel_or_sweep() {
+    let f = Fixture::new().await;
+    let sql = sql_client(&f.url).await;
+    for cancel in [true, false] {
+        let id = f.start(10).await;
+        // A directory gives remove_file a portable error, like an open Windows file.
+        let part = f.data.join("uploads").join(format!("{id}.part"));
+        std::fs::remove_file(&part).unwrap();
+        std::fs::create_dir(&part).unwrap();
+        if cancel {
+            let r = Call::new("DELETE", &format!("/api/uploads/{id}")).auth(&f.auth).send(&f.hub).await;
+            assert_eq!(r.code(), 200, "{}", r.text());
+        } else {
+            sql.execute("UPDATE uploads SET updated_at = now() - interval '25 hours' WHERE id = $1", &[&id]).await.unwrap();
+            mailhub::sweep::run_once(&f.hub).await.unwrap();
+        }
+        assert_eq!(f.status(&id).await.code(), 404);
+        assert!(part.is_dir(), "fixture must actually refuse file removal");
+    }
+}

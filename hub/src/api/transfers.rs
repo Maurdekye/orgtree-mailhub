@@ -364,7 +364,9 @@ pub async fn cancel(hub: &Arc<Hub>, req: &mut Req, id: &str) -> ApiResult {
         return refuse(StatusCode::NOT_FOUND, "no such upload");
     }
     drop(c);
-    remove_upload_bytes(hub, id).await?;
+    if let Err(e) = remove_upload_bytes(hub, id).await {
+        tracing::warn!(upload = id, error = %e, "cancelled upload bytes could not be removed");
+    }
     ok(json!({ "cancelled": true }))
 }
 
@@ -388,7 +390,9 @@ pub async fn sweep(hub: &Hub) -> anyhow::Result<u64> {
             // A writer may have refreshed it since the selection above.
             let n = db::execute(&c, "DELETE FROM uploads WHERE id = $1 AND updated_at < $2", &[&id, &cut]).await?;
             if n > 0 {
-                remove_upload_bytes(hub, &id).await?;
+                if let Err(e) = remove_upload_bytes(hub, &id).await {
+                    tracing::warn!(upload = %id, error = %e, "expired upload bytes could not be removed");
+                }
                 swept += n;
             }
         }
