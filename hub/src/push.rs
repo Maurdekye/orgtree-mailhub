@@ -282,7 +282,7 @@ pub async fn queue(tx: &impl GenericClient, slug: &str) -> Result<(), tokio_post
     db::execute(
         tx,
         "UPDATE device_push SET pending = pending + 1,
-           next_attempt = COALESCE(next_attempt, GREATEST($2, last_sent + interval '5 seconds')),
+           next_attempt = COALESCE(next_attempt, GREATEST($2::timestamptz, last_sent + interval '5 seconds')),
            attempts = CASE WHEN next_attempt IS NULL THEN 0 ELSE attempts END WHERE slug = $1",
         &[&slug, &clock::now()],
     )
@@ -307,7 +307,7 @@ async fn claim(hub: &Hub) -> anyhow::Result<Vec<Wake>> {
         "WITH due AS (SELECT p.slug, p.device_id FROM device_push p
            JOIN devices d USING (slug, device_id) WHERE p.next_attempt <= $1 AND d.revoked_at IS NULL
            ORDER BY p.next_attempt, p.slug, p.device_id LIMIT $2 FOR UPDATE OF p SKIP LOCKED)
-         UPDATE device_push p SET next_attempt = $1 + interval '60 seconds'
+         UPDATE device_push p SET next_attempt = $1::timestamptz + interval '60 seconds'
            FROM due WHERE p.slug = due.slug AND p.device_id = due.device_id
          RETURNING p.slug, p.device_id, p.registration, p.pending, p.attempts, p.endpoint, p.p256dh, p.auth",
         &[&clock::now(), &BATCH],
@@ -393,7 +393,7 @@ async fn finish(hub: &Hub, wake: &Wake, result: Delivery) -> anyhow::Result<()> 
             db::execute(
                 &c,
                 "UPDATE device_push SET last_sent = $5, attempts = 0,
-                   next_attempt = CASE WHEN pending = $4 THEN NULL ELSE $5 + interval '5 seconds' END
+                   next_attempt = CASE WHEN pending = $4 THEN NULL ELSE $5::timestamptz + interval '5 seconds' END
                  WHERE slug = $1 AND device_id = $2 AND registration = $3",
                 &[&wake.slug, &wake.device, &wake.registration, &wake.pending, &now],
             )
