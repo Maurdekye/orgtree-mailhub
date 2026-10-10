@@ -291,6 +291,14 @@ DELETE /api/uploads/{id}    → {"cancelled": true}
   are made durable as they come, at least every 8 MiB), so after a dropped
   connection: `GET` the upload and send from its `offset`. One request writes
   to an upload at a time (409 for a second).
+- A 409 without an `offset` means another writer (or expiry cleanup) holds
+  the upload. Wait briefly, then GET its status before retrying.
+- GET or PATCH can return 410 when upload bytes are missing or damaged.
+  Open a new upload and restart from zero; do not keep retrying the old ID.
+  Finalization damage removes the session, so later GETs return 404.
+- Crash recovery covers a stopped hub process. Linux filesystem directory
+  metadata is not currently fsynced on attachment rename (also true of whole-file
+  uploads); durability across sudden machine power loss remains a known limitation.
 - Complete, the upload is an ordinary attachment with the same id: name it in
   a send's `attachments` (or as `body_part`), download it with
   `GET /api/attachments/{id}` (which already resumes with `Range`).

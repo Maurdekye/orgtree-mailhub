@@ -149,10 +149,7 @@ pub async fn append(hub: &Arc<Hub>, req: &mut Req, id: &str) -> ApiResult {
     let (total, received): (i64, i64) = (row.get(0), row.get(1));
     drop(c);
     if offset != received {
-        return Err(ApiError::Body(
-            StatusCode::CONFLICT,
-            json!({ "detail": format!("this upload is at offset {received}"), "offset": received }),
-        ));
+        return Err(ApiError::Body(StatusCode::CONFLICT, json!({ "detail": format!("this upload is at offset {received}"), "offset": received })));
     }
     let path = partial(hub, id);
     let mut file = match tokio::fs::OpenOptions::new().write(true).open(&path).await {
@@ -218,6 +215,36 @@ async fn confirm(hub: &Hub, id: &str, file: &mut tokio::fs::File, at: i64) -> Ap
     Ok(())
 }
 
+/// Caller holds Writing. Never remove bytes belonging to a committed attachment.
+async fn remove_upload_bytes(hub: &Hub, id: &str) -> anyhow::Result<()> {
+    let c = hub.db.get().await?;
+    let published = db::query_opt(&c, "SELECT 1 FROM attachments WHERE id = $1", &[&id]).await?.is_some();
+    drop(c);
+    let mut paths = vec![partial(hub, id)];
+    if !published {
+        if let Some(blob) = blobs::blob_path(&hub.cfg.blob_dir(), id) {
+            paths.push(blob);
+        }
+    }
+    for path in paths {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Make damage terminal, so later status probes do not hash a broken GiB again.
+/// Keep the row until cleanup succeeds, allowing a transient disk error to retry.
+async fn damaged(hub: &Hub, id: &str, message: &str) -> ApiResult<Value> {
+    remove_upload_bytes(hub, id).await?;
+    let c = hub.db.get().await?;
+    db::execute(&c, "DELETE FROM uploads WHERE id = $1", &[&id]).await?;
+    refuse(StatusCode::GONE, message)
+}
+
 /// Every byte is in: check it against its sha256 (when given), move it among
 /// the attachments, and close the upload.
 async fn finish(hub: &Hub, id: &str) -> ApiResult<Value> {
@@ -232,22 +259,22 @@ async fn finish(hub: &Hub, id: &str) -> ApiResult<Value> {
     // Missing bytes are not evidence that rename succeeded.
     let moved = match tokio::fs::metadata(&from).await {
         Ok(meta) if meta.is_file() && meta.len() == total as u64 => false,
-        Ok(_) => return refuse(StatusCode::GONE, "the upload's bytes are incomplete; start it again"),
+        Ok(_) => return damaged(hub, id, "the upload's bytes are incomplete; start it again").await,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
         Err(e) => return Err(e.into()),
     };
     if moved {
         match tokio::fs::metadata(&to).await {
             Ok(meta) if meta.is_file() && meta.len() == total as u64 => {}
-            Ok(_) => return refuse(StatusCode::GONE, "the upload's bytes are incomplete; start it again"),
+            Ok(_) => return damaged(hub, id, "the upload's bytes are incomplete; start it again").await,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return refuse(StatusCode::GONE, "the upload's bytes are gone; start it again");
+                return damaged(hub, id, "the upload's bytes are gone; start it again").await;
             }
             Err(e) => return Err(e.into()),
         }
         if let Some(want) = &sha {
             if &sha256_file(&to).await? != want {
-                return refuse(StatusCode::GONE, "the upload's bytes do not match its sha256; start it again");
+                return damaged(hub, id, "the upload's bytes do not match its sha256; start it again").await;
             }
         }
     } else {
@@ -305,8 +332,7 @@ pub async fn status(hub: &Arc<Hub>, req: &mut Req, id: &str) -> ApiResult {
         return refuse(StatusCode::NOT_FOUND, "no such upload");
     }
     let c = hub.db.get().await?;
-    if let Some(r) =
-        db::query_opt(&c, "SELECT name, total, received, updated_at FROM uploads WHERE id = $1 AND owner_slug = $2", &[&id, &me]).await?
+    if let Some(r) = db::query_opt(&c, "SELECT name, total, received, updated_at FROM uploads WHERE id = $1 AND owner_slug = $2", &[&id, &me]).await?
     {
         let (name, total, received): (String, i64, i64) = (r.get(0), r.get(1), r.get(2));
         drop(c);
@@ -337,7 +363,8 @@ pub async fn cancel(hub: &Arc<Hub>, req: &mut Req, id: &str) -> ApiResult {
     if n == 0 {
         return refuse(StatusCode::NOT_FOUND, "no such upload");
     }
-    let _ = tokio::fs::remove_file(partial(hub, id)).await;
+    drop(c);
+    remove_upload_bytes(hub, id).await?;
     ok(json!({ "cancelled": true }))
 }
 
@@ -361,7 +388,7 @@ pub async fn sweep(hub: &Hub) -> anyhow::Result<u64> {
             // A writer may have refreshed it since the selection above.
             let n = db::execute(&c, "DELETE FROM uploads WHERE id = $1 AND updated_at < $2", &[&id, &cut]).await?;
             if n > 0 {
-                let _ = tokio::fs::remove_file(partial(hub, &id)).await;
+                remove_upload_bytes(hub, &id).await?;
                 swept += n;
             }
         }

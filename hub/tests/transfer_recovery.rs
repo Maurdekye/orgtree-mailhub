@@ -30,7 +30,15 @@ impl Fixture {
     }
 
     async fn start(&self, bytes: usize) -> String {
-        let r = Call::new("POST", "/api/uploads").auth(&self.auth).json(json!({"bytes": bytes, "name": "proof.bin"})).send(&self.hub).await;
+        self.start_sha(bytes, None).await
+    }
+
+    async fn start_sha(&self, bytes: usize, sha: Option<String>) -> String {
+        let r = Call::new("POST", "/api/uploads")
+            .auth(&self.auth)
+            .json(json!({"bytes": bytes, "name": "proof.bin", "sha256": sha}))
+            .send(&self.hub)
+            .await;
         assert_eq!(r.code(), 200, "{}", r.text());
         r.json()["id"].as_str().unwrap().to_owned()
     }
@@ -101,6 +109,9 @@ async fn missing_finalization_bytes_are_never_published() {
         assert_eq!(r.code(), 410, "{state} reported as completed: {}", r.text());
         let count: i64 = sql.query_one("SELECT count(*) FROM attachments WHERE id = $1", &[&id]).await.unwrap().get(0);
         assert_eq!(count, 0, "a nonexistent blob was published");
+        assert_eq!(f.status(&id).await.code(), 404);
+        assert!(!part.exists());
+        assert!(!f.data.join("blobs").join(&id).exists());
     }
 }
 
@@ -135,4 +146,41 @@ async fn active_writer_survives_expiry_and_cancel_conflicts() {
     assert_eq!(cancel.code(), 200, "{}", cancel.text());
     assert_eq!(f.status(&id).await.code(), 404);
     assert!(!f.data.join("uploads").join(format!("{id}.part")).exists());
+}
+
+#[tokio::test]
+async fn moved_hash_and_abandoned_blob_cleanup() {
+    use sha2::Digest;
+    let f = Fixture::new().await;
+    let sql = sql_client(&f.url).await;
+    let wanted = b"abcdefghij";
+    for mode in ["matching", "mismatch", "cancel", "expire"] {
+        let id = f.start_sha(wanted.len(), Some(hex::encode(sha2::Sha256::digest(wanted)))).await;
+        let part = f.data.join("uploads").join(format!("{id}.part"));
+        let blob = f.data.join("blobs").join(&id);
+        std::fs::write(&part, if mode == "mismatch" { b"0123456789" } else { wanted }).unwrap();
+        std::fs::rename(&part, &blob).unwrap();
+        sql.execute("UPDATE uploads SET received = total WHERE id = $1", &[&id]).await.unwrap();
+        match mode {
+            "matching" => {
+                assert_eq!(f.status(&id).await.json()["complete"], true);
+                assert!(blob.exists());
+                let cancel = Call::new("DELETE", &format!("/api/uploads/{id}")).auth(&f.auth).send(&f.hub).await;
+                assert_eq!(cancel.code(), 404);
+                assert!(blob.exists(), "cancellation removed published bytes");
+                continue;
+            }
+            "mismatch" => assert_eq!(f.status(&id).await.code(), 410),
+            "cancel" => assert_eq!(Call::new("DELETE", &format!("/api/uploads/{id}")).auth(&f.auth).send(&f.hub).await.code(), 200),
+            "expire" => {
+                sql.execute("UPDATE uploads SET updated_at = now() - interval '25 hours' WHERE id = $1", &[&id]).await.unwrap();
+                mailhub::sweep::run_once(&f.hub).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(f.status(&id).await.code(), 404, "{mode}");
+        assert!(!blob.exists(), "{mode} left uncommitted bytes");
+        let count: i64 = sql.query_one("SELECT count(*) FROM attachments WHERE id = $1", &[&id]).await.unwrap().get(0);
+        assert_eq!(count, 0, "{mode} published damaged bytes");
+    }
 }
