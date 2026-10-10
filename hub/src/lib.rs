@@ -27,6 +27,7 @@ pub mod db;
 pub mod import;
 pub mod log;
 pub mod presence;
+pub mod push;
 pub mod server;
 pub mod sweep;
 pub mod wire;

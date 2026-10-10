@@ -111,6 +111,15 @@ listed is meant to be byte-identical or behavior-identical to V1.
    longer in use wakes its parked sync, which then stops being woken for
    presence at once instead of when its park ends.
 
+12. **Optional UnifiedPush (not released)** (2026-10-10, docket
+    `hubchat-optional-unifiedpush-notifications-along`). Device-owned
+    subscriptions and encrypted content-free wakes, directly to an installed
+    distributor's server. The user requires no project-hosted relay and keeps
+    the background connection as default. Coordinator approved storing the
+    RFC8291 p256dh/auth protocol metadata; capabilities stay out of logs and
+    listings and are removed on device/identity removal. See v2-additions.md
+    for the API and endpoint policy. Tests are listed in v2.md; implementation
+    status is recorded on the docket, not implied by this entry.
 ## Known V1 gaps carried across deliberately
 
 The V1 suites assert these as *known gaps/findings* and this import does not

@@ -79,6 +79,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     tracing::info!(bind = %hub.cfg.bind, port = hub.cfg.port, public = hub.cfg.public, "mail hub listening");
     tokio::spawn(sweep::sweep_loop(hub.clone()));
     tokio::spawn(api::sync::presence_loop(hub.clone()));
+    let push_task = tokio::spawn(crate::push::run(hub.clone()));
     {
         let hub = hub.clone();
         tokio::spawn(async move {
@@ -90,16 +91,17 @@ pub async fn serve(cfg: Config) -> Result<()> {
     }
     let stop = hub.shutdown.clone();
     let full = axum::serve(full_listener, full_app(hub.clone())).with_graceful_shutdown(stop.clone().cancelled_owned());
-    match public_listener {
+    let result = match public_listener {
         Some(pl) => {
             let public = axum::serve(pl, public_app(hub.clone())).with_graceful_shutdown(stop.cancelled_owned());
             let (a, b) = tokio::join!(full.into_future(), public.into_future());
-            a?;
-            b?;
+            a.and(b)
         }
-        None => full.await?,
-    }
-    Ok(())
+        None => full.await,
+    };
+    hub.shutdown.cancel();
+    let _ = push_task.await;
+    result.map_err(Into::into)
 }
 
 async fn shutdown_signal() {

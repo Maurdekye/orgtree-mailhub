@@ -194,7 +194,7 @@ pub(super) fn caller<'a>(hub: &'a Hub, req: &Req) -> impl std::future::Future<Ou
 
 /// The one address a v2 call acts for: the `slug` asked for, which the
 /// header must sign in, or else the only address it signs in.
-pub(super) fn one_address(slugs: &[String], asked: Option<&Value>) -> ApiResult<String> {
+pub(crate) fn one_address(slugs: &[String], asked: Option<&Value>) -> ApiResult<String> {
     match asked {
         Some(Value::String(s)) if slugs.contains(s) => Ok(s.clone()),
         Some(Value::Null) | None => {
@@ -642,6 +642,8 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         if let Some(l) = &long {
             l.bind(&tx, &mid, &frm).await?;
         }
+        // Queue only: network delivery happens after commit in the worker.
+        crate::push::queue(&tx, &to).await?;
         // G1: both sides' devices see it (last: this holds the logs' heads)
         sync::log_changes(&tx, vec![(frm.clone(), row.get(0)), (to.clone(), row.get(0))]).await?;
         received

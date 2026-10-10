@@ -226,3 +226,18 @@ fails until you do).
   (`mailhub-verify*`, loopback ports 7391/7392), drives the real wire
   protocol end to end including a restart-persistence pass, and removes
   everything it created.
+
+## UnifiedPush delivery
+
+Clients opt in using the `unifiedpush` API feature; see
+[v2-additions.md](v2-additions.md#optional-unifiedpush-feature-unifiedpush).
+No operator relay, central server, API key or extra environment variable is
+needed. Allow outbound HTTPS to the chosen distributor. Endpoint and Web Push
+auth values are secrets in PostgreSQL; protect backups as you protect hub data.
+They are absent from API listings and logs.
+
+For an isolated local HTTP test receiver only, compile debug tests with
+`--features push-test`. That feature allows literal HTTP loopback endpoints and
+loopback resolution; release builds explicitly refuse to compile it. Never use
+that debug test binary to host a real hub. Regular builds allow public HTTPS
+only. No proxy environment variable overrides the outbound destination policy.

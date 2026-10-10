@@ -622,3 +622,49 @@ the paths it already uses, without a separate call:
 
 The key sits beside `"name"` at the top level of each answer. A v1 hub sends
 no `"version"` anywhere: a client shows its version as unknown.
+
+## Optional UnifiedPush (feature `unifiedpush`)
+
+Android clients can opt in to distributor-delivered wake-ups. The background
+connection remains the default. The hub sends directly to the device's
+registered distributor endpoint; no project-hosted gateway is involved.
+
+`POST /api/push` takes `device_id`, `endpoint`, `p256dh`, `auth` and an optional
+`slug` when several addresses are authenticated. The device must already have
+synced or enrolled and must not be revoked. Authentication follows sync: a shared
+identity credential controls its devices; a device-signed credential controls
+only that device. `p256dh` is an uncompressed P-256 public key (65 bytes) and
+`auth` is a 16-byte secret, both base64url without padding. Identical registration
+is idempotent. A new or replaced registration queues one initial wake, covering
+mail already waiting. The answer is only `{"registered":true}`.
+
+`DELETE /api/push?device_id=...&slug=...` removes the subscription and answers
+`{"registered":false}`, including if it was already absent. Revoking a device
+and unregistering/removing an address also remove the subscription. Capabilities
+never appear in device or operator listings. As with any already-started HTTP
+request, one in-flight wake can arrive after unregistration.
+
+The payload is the fixed bytes `wake`, encrypted using RFC8291 (`aes128gcm`). It
+contains no message content, address, sender, message ID or count. Hubchat fetches
+mail using normal authenticated sync. The hub uses `TTL: 86400` and a constant
+collapse topic. No VAPID key is advertised; distributors requiring VAPID cannot
+be used by this implementation.
+
+New received mail queues a wake in its commit transaction. Outbound requests run
+separately, with four requests at most in flight and one coalesced pending wake
+per subscription. There is a five-second cooldown after successful delivery.
+Retries back off from ten seconds to at most one per hour and survive restarts;
+new mail does not bypass a pending retry's backoff. HTTP 404/410 deletes the
+subscription. Other failures retain it. Endpoint replacement cannot be erased
+by the old endpoint's late response. No response body is consumed.
+
+Endpoints must be publicly routable HTTPS URLs, without credentials or fragments,
+at most 1000 bytes. Loopback, LAN, tailnet, link-local and other special IP ranges
+are refused, including through DNS. Every delivery resolves and pins validated
+addresses; redirects and environment proxies are disabled. Connect timeout is
+three seconds; the entire delivery attempt has an eight-second deadline.
+
+A tailnet-only **hub** works if it can reach the distributor's public server.
+The device must still be able to reach its hub when woken (for example, Tailscale
+must stay enabled). A push cannot itself restore that network path. Self-hosted
+distributors need a publicly routable HTTPS endpoint under the policy above.

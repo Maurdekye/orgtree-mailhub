@@ -219,6 +219,8 @@ enum Route {
     Sync,
     Devices,
     Active,
+    PushSet,
+    PushDelete,
     Enrol,
     SignOut,
     IdentityGet,
@@ -257,6 +259,11 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         })
     };
     match path {
+        "/api/push" => return Some(match *method {
+            Method::POST => Ok(PushSet),
+            Method::DELETE => Ok(PushDelete),
+            _ => Err("POST, DELETE"),
+        }),
         "/api/devices" => return get_or_post(Devices, Enrol),
         "/api/identity" => return get_or_post(IdentityGet, IdentitySet),
         _ => {}
@@ -440,6 +447,8 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Poll => mail::poll(hub, req).await,
         Route::Ack => mail::ack(hub, req).await,
         Route::Send => mail::send(hub, req).await,
+        Route::PushSet => crate::push::registration(hub, req, false).await,
+        Route::PushDelete => crate::push::registration(hub, req, true).await,
         Route::Receipts => mail::receipts(hub, req).await,
         Route::Roster => mail::roster_route(hub, req).await,
         Route::Profile => mail::profile(hub, req).await,
