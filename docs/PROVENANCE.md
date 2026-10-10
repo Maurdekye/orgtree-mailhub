@@ -120,6 +120,7 @@ listed is meant to be byte-identical or behavior-identical to V1.
     listings and are removed on device/identity removal. See v2-additions.md
     for the API and endpoint policy. Tests are listed in v2.md; implementation
     status is recorded on the docket, not implied by this entry.
+
 ## Known V1 gaps carried across deliberately
 
 The V1 suites assert these as *known gaps/findings* and this import does not

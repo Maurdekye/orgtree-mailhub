@@ -1,7 +1,7 @@
 //! Optional UnifiedPush: secret subscriptions, durable coalesced wakes and
 //! bounded outbound delivery. Nothing in the payload identifies any mail.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +10,7 @@ use deadpool_postgres::GenericClient;
 use futures::{stream, StreamExt};
 use http::StatusCode;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use web_push_native::{p256::PublicKey, Auth, WebPushBuilder};
 
 use crate::api::{ok, refuse, ApiResult, Hub, Req};
@@ -18,9 +19,8 @@ use crate::{auth, clock, db};
 #[cfg(all(feature = "push-test", not(debug_assertions)))]
 compile_error!("push-test permits local HTTP endpoints and must not be used in a release build");
 
-const BATCH: i64 = 16;
 const CONCURRENCY: usize = 4;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const WAKE: &[u8] = b"wake";
 
 /// Explicit operator opt-in. Hosts match exactly, never by suffix or wildcard.
@@ -47,12 +47,18 @@ pub fn parse_allowlist(value: &str) -> anyhow::Result<Vec<Allowed>> {
             {
                 anyhow::bail!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs");
             }
-            let url = reqwest::Url::parse(&format!("https://{entry}/")).map_err(|_| anyhow::anyhow!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs"))?;
+            let url = reqwest::Url::parse(&format!("https://{entry}/")).map_err(|_| {
+                anyhow::anyhow!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs")
+            })?;
             if url.port().is_some() || url.host_str().is_none() {
                 anyhow::bail!("HUB_PUSH_ALLOW entries must be bare hosts or CIDRs");
             }
             out.push(Allowed::Host(
-                url.host_str().unwrap().trim_matches(['[', ']']).trim_end_matches('.').to_string(),
+                url.host_str()
+                    .unwrap()
+                    .trim_matches(['[', ']'])
+                    .trim_end_matches('.')
+                    .to_string(),
             ));
         }
     }
@@ -66,7 +72,9 @@ fn address_allowed(host: &str, ip: IpAddr, allow: &[Allowed]) -> bool {
             Allowed::Network(net) => {
                 net.contains(&ip)
                     || match ip {
-                        IpAddr::V6(ip) => ip.to_ipv4_mapped().is_some_and(|ip| net.contains(&IpAddr::V4(ip))),
+                        IpAddr::V6(ip) => ip
+                            .to_ipv4_mapped()
+                            .is_some_and(|ip| net.contains(&IpAddr::V4(ip))),
                         _ => false,
                     }
             }
@@ -107,12 +115,24 @@ impl<T: tokio_postgres::types::ToSql> tokio_postgres::types::ToSql for SecretPar
 }
 
 fn endpoint_url(endpoint: &str) -> Result<reqwest::Url, &'static str> {
-    if endpoint.len() > 1000 || endpoint.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace()) {
+    if endpoint.len() > 1000
+        || endpoint
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
         return Err("endpoint must be an HTTPS URL of at most 1000 bytes");
     }
     let url = reqwest::Url::parse(endpoint).map_err(|_| "endpoint must be an HTTPS URL")?;
-    let test_http = cfg!(feature = "push-test") && url.scheme() == "http" && url.host_str().is_some_and(|h| matches!(h, "127.0.0.1" | "[::1]"));
-    if (url.scheme() != "https" && !test_http) || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.fragment().is_some()
+    let test_http = cfg!(feature = "push-test")
+        && url.scheme() == "http"
+        && url
+            .host_str()
+            .is_some_and(|h| matches!(h, "127.0.0.1" | "[::1]"));
+    if (url.scheme() != "https" && !test_http)
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
     {
         return Err("endpoint must be HTTPS without user information or a fragment");
     }
@@ -141,35 +161,70 @@ fn public_address(ip: IpAddr) -> bool {
                 return public_address(IpAddr::V4(v4));
             }
             let s = ip.segments();
-            (s[0] & 0xe000) == 0x2000 && s[0] != 0x2002 && !(s[0] == 0x2001 && (s[1] < 0x0200 || s[1] == 0x0db8)) && !(s[0] == 0x3fff && s[1] < 0x1000)
+            (s[0] & 0xe000) == 0x2000
+                && s[0] != 0x2002
+                && !(s[0] == 0x2001 && (s[1] < 0x0200 || s[1] == 0x0db8))
+                && !(s[0] == 0x3fff && s[1] < 0x1000)
         }
     }
 }
 
 /// Resolve immediately before connecting and pin the validated results in
 /// the HTTP client. No second DNS lookup, proxies, redirects or local targets.
-async fn addresses(url: &reqwest::Url, allow: &[Allowed]) -> Result<Vec<SocketAddr>, &'static str> {
-    let host = url.host_str().ok_or("endpoint has no host")?.trim_matches(['[', ']']);
+async fn addresses(
+    url: &reqwest::Url,
+    allow: &[Allowed],
+    dns: &Arc<tokio::sync::Semaphore>,
+) -> Result<Vec<SocketAddr>, &'static str> {
+    const REFUSED: &str =
+        "endpoint cannot be reached under this hub's endpoint policy (HUB_PUSH_ALLOW)";
+    let host = url
+        .host_str()
+        .ok_or("endpoint has no host")?
+        .trim_matches(['[', ']']);
     let port = url.port_or_known_default().ok_or("endpoint has no port")?;
-    let resolved = tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((host, port)))
-        .await
-        .map_err(|_| "endpoint DNS timed out")?
-        .map_err(|_| "endpoint DNS failed")?;
+    let resolved: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        let permit = dns
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "push resolver busy; retry later")?;
+        let name = host.to_string();
+        let lookup = tokio::task::spawn_blocking(move || {
+            // Dropping the timeout future does not cancel getaddrinfo. Keep
+            // its permit inside the blocking task until the OS call returns.
+            let _permit = permit;
+            (name.as_str(), port)
+                .to_socket_addrs()
+                .map(|v| v.take(32).collect::<Vec<_>>())
+        });
+        tokio::time::timeout(Duration::from_secs(3), lookup)
+            .await
+            .map_err(|_| REFUSED)?
+            .map_err(|_| REFUSED)?
+            .map_err(|_| REFUSED)?
+    };
     let mut out = Vec::new();
-    for addr in resolved.take(32) {
-        if !address_allowed(host, addr.ip(), allow) && !(cfg!(feature = "push-test") && addr.ip().is_loopback()) {
-            return Err("endpoint must resolve to public addresses or be allowed by the hub operator (HUB_PUSH_ALLOW)");
+    for addr in resolved {
+        if !address_allowed(host, addr.ip(), allow)
+            && !(cfg!(feature = "push-test") && addr.ip().is_loopback())
+        {
+            return Err(REFUSED);
         }
         out.push(addr);
     }
     if out.is_empty() {
-        return Err("endpoint DNS returned no address");
+        return Err(REFUSED);
     }
     Ok(out)
 }
 
 fn subscription(body: &serde_json::Map<String, Value>) -> Result<Subscription, &'static str> {
-    let endpoint = body.get("endpoint").and_then(Value::as_str).ok_or("endpoint is required")?;
+    let endpoint = body
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .ok_or("endpoint is required")?;
     endpoint_url(endpoint)?;
     let key = body
         .get("p256dh")
@@ -199,14 +254,22 @@ fn subscription(body: &serde_json::Map<String, Value>) -> Result<Subscription, &
 pub async fn registration(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiResult {
     // A PostgreSQL constraint error can include the failing row. Do not let
     // it reach the generic request logger with capability-bearing columns.
-    registration_inner(hub, req, remove).await.map_err(|e| match e {
-        crate::api::ApiError::Internal(_) => crate::api::ApiError::Internal(anyhow::anyhow!("push registration storage failed")),
-        other => other,
-    })
+    registration_inner(hub, req, remove)
+        .await
+        .map_err(|e| match e {
+            crate::api::ApiError::Internal(_) => {
+                crate::api::ApiError::Internal(anyhow::anyhow!("push registration storage failed"))
+            }
+            other => other,
+        })
 }
 
 async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiResult {
-    let body = if remove { serde_json::Map::new() } else { req.json_object_strict().await? };
+    let body = if remove {
+        serde_json::Map::new()
+    } else {
+        req.json_object_strict().await?
+    };
     let asked = if remove {
         req.query("slug").map(|s| json!(s))
     } else {
@@ -217,7 +280,11 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
     } else {
         body.get("device_id").and_then(Value::as_str)
     }
-    .filter(|s| !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| (0x21..=0x7e).contains(&b)))
+    .filter(|s| {
+        !s.is_empty()
+            && s.len() <= crate::api::sync::DEVICE_ID_MAX
+            && s.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    })
     .ok_or_else(|| {
         crate::api::ApiError::Http(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -226,13 +293,14 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
     })?
     .to_string();
     let pairs = auth::pairs(req.auth_header());
-    let mut c = hub.db.get().await?;
+    let c = hub.db.get().await?;
     let callers = auth::authenticate_callers(&c, &pairs).await?;
     if callers.is_empty() {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
     let slugs: Vec<String> = callers.iter().map(|c| c.slug.clone()).collect();
     let slug = crate::api::mail::one_address(&slugs, asked.as_ref())?;
+    drop(c); // DNS must never monopolize a database connection.
     let sub = if remove {
         None
     } else {
@@ -240,29 +308,52 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
             Ok(s) => s,
             Err(e) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, e),
         };
-        if let Err(e) = addresses(&endpoint_url(&sub.endpoint).expect("validated endpoint"), &hub.cfg.push_allow).await {
-            return refuse(StatusCode::UNPROCESSABLE_ENTITY, e);
+        if let Err(e) = addresses(
+            &endpoint_url(&sub.endpoint).expect("validated endpoint"),
+            &hub.cfg.push_allow,
+            &hub.push_dns,
+        )
+        .await
+        {
+            let status = if e == "push resolver busy; retry later" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            return refuse(status, e);
         }
         Some(sub)
     };
     // Same identity row lock as key rotation/enrolment: credentials cannot
     // be revoked between the final authorization and this write.
+    let mut c = hub.db.get().await?;
     let tx = c.transaction().await?;
-    if db::query_opt(&tx, "SELECT slug FROM identities WHERE slug = $1 FOR UPDATE", &[&slug])
-        .await?
-        .is_none()
+    if db::query_opt(
+        &tx,
+        "SELECT slug FROM identities WHERE slug = $1 FOR UPDATE",
+        &[&slug],
+    )
+    .await?
+    .is_none()
     {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
     let callers = auth::authenticate_callers(&tx, &pairs).await?;
-    if !callers
-        .iter()
-        .any(|c| c.slug == slug && (c.device.is_none() || c.device.as_deref() == Some(device.as_str())))
-    {
-        return refuse(StatusCode::UNAUTHORIZED, "credentials must authorize this device");
+    if !callers.iter().any(|c| {
+        c.slug == slug && (c.device.is_none() || c.device.as_deref() == Some(device.as_str()))
+    }) {
+        return refuse(
+            StatusCode::UNAUTHORIZED,
+            "credentials must authorize this device",
+        );
     }
     if remove {
-        db::execute(&tx, "DELETE FROM device_push WHERE slug = $1 AND device_id = $2", &[&slug, &device]).await?;
+        db::execute(
+            &tx,
+            "DELETE FROM device_push WHERE slug = $1 AND device_id = $2",
+            &[&slug, &device],
+        )
+        .await?;
     } else if let Some(s) = sub {
         if db::query_opt(
             &tx,
@@ -279,13 +370,18 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
         }
         db::execute(
             &tx,
-            "INSERT INTO device_push (slug, device_id, registration, endpoint, p256dh, auth, next_attempt)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (slug, device_id) DO UPDATE SET registration = EXCLUDED.registration,
+            "INSERT INTO device_push (slug, device_id, registration, endpoint, p256dh, auth, next_attempt, destination)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (slug, device_id) DO UPDATE SET
+               registration = CASE WHEN (device_push.endpoint, device_push.p256dh, device_push.auth)
+                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth)
+                 THEN EXCLUDED.registration ELSE device_push.registration END,
+               next_attempt = CASE WHEN device_push.next_attempt IS NOT NULL OR
+                 (device_push.endpoint, device_push.p256dh, device_push.auth)
+                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth)
+                 THEN GREATEST(EXCLUDED.next_attempt, device_push.last_attempt + interval '5 seconds') ELSE NULL END,
                endpoint = EXCLUDED.endpoint, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
-               pending = 1, next_attempt = EXCLUDED.next_attempt, attempts = 0, last_sent = NULL
-             WHERE (device_push.endpoint, device_push.p256dh, device_push.auth)
-                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth)",
+               destination = EXCLUDED.destination, attempts = 0",
             &[
                 &slug,
                 &device,
@@ -294,6 +390,7 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
                 &SecretParam(&s.p256dh),
                 &SecretParam(&s.auth),
                 &clock::now(),
+                &hex::encode(Sha256::digest(endpoint_url(&s.endpoint).expect("validated endpoint").host_str().unwrap().trim_end_matches('.').as_bytes())),
             ],
         )
         .await?;
@@ -322,21 +419,26 @@ struct Wake {
     registration: String,
     pending: i64,
     attempts: i32,
+    destination: String,
     subscription: Subscription,
 }
 
 /// Lease a small batch, then release the DB connection before any HTTP.
-async fn claim(hub: &Hub) -> anyhow::Result<Vec<Wake>> {
+async fn claim(hub: &Hub, slots: usize, busy: &[String]) -> anyhow::Result<Vec<Wake>> {
     let c = hub.db.get().await?;
     let rows = db::query(
         &c,
-        "WITH due AS (SELECT p.slug, p.device_id FROM device_push p
-           JOIN devices d USING (slug, device_id) WHERE p.next_attempt <= $1 AND d.revoked_at IS NULL
-           ORDER BY p.next_attempt, p.slug, p.device_id LIMIT $2 FOR UPDATE OF p SKIP LOCKED)
-         UPDATE device_push p SET next_attempt = $1::timestamptz + interval '60 seconds'
+        "WITH candidates AS (SELECT DISTINCT ON (p.destination) p.slug, p.device_id, p.next_attempt
+           FROM device_push p JOIN devices d USING (slug, device_id)
+           WHERE p.next_attempt <= $1 AND d.revoked_at IS NULL
+             AND (d.active_until IS NULL OR d.active_until <= $1) AND NOT (p.destination = ANY($3))
+           ORDER BY p.destination, p.next_attempt, p.slug, p.device_id),
+         due AS (SELECT p.slug, p.device_id FROM device_push p JOIN candidates c USING (slug, device_id)
+           ORDER BY c.next_attempt, p.slug, p.device_id LIMIT $2 FOR UPDATE OF p SKIP LOCKED)
+         UPDATE device_push p SET next_attempt = $1::timestamptz + interval '60 seconds', last_attempt = $1
            FROM due WHERE p.slug = due.slug AND p.device_id = due.device_id
-         RETURNING p.slug, p.device_id, p.registration, p.pending, p.attempts, p.endpoint, p.p256dh, p.auth",
-        &[&clock::now(), &BATCH],
+         RETURNING p.slug, p.device_id, p.registration, p.pending, p.attempts, p.endpoint, p.p256dh, p.auth, p.destination",
+        &[&clock::now(), &(slots as i64), &busy],
     )
     .await?;
     Ok(rows
@@ -347,6 +449,7 @@ async fn claim(hub: &Hub) -> anyhow::Result<Vec<Wake>> {
             registration: r.get(2),
             pending: r.get(3),
             attempts: r.get(4),
+            destination: r.get(8),
             subscription: Subscription {
                 endpoint: r.get(5),
                 p256dh: r.get(6),
@@ -363,10 +466,12 @@ enum Delivery {
     Retry,
 }
 
-async fn deliver(s: &Subscription, allow: &[Allowed]) -> Delivery {
+async fn deliver(s: &Subscription, hub: &Hub) -> Delivery {
     let request = async {
         let url = endpoint_url(&s.endpoint).ok()?;
-        let addresses = addresses(&url, allow).await.ok()?;
+        let addresses = addresses(&url, &hub.cfg.push_allow, &hub.push_dns)
+            .await
+            .ok()?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -379,10 +484,14 @@ async fn deliver(s: &Subscription, allow: &[Allowed]) -> Delivery {
         if s.auth.len() != 16 {
             return None;
         }
-        let encrypted = WebPushBuilder::new(s.endpoint.parse().ok()?, public, Auth::clone_from_slice(&s.auth))
-            .with_valid_duration(Duration::from_secs(86400))
-            .build(WAKE)
-            .ok()?;
+        let encrypted = WebPushBuilder::new(
+            s.endpoint.parse().ok()?,
+            public,
+            Auth::clone_from_slice(&s.auth),
+        )
+        .with_valid_duration(Duration::from_secs(86400))
+        .build(WAKE)
+        .ok()?;
         let (parts, body) = encrypted.into_parts();
         // No hub credentials, identifying headers or message content.
         let response = client
@@ -400,7 +509,11 @@ async fn deliver(s: &Subscription, allow: &[Allowed]) -> Delivery {
             _ => Delivery::Retry,
         })
     };
-    tokio::time::timeout(REQUEST_TIMEOUT, request).await.ok().flatten().unwrap_or(Delivery::Retry)
+    tokio::time::timeout(REQUEST_TIMEOUT, request)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(Delivery::Retry)
 }
 
 async fn finish(hub: &Hub, wake: &Wake, result: Delivery) -> anyhow::Result<()> {
@@ -441,11 +554,11 @@ async fn finish(hub: &Hub, wake: &Wake, result: Delivery) -> anyhow::Result<()> 
 
 /// One bounded iteration, also used by the isolated integration proof.
 pub async fn dispatch_due(hub: &Arc<Hub>) -> anyhow::Result<usize> {
-    let wakes = claim(hub).await?;
+    let wakes = claim(hub, CONCURRENCY, &[]).await?;
     let count = wakes.len();
     let results = stream::iter(wakes)
         .map(|wake| async move {
-            let result = deliver(&wake.subscription, &hub.cfg.push_allow).await;
+            let result = deliver(&wake.subscription, hub).await;
             finish(hub, &wake, result).await
         })
         .buffer_unordered(CONCURRENCY)
@@ -458,16 +571,48 @@ pub async fn dispatch_due(hub: &Arc<Hub>) -> anyhow::Result<usize> {
 }
 
 pub async fn run(hub: Arc<Hub>) {
+    // Tasks keep making progress even while another claim waits for the DB.
+    // Dropping the JoinSet aborts all outstanding requests on shutdown.
+    let mut pending = tokio::task::JoinSet::new();
+    let mut busy = std::collections::HashMap::new();
     loop {
-        tokio::select! {
-            _ = hub.shutdown.cancelled() => break,
-            result = dispatch_due(&hub) => if result.is_err() {
-                // DB/HTTP errors are not formatted: some contain capabilities.
-                tracing::warn!("UnifiedPush dispatch failed; durable wakes will retry");
-            },
+        if hub.shutdown.is_cancelled() {
+            break;
+        }
+        if pending.len() < CONCURRENCY {
+            let destinations: Vec<String> = busy.values().cloned().collect();
+            let claimed = tokio::select! {
+                _ = hub.shutdown.cancelled() => break,
+                result = claim(&hub, CONCURRENCY - pending.len(), &destinations) => result,
+            };
+            match claimed {
+                Ok(wakes) => {
+                    for wake in wakes {
+                        let destination = wake.destination.clone();
+                        let hub = hub.clone();
+                        let task = pending.spawn(async move {
+                            let result = deliver(&wake.subscription, &hub).await;
+                            finish(&hub, &wake, result).await
+                        });
+                        busy.insert(task.id(), destination);
+                    }
+                }
+                Err(_) => tracing::warn!("UnifiedPush claim failed; durable wakes will retry"),
+            }
         }
         tokio::select! {
             _ = hub.shutdown.cancelled() => break,
+            Some(completed) = pending.join_next_with_id(), if !pending.is_empty() => {
+                let (id, failed) = match completed {
+                    Ok((id, result)) => (id, result.is_err()),
+                    Err(error) => (error.id(), true),
+                };
+                busy.remove(&id);
+                if failed {
+                    // Never format DB/HTTP errors: some contain capabilities.
+                    tracing::warn!("UnifiedPush completion failed; durable wakes will retry");
+                }
+            },
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
         }
     }
@@ -526,12 +671,38 @@ mod tests {
             assert!(public_address(s.parse().unwrap()));
         }
         let allow = parse_allowlist("push.example,100.64.0.0/10,fd00::/8").unwrap();
-        assert!(address_allowed("push.example", "192.168.1.9".parse().unwrap(), &allow));
-        assert!(address_allowed("other.example", "100.64.1.2".parse().unwrap(), &allow));
-        assert!(address_allowed("other.example", "fd00::1".parse().unwrap(), &allow));
-        assert!(!address_allowed("evil.push.example", "192.168.1.9".parse().unwrap(), &allow));
-        assert!(!address_allowed("other.example", "169.254.169.254".parse().unwrap(), &allow));
-        for s in ["https://example.com", "*.example.com", "host:1234", "x@y", "10.0.0.0/99"] {
+        assert!(address_allowed(
+            "push.example",
+            "192.168.1.9".parse().unwrap(),
+            &allow
+        ));
+        assert!(address_allowed(
+            "other.example",
+            "100.64.1.2".parse().unwrap(),
+            &allow
+        ));
+        assert!(address_allowed(
+            "other.example",
+            "fd00::1".parse().unwrap(),
+            &allow
+        ));
+        assert!(!address_allowed(
+            "evil.push.example",
+            "192.168.1.9".parse().unwrap(),
+            &allow
+        ));
+        assert!(!address_allowed(
+            "other.example",
+            "169.254.169.254".parse().unwrap(),
+            &allow
+        ));
+        for s in [
+            "https://example.com",
+            "*.example.com",
+            "host:1234",
+            "x@y",
+            "10.0.0.0/99",
+        ] {
             assert!(parse_allowlist(s).is_err(), "{s}");
         }
     }

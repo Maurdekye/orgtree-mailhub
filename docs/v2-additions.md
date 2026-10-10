@@ -635,7 +635,8 @@ synced or enrolled and must not be revoked. Authentication follows sync: a share
 identity credential controls its devices; a device-signed credential controls
 only that device. `p256dh` is an uncompressed P-256 public key (65 bytes) and
 `auth` is a 16-byte secret, both base64url without padding. Identical registration
-is idempotent. A new or replaced registration queues one initial wake, covering
+is idempotent; if a wake is waiting to retry it resets the failure backoff while
+respecting the five-second attempt cooldown. A new or replaced registration queues one initial wake, covering
 mail already waiting. The answer is only `{"registered":true}`.
 
 `DELETE /api/push?device_id=...&slug=...` removes the subscription and answers
@@ -651,8 +652,14 @@ collapse topic. No VAPID key is advertised; distributors requiring VAPID cannot
 be used by this implementation.
 
 New received mail queues a wake in its commit transaction. Outbound requests run
-separately, with four requests at most in flight and one coalesced pending wake
-per subscription. There is a five-second cooldown after successful delivery.
+separately, with four requests at most in flight, one per canonical destination
+host, and one coalesced pending wake per subscription. A completed request frees
+its slot immediately; another host's slow request does not hold up a batch.
+There is a five-second cooldown after successful delivery and endpoint changes
+cannot bypass the five-second minimum since the last attempt.
+Devices with a running `active_until` lease receive no push: their live sync
+already receives mail. A pending wake becomes eligible when they report inactive
+or the lease expires (at most 90 seconds if the app crashes).
 Retries back off from ten seconds to at most one per hour and survive restarts;
 new mail does not bypass a pending retry's backoff. HTTP 404/410 deletes the
 subscription. Other failures retain it. Endpoint replacement cannot be erased
@@ -662,14 +669,26 @@ By default, endpoints must be publicly routable HTTPS URLs, without credentials 
 at most 1000 bytes. Loopback, LAN, tailnet, link-local and other special IP ranges
 are refused, including through DNS. Every delivery resolves and pins validated
 addresses; redirects and environment proxies are disabled. Connect timeout is
-three seconds; the entire delivery attempt has an eight-second deadline.
+three seconds; the entire delivery attempt has a four-second deadline. DNS work
+is bounded to eight OS lookups, including timed-out lookups still running in the
+resolver. Registration releases its database connection before DNS and answers
+503 when resolver capacity is busy. Other DNS failures have one generic response.
+Registration alone does not mark the address online; normal sync does that.
 
 A tailnet-only **hub** works if it can reach the distributor's public server.
 The device must still be able to reach its hub when woken (for example, Tailscale
-must stay enabled). A push cannot itself restore that network path. For a self-hosted distributor on a LAN or tailnet, the operator may set
+must stay enabled). A push cannot itself restore that network path. For a
+self-hosted distributor on a LAN or tailnet, the operator may set
 `HUB_PUSH_ALLOW` to a comma-separated list of exact hostnames or CIDRs, for example
 `ntfy.example.ts.net,100.64.5.6/32`. These destinations may resolve to private
 addresses. HTTPS with valid TLS, DNS pinning, no redirects and all timeouts still
 apply. Keep entries narrow: an allowed hostname authorizes whichever addresses it
 resolves to, and a CIDR authorizes any endpoint in that range. Restart the hub after
 changing its allowlist. There are no wildcard or suffix host matches.
+
+TLS uses bundled Mozilla roots, not the OS trust store; a private-CA certificate
+is not accepted. NAT64 translation prefixes are refused unless explicitly
+allowlisted. Globally routed IPv6 addresses can belong to a home LAN too; HTTPS
+certificate verification still applies, but the hub can attempt a TCP connection
+to those public addresses. Allowlists may authorize loopback or link-local
+addresses, so use only narrowly scoped entries you trust.

@@ -47,6 +47,8 @@ pub struct Hub {
     /// does: the bound socket, so a host name or port 0 in the settings
     /// shows as what it became
     pub door: std::sync::OnceLock<std::net::SocketAddr>,
+    /// Bounds resolver work, including OS lookups that outlive our timeout.
+    pub push_dns: Arc<tokio::sync::Semaphore>,
 }
 
 pub type Resp = Response<Body>;

@@ -238,7 +238,7 @@ pub async fn sign_out(hub: &Arc<Hub>, req: &mut Req, device: &str) -> ApiResult 
     let Some(identity) = identity else {
         // no device keys in use: the device leaves the list, nothing to rotate
         db::execute(&tx, "DELETE FROM device_push WHERE slug = $1 AND device_id = $2", &[&slug, &device]).await?;
-    db::execute(&tx, "UPDATE devices SET revoked_at = $3 WHERE slug = $1 AND device_id = $2", &[&slug, &device, &now]).await?;
+        db::execute(&tx, "UPDATE devices SET revoked_at = $3 WHERE slug = $1 AND device_id = $2", &[&slug, &device, &now]).await?;
         tx.commit().await?;
         hub.presence.wake_sync([slug.as_str()]);
         return ok(json!({ "signed_out": device, "rotated": false, "key_version": version }));
