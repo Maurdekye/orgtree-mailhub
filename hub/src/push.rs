@@ -171,6 +171,15 @@ fn subscription(body: &serde_json::Map<String, Value>) -> Result<Subscription, &
 /// retain their existing authority; device credentials act only for self.
 /// No body, endpoint, secret or result is instrumented here.
 pub async fn registration(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiResult {
+    // A PostgreSQL constraint error can include the failing row. Do not let
+    // it reach the generic request logger with capability-bearing columns.
+    registration_inner(hub, req, remove).await.map_err(|e| match e {
+        crate::api::ApiError::Internal(_) => crate::api::ApiError::Internal(anyhow::anyhow!("push registration storage failed")),
+        other => other,
+    })
+}
+
+async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiResult {
     let body = if remove { serde_json::Map::new() } else { req.json_object_strict().await? };
     let asked = if remove {
         req.query("slug").map(|s| json!(s))
