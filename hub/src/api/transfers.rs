@@ -227,13 +227,36 @@ async fn finish(hub: &Hub, id: &str) -> ApiResult<Value> {
     let from = partial(hub, id);
     let dir = hub.cfg.blob_dir();
     let Some(to) = blobs::blob_path(&dir, id) else { return refuse(StatusCode::NOT_FOUND, "no such upload") };
-    // a hub stopped between the move and the row finds the file moved
-    if tokio::fs::metadata(&from).await.is_ok() {
+    drop(c);
+    // A stop between rename and commit leaves the blob, not the partial.
+    // Missing bytes are not evidence that rename succeeded.
+    let moved = match tokio::fs::metadata(&from).await {
+        Ok(meta) if meta.is_file() && meta.len() == total as u64 => false,
+        Ok(_) => return refuse(StatusCode::GONE, "the upload's bytes are incomplete; start it again"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => return Err(e.into()),
+    };
+    if moved {
+        match tokio::fs::metadata(&to).await {
+            Ok(meta) if meta.is_file() && meta.len() == total as u64 => {}
+            Ok(_) => return refuse(StatusCode::GONE, "the upload's bytes are incomplete; start it again"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return refuse(StatusCode::GONE, "the upload's bytes are gone; start it again");
+            }
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(want) = &sha {
+            if &sha256_file(&to).await? != want {
+                return refuse(StatusCode::GONE, "the upload's bytes do not match its sha256; start it again");
+            }
+        }
+    } else {
         if let Some(want) = &sha {
             let got = sha256_file(&from).await?;
             if &got != want {
                 // the client starts it over from nothing
                 tokio::fs::OpenOptions::new().write(true).open(&from).await?.set_len(0).await?;
+                let c = hub.db.get().await?;
                 db::execute(&c, "UPDATE uploads SET received = 0, updated_at = $2 WHERE id = $1", &[&id, &clock::now()]).await?;
                 return Err(ApiError::Body(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -244,7 +267,7 @@ async fn finish(hub: &Hub, id: &str) -> ApiResult<Value> {
         tokio::fs::create_dir_all(&dir).await?;
         tokio::fs::rename(&from, &to).await?;
     }
-    let mut c = c;
+    let mut c = hub.db.get().await?;
     let tx = c.transaction().await?;
     db::execute(
         &tx,
@@ -322,16 +345,29 @@ pub async fn cancel(hub: &Arc<Hub>, req: &mut Req, id: &str) -> ApiResult {
 pub async fn sweep(hub: &Hub) -> anyhow::Result<u64> {
     let c = hub.db.get().await?;
     let cut = clock::now() - chrono::Duration::hours(UPLOAD_IDLE_HOURS);
-    let rows = db::query(&c, "DELETE FROM uploads WHERE updated_at < $1 RETURNING id", &[&cut]).await?;
-    for r in &rows {
-        // one being written right now is the writer's to finish
-        let id: String = r.get(0);
-        if !hub.writing.pin().contains(&id) {
-            let _ = tokio::fs::remove_file(partial(hub, &id)).await;
+    let mut after = String::new();
+    let mut swept = 0;
+    loop {
+        let rows = db::query(&c, "SELECT id FROM uploads WHERE updated_at < $1 AND id > $2 ORDER BY id LIMIT 1000", &[&cut, &after]).await?;
+        if rows.is_empty() {
+            break;
+        }
+        for r in &rows {
+            let id: String = r.get(0);
+            after.clone_from(&id);
+            // Claim before deleting either row or bytes. A contains() check
+            // alone would race an append starting after that check.
+            let Ok(_writing) = Writing::claim(hub, &id) else { continue };
+            // A writer may have refreshed it since the selection above.
+            let n = db::execute(&c, "DELETE FROM uploads WHERE id = $1 AND updated_at < $2", &[&id, &cut]).await?;
+            if n > 0 {
+                let _ = tokio::fs::remove_file(partial(hub, &id)).await;
+                swept += n;
+            }
         }
     }
     db::execute(&c, "DELETE FROM link_relay WHERE expires_at < $1", &[&clock::now()]).await?;
-    Ok(rows.len() as u64)
+    Ok(swept)
 }
 
 // ------------------------------------------------------------- link relay
