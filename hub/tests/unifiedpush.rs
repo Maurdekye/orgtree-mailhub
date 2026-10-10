@@ -387,7 +387,7 @@ async fn unifiedpush() {
     assert_eq!(register(&hub, &signed_auth, &own).await.code(), 200);
     let new_identity = SigningKey::from_bytes(&[5u8; 32]);
     let new_public = b64(&new_identity.verifying_key().to_bytes());
-    let rotation = rotation_statement(&alice, "signed", &new_public, 2);
+    let rotation = rotation_statement(&alice, "signed", &new_public, 1);
     let r = Call::new("DELETE", "/api/devices/signed").auth(&signed_auth)
         .json(json!({"identity_key":new_public,"signature":b64(&identity_key.sign(rotation.as_bytes()).to_bytes()),"sealed":{}}))
         .send(&hub).await;
