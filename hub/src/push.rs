@@ -80,6 +80,32 @@ struct Subscription {
     auth: Vec<u8>,
 }
 
+/// tokio-postgres logs parameters at DEBUG even though our SQL wrapper does
+/// not. Give the driver a redacted Debug view while preserving the wire value.
+struct SecretParam<T>(T);
+
+impl<T> std::fmt::Debug for SecretParam<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+impl<T: tokio_postgres::types::ToSql> tokio_postgres::types::ToSql for SecretParam<T> {
+    fn to_sql(
+        &self,
+        ty: &tokio_postgres::types::Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        self.0.to_sql(ty, out)
+    }
+
+    fn accepts(ty: &tokio_postgres::types::Type) -> bool {
+        T::accepts(ty)
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
+
 fn endpoint_url(endpoint: &str) -> Result<reqwest::Url, &'static str> {
     if endpoint.len() > 1000 || endpoint.bytes().any(|b| b.is_ascii_control() || b.is_ascii_whitespace()) {
         return Err("endpoint must be an HTTPS URL of at most 1000 bytes");
@@ -264,9 +290,9 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
                 &slug,
                 &device,
                 &uuid::Uuid::new_v4().to_string(),
-                &s.endpoint,
-                &s.p256dh,
-                &s.auth,
+                &SecretParam(&s.endpoint),
+                &SecretParam(&s.p256dh),
+                &SecretParam(&s.auth),
                 &clock::now(),
             ],
         )
@@ -450,6 +476,21 @@ pub async fn run(hub: Arc<Hub>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_parameters_hide_capabilities_but_preserve_wire_values() {
+        use tokio_postgres::types::{ToSql, Type};
+        let endpoint = SecretParam("https://push.example/capability-secret".to_string());
+        let auth = SecretParam(vec![9u8; 16]);
+        let parameters: &[&(dyn ToSql + Sync)] = &[&endpoint, &auth];
+        assert_eq!(format!("{parameters:?}"), "[[redacted], [redacted]]");
+        let mut wire = bytes::BytesMut::new();
+        endpoint.to_sql_checked(&Type::TEXT, &mut wire).unwrap();
+        assert_eq!(&wire[..], endpoint.0.as_bytes());
+        wire.clear();
+        auth.to_sql_checked(&Type::BYTEA, &mut wire).unwrap();
+        assert_eq!(&wire[..], &auth.0);
+    }
 
     #[test]
     fn endpoint_safety() {
