@@ -47,9 +47,11 @@ pub struct Hub {
     /// does: the bound socket, so a host name or port 0 in the settings
     /// shows as what it became
     pub door: std::sync::OnceLock<std::net::SocketAddr>,
-    /// Bounds resolver work, including OS lookups that outlive our timeout.
+    /// Registration DNS budget, including OS lookups that outlive our timeout.
     pub push_dns: Arc<tokio::sync::Semaphore>,
+    /// Delivery has a separate budget so registration cannot consume its slots.
     pub push_delivery_dns: Arc<tokio::sync::Semaphore>,
+    /// One registration lookup per authenticated address until the OS returns.
     pub push_dns_addresses: Arc<papaya::HashSet<String>>,
 }
 

@@ -171,8 +171,6 @@ fn public_address(ip: IpAddr) -> bool {
     }
 }
 
-/// Resolve immediately before connecting and pin the validated results in
-/// the HTTP client. No second DNS lookup, proxies, redirects or local targets.
 #[derive(Clone, Copy)]
 enum ResolveError {
     Busy,
@@ -187,6 +185,8 @@ impl Drop for AddressLookup {
     }
 }
 
+/// Resolve immediately before connecting and pin the validated results in
+/// the HTTP client. No second DNS lookup, proxies, redirects or local targets.
 async fn addresses(
     url: &reqwest::Url,
     allow: &[Allowed],
