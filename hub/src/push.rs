@@ -231,8 +231,8 @@ async fn addresses(
     };
     let mut out = Vec::new();
     for addr in resolved {
-        if !address_allowed(host, addr.ip(), allow)
-            && !(cfg!(feature = "push-test") && addr.ip().is_loopback())
+        if !(address_allowed(host, addr.ip(), allow)
+            || cfg!(feature = "push-test") && addr.ip().is_loopback())
         {
             return Err(ResolveError::Refused);
         }
