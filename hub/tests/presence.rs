@@ -2,7 +2,9 @@
 //! process stopped, was killed or crashed) goes offline after a short grace,
 //! not v1's 90-second window, and the parked sync of a device in use
 //! answers as soon as the set online changes. A device not in use learns
-//! it with its next answer, or at once when it comes into use.
+//! it with its next answer, or at once when it comes into use. v2.0.3: that
+//! answer carries the departed address's roster entry with `last_seen` its
+//! last call, and a device put down mid-park stops being woken at once.
 //!
 //!     HUB_TEST_PG=<folder> cargo test --test presence -- --nocapture
 
@@ -93,6 +95,12 @@ async fn a_client_that_hangs_up_goes_offline_soon() {
     let cat = register(&hub, "cat", "person").await; // a Hubchat device that quits
     let wes = register(&hub, "wes", "person").await; // watching, on a desk (in use) and a phone (not)
 
+    // ann's last call before she is killed: a poll that answers, well after
+    // her registration (v2.0.3: the watcher must see this time as last_seen)
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let ann_called = chrono::Utc::now();
+    let r = Call::new("POST", "/api/poll?wait=0").auth(pair(&ann.0, &ann.1)).send(&hub).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
     let ann_poll = park_poll(&hub, &ann);
     let dan_poll = park_poll(&hub, &dan);
     let cat_first = sync_now(&hub, &cat, "cat-laptop", None).await;
@@ -103,7 +111,16 @@ async fn a_client_that_hangs_up_goes_offline_soon() {
     in_use(&hub, &wes, "wes-desk").await;
     let desk = park_sync(&hub, &wes, "wes-desk", &desk_first["cursor"]);
     let phone = park_sync(&hub, &wes, "wes-phone", &phone_first["cursor"]);
+    // a tablet in use when it parks, then put down (v2.0.3: it must stop
+    // being woken for presence at once, not when its park ends)
+    let tablet_first = sync_now(&hub, &wes, "wes-tablet", None).await;
+    in_use(&hub, &wes, "wes-tablet").await;
+    let tablet = park_sync(&hub, &wes, "wes-tablet", &tablet_first["cursor"]);
     tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = Call::new("POST", "/api/devices/active").auth(pair(&wes.0, &wes.1)).json(json!({ "device_id": "wes-tablet", "active": false })).send(&hub).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!tablet.is_finished(), "putting the tablet down made its sync answer");
     for who in [&ann, &dan, &cat] {
         assert!(roster_online(&hub, &wes, &who.0).await, "{} online while parked", who.0);
     }
@@ -131,6 +148,19 @@ async fn a_client_that_hangs_up_goes_offline_soon() {
     assert!(!roster_online(&hub, &wes, &ann.0).await && !roster_online(&hub, &wes, &cat.0).await);
     assert!(roster_online(&hub, &wes, &dan.0).await);
     println!("  ok  a killed poll and a quit sync go offline after the grace; the desk in use hears it {:.1} s after (dan, re-parked at once, never dropped)", after.as_secs_f64());
+
+    // v2.0.3: the same answer carries ann's roster entry, last_seen her last
+    // call (not her registration, 1.2 s earlier)
+    let entry = desk_answer["roster"].as_array().unwrap().iter().find(|e| e["slug"] == json!(ann.0)).cloned();
+    let entry = entry.unwrap_or_else(|| panic!("no roster entry for ann in {desk_answer}"));
+    let seen = chrono::DateTime::parse_from_rfc3339(entry["last_seen"].as_str().unwrap()).unwrap().with_timezone(&chrono::Utc);
+    assert!((seen - ann_called).num_milliseconds().abs() < 1000, "ann's last_seen {seen} is not her last call {ann_called}");
+    println!("  ok  that answer carries ann's roster entry with last_seen her last call ({} ms after it), not her registration",
+        (seen - ann_called).num_milliseconds());
+
+    assert!(!tablet.is_finished(), "the tablet, put down mid-park, was woken for presence");
+    tablet.abort();
+    println!("  ok  a device put down mid-park is not woken for presence (it re-read that it is not in use)");
 
     assert!(!phone.is_finished(), "the phone (not in use) was woken");
     let t1 = Instant::now();

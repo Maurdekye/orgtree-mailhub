@@ -575,7 +575,13 @@ that stops shows as gone within seconds instead of minutes:
   see "Active devices") answers at once, carrying `online`. A device not in
   use is not woken for it: it gets `online` with its next answer (mail, or
   the end of its wait), or at once when it reports itself in use, because
-  that wakes its parked sync.
+  that wakes its parked sync. Reporting itself no longer in use wakes it
+  too, so it stops being woken for presence at once (v2.0.3).
+- **Last seen as it stands (v2.0.3).** The roster's `last_seen` is the
+  address's last call, but a sync sends a roster entry only when the entry
+  changes. So when an address goes offline the hub marks its entry changed:
+  the answer that reports it gone, and every device's next answer, carry
+  the entry with `last_seen` its last call, not the time it registered.
 
 So a client that stops shows as offline on a device in use within about
 11 seconds (the grace, plus a second), and coming back shows within about a

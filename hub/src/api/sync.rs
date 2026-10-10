@@ -544,12 +544,11 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
                         Woke::Changed
                     }
                 };
-                // a presence wake needs no database check
-                if woke == Woke::Changed {
+                // a presence wake needs no database check unless it answers;
+                // then the batch is read again, for the roster entries the
+                // presence tick marked (their last_seen as it stands, v2.0.3)
+                if woke == Woke::Changed || online_news() {
                     break;
-                }
-                if online_news() {
-                    return sync_answer(hub, &slug, &device, cur, batch, start_now).await;
                 }
             }
         }
@@ -569,21 +568,41 @@ async fn device_in_use(c: &impl GenericClient, slug: &str, device: &str) -> ApiR
 
 /// Every second: when the set of addresses online changed (a window or a
 /// grace ran out, an address came or went), wake the parked syncs; a device
-/// in use answers with the new `online` (v2.0.2).
+/// in use answers with the new `online` (v2.0.2). An address that left the
+/// set has its roster entry marked changed first (v2.0.3), so that answer
+/// and every device's next one carry its `last_seen` as it stands: its last
+/// call, not its last roster change.
 pub async fn presence_loop(hub: Arc<Hub>) {
-    let mut last = online_print(&hub.presence.online_now());
+    let mut last = hub.presence.online_now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = hub.shutdown.cancelled() => return,
         }
-        let now = online_print(&hub.presence.online_now());
+        let now = hub.presence.online_now();
         if now != last {
+            let gone: Vec<String> = last.iter().filter(|s| now.binary_search(s).is_err()).cloned().collect();
+            if !gone.is_empty() {
+                if let Err(e) = touch_roster(&hub, &gone).await {
+                    tracing::warn!(error = %format!("{e:#}"), "could not mark the roster entries of addresses that went offline");
+                }
+            }
             last = now;
             hub.presence.online_changed();
         }
     }
+}
+
+/// Move these addresses' roster entries to the head of the roster's change
+/// log (no wake-up of their own), so syncs send them again as they stand.
+async fn touch_roster(hub: &Hub, slugs: &[String]) -> anyhow::Result<()> {
+    let mut c = hub.db.get().await?;
+    let tx = c.transaction().await?;
+    roster_lock(&tx).await?;
+    db::execute(&tx, "UPDATE identities SET roster_seq = nextval('roster_seq') WHERE slug = ANY($1)", &[&slugs]).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// `GET /api/devices[?slug=]`: the devices the address syncs from.
@@ -662,11 +681,10 @@ pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let until = on.then(|| clock::now() + chrono::Duration::from_std(ACTIVE_FOR).unwrap_or_default());
     db::execute(&c, "UPDATE devices SET active_until = $3 WHERE slug = $1 AND device_id = $2", &[&slug, &device, &until]).await?;
-    if on {
-        // its parked sync, if any, now answers for a change in the set
-        // online that it was not woken for while not in use (v2.0.2)
-        hub.presence.wake_sync([slug.as_str()]);
-    }
+    // its parked sync, if any, reads again whether it is in use: in use, it
+    // answers for a change in the set online it was not woken for (v2.0.2);
+    // no longer in use, it stops being woken for them (v2.0.3)
+    hub.presence.wake_sync([slug.as_str()]);
     ok(json!({ "slug": slug, "device_id": device, "active": on, "active_until": until.map(clock::iso) }))
 }
 
