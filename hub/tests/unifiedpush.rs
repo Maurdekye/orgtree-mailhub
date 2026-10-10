@@ -495,6 +495,18 @@ async fn unifiedpush() {
         assert_eq!(register(&hub, &credentials, &body).await.code(), 200);
         if name == "fast" {
             fast_slug = slug;
+        } else {
+            assert_eq!(
+                Call::new("POST", "/api/sync")
+                    .auth(&credentials)
+                    .json(json!({"device_id":"second-slow","wait":0}))
+                    .send(&hub)
+                    .await
+                    .code(),
+                200
+            );
+            body["device_id"] = json!("second-slow");
+            assert_eq!(register(&hub, &credentials, &body).await.code(), 200);
         }
     }
     let runner = tokio::spawn(mailhub::push::run(hub.clone()));
