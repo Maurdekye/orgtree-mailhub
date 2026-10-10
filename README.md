@@ -247,6 +247,7 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/link/put` · `/take` · `/cancel` | hand a sealed payload to a new device under a one-time code |
 | `GET`/`POST /api/identity` · `POST /api/devices` · `DELETE /api/devices/{id}` | per-device keys: the identity key, enrolling a device, signing one out (rotating the identity key) |
 | `POST /api/devices/active` | `{device_id, active, slug?}` — this device is the one in use (90 s, renewed by sending it again) or no longer; the address's other devices see it in every sync answer's `active` and can leave notifications to it |
+| `POST /api/push` · `DELETE /api/push?device_id=` | `{device_id, endpoint, p256dh, auth, slug?}` — optional UnifiedPush (2.1.0): when mail waits and the device is not in use, the hub sends an encrypted, content-free wake to the device's distributor; DELETE stops it |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in
 [docs/v2-additions.md](docs/v2-additions.md).

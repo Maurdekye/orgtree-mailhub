@@ -23,6 +23,7 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_PUBLIC_PORT` | `7371` | the public listener's port inside the container/host process (v1 fixed it) |
 | `HUB_RETENTION_DAYS` | unset | unset or empty: mail and files are kept until their owners delete them (`retention_days: null`). A number: the hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state, and overriding the kept history** (v1's default was 30). Uploads no send ever bound go after 7 days either way |
 | `HUB_ORG_RETENTION_DAYS` | unset | unset or empty: an address stays on the roster until it unregisters or the operator removes it (`orgtree-mailhub remove-address SLUG...`). A number: roster rows silent this long are pruned, except rows still holding queued mail (v1's default was 45); a pruned client re-registers itself on its next 401 |
+| `HUB_PUSH_ALLOW` | empty | optional UnifiedPush (v2.1.0): private distributor hosts or CIDRs the hub may send wakes to, comma-separated exact entries (e.g. `ntfy.example.ts.net,100.64.5.6/32`); public HTTPS endpoints need no entry. Read on startup. See [UnifiedPush delivery](#unifiedpush-delivery) |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
 | `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker the hub honors it directly (an embedding desktop process sets `127.0.0.1`) |
 | `HUB_PUBLIC_BIND` | `0.0.0.0` | **a security control the same way** — its routes are authenticated, but per the Trust model reaching it is still what admits a new registrant: under compose the host-side interface of the public listener's port mapping, outside Docker honored directly by the hub. Set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy, or a specific interface address to pin it to one network (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
@@ -169,6 +170,13 @@ Within v2, the schema is versioned in the database (`hub_meta`) and migrated
 at startup, so upgrading the image and restarting is the whole procedure; a
 database written by a newer hub is refused rather than downgraded.
 
+⚠ **2.1.0 is a one-way step: back up first.** Its first start adds schema 9
+(UnifiedPush subscriptions). From then on a 2.0.x hub refuses the database
+("the database schema is version 9, newer than this hub understands"), so
+going back to 2.0.x means restoring the backup you took before the upgrade,
+losing what arrived since. Take that backup (both volumes, see Backup and
+restore) before you start 2.1.0 for the first time.
+
 v1: the store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
 idempotent column migrations at connect time — upgrading the image and
 restarting is the whole procedure. Downgrading is not supported once a newer
@@ -229,8 +237,9 @@ fails until you do).
 
 ## UnifiedPush delivery
 
-Clients opt in using the `unifiedpush` API feature; see
+From 2.1.0. Clients opt in using the `unifiedpush` API feature; see
 [v2-additions.md](v2-additions.md#optional-unifiedpush-feature-unifiedpush).
+Until a device registers for push, the hub makes no outbound requests.
 No operator relay, central server or API key is needed. Allow outbound HTTPS to
 the chosen distributor. For private self-hosted endpoints, set `HUB_PUSH_ALLOW`
 to comma-separated exact hosts or CIDRs (empty by default), such as

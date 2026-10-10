@@ -110,16 +110,18 @@ listed is meant to be byte-identical or behavior-identical to V1.
    (Hubchat showed the registration time); a device that reports itself no
    longer in use wakes its parked sync, which then stops being woken for
    presence at once instead of when its park ends.
-
-12. **Optional UnifiedPush (not released)** (2026-10-10, docket
-    `hubchat-optional-unifiedpush-notifications-along`). Device-owned
-    subscriptions and encrypted content-free wakes, directly to an installed
-    distributor's server. The user requires no project-hosted relay and keeps
-    the background connection as default. Coordinator approved storing the
-    RFC8291 p256dh/auth protocol metadata; capabilities stay out of logs and
-    listings and are removed on device/identity removal. See v2-additions.md
-    for the API and endpoint policy. Tests are listed in v2.md; implementation
-    status is recorded on the docket, not implied by this entry.
+12. **v2.1.0: optional UnifiedPush** (2026-10-10, docket item
+   `hubchat-optional-unifiedpush-notifications-along`; version 2.1.0 by the
+   coordinator's ruling 18:12Z). Device-owned subscriptions and encrypted
+   content-free wakes, sent directly to an installed distributor's server.
+   The user requires no project-hosted relay and keeps the background
+   connection as default. Coordinator approved storing the RFC8291
+   p256dh/auth protocol metadata; capabilities stay out of logs and listings
+   and are removed on device/identity removal. See v2-additions.md for the
+   API and endpoint policy; tests are listed in v2.md. The first hub that
+   makes outbound requests of its own (only once a device registers for
+   push). Schema 9 is one-way: a 2.0.x hub refuses a database a 2.1.0 hub
+   has migrated (OPERATIONS.md, Upgrades).
 
 ## Known V1 gaps carried across deliberately
 
