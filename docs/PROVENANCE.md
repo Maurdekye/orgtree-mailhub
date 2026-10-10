@@ -103,6 +103,13 @@ listed is meant to be byte-identical or behavior-identical to V1.
    tried and left out: probes every few seconds would wake phones' radios
    (coordinator's ruling, 23:20Z), so a client lost without closing its
    connection still shows offline after about 2 to 2.5 minutes.
+11. **v2.0.3: presence follow-ups** (2026-10-10, coordinator's ruling 01:04Z;
+   docket item `hub-v2-0-3-presence-follow-ups-fresh-last-seen-i`, found in
+   the real-Hubchat check of v2.0.2). When an address goes offline its roster
+   entry is marked changed, so syncs carry its `last_seen` as it stands
+   (Hubchat showed the registration time); a device that reports itself no
+   longer in use wakes its parked sync, which then stops being woken for
+   presence at once instead of when its park ends.
 
 ## Known V1 gaps carried across deliberately
 
