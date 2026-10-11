@@ -122,6 +122,18 @@ listed is meant to be byte-identical or behavior-identical to V1.
    makes outbound requests of its own (only once a device registers for
    push). Schema 9 is one-way: a 2.0.x hub refuses a database a 2.1.0 hub
    has migrated (OPERATIONS.md, Upgrades).
+13. **v2.1.1: resumable-upload recovery** (2026-10-11, from the recovery
+   proofs written for Hubchat's durable file transfers). Finishing an upload
+   checks its bytes first: a missing or short file, or a moved file that
+   fails its sha256, ends the upload with 410 (the session goes, so later
+   GETs answer 404) instead of publishing an attachment without its bytes.
+   The expiry sweep claims an upload before deleting it, so it never removes
+   one a request is writing to (that writer's client may meet a 409 without
+   an `offset` while the sweep holds it). Cancelling or expiring an upload
+   also removes a file already moved into place but never published, and a
+   file that can't be removed is logged instead of failing the cancel or
+   the sweep. No schema change (still 9) and no API additions; the tests
+   are `transfer_recovery` in v2.md.
 
 ## Known V1 gaps carried across deliberately
 
