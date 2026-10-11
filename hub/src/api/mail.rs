@@ -32,7 +32,7 @@ pub const POLL_CEILING: f64 = 55.0;
 pub const POLL_BATCH: i64 = 500;
 
 pub const ENVELOPE_COLS: &str = "n, id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, state, fetched_at, delivered_at, \
-                                 read_at, attachments, reply_to, body_bytes, body_part";
+                                 read_at, attachments, reply_to, body_bytes, body_part, meta";
 
 /// What a v1 route says after the first 20,000 characters of a longer body
 /// (ruling 8 October: never a silent cut).
@@ -66,6 +66,10 @@ pub fn kept_kind<'a>(stored: &'a str, asked: &'a str) -> &'a str {
 /// The longest `reply_to` a send may carry (message ids are client-minted;
 /// this only stops a reference from being used as a payload).
 pub const REPLY_TO_MAX: usize = 4096;
+/// The most a message's `meta` may hold, as compact JSON. It carries a
+/// client's own small structure (Hubchat's question cards and multi-replies),
+/// never a payload: bodies and files have their own limits.
+pub const META_MAX: usize = 4096;
 pub const PROFILE_NAME_MAX: usize = 48;
 pub const PROFILE_ABOUT_MAX: usize = 200;
 
@@ -126,6 +130,10 @@ fn envelope_with_body(r: &tokio_postgres::Row, body: String) -> serde_json::Map<
     // G3: present only when the sender set it, so v1 envelopes keep v1's keys
     if let Some(reply_to) = r.get::<_, Option<String>>("reply_to") {
         m.insert("reply_to".into(), json!(reply_to));
+    }
+    // the same for a client's meta, handed back as it was sent
+    if let Some(meta) = r.get::<_, Option<Value>>("meta") {
+        m.insert("meta".into(), meta);
     }
     m
 }
@@ -609,6 +617,22 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         Some(Value::String(r)) => Some(r.clone()),
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "reply_to must be a message id (a string)"),
     };
+    // a client's own small structure, stored as sent and never read here
+    let meta = match body.get("meta") {
+        None | Some(Value::Null) => None,
+        Some(v @ Value::Object(_)) => {
+            let text = serde_json::to_string(v).unwrap_or_default();
+            if text.len() > META_MAX {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("meta is larger than {META_MAX} bytes"));
+            }
+            // PostgreSQL's jsonb cannot hold a NUL character
+            if text.contains("\\u0000") {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "meta contains a NUL character");
+            }
+            Some(v.clone())
+        }
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "meta must be a JSON object"),
+    };
     let received = clock::now();
     // a retry is answered without touching the insert: v1's INSERT OR
     // IGNORE never used up a message number, and neither does this
@@ -636,9 +660,9 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         db::query_opt(
             &tx,
             "INSERT INTO messages (id, from_slug, to_slug, body, kind, thread_id, sent_at, received_at, attachments, reply_to,
-                                   body_bytes, body_part)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING RETURNING n",
-            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas), &reply_to, &body_bytes, &body_part],
+                                   body_bytes, body_part, meta)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (id) DO NOTHING RETURNING n",
+            &[&mid, &frm, &to, &text, &kind, &thread_id, &sent_at, &received, &Value::Array(metas), &reply_to, &body_bytes, &body_part, &meta],
         )
         .await?
     };

@@ -703,3 +703,25 @@ allowlisted. Globally routed IPv6 addresses can belong to a home LAN too; HTTPS
 certificate verification still applies, but the hub can attempt a TCP connection
 to those public addresses. Allowlists may authorize loopback or link-local
 addresses, so use only narrowly scoped entries you trust.
+
+## Message meta (feature `meta`)
+
+`/api/send` accepts an optional `meta`: a JSON object a client attaches to a
+message for its own structure. Hubchat puts question cards (preset answers)
+and multi-replies in it; Hubchat's `docs/question-cards.md` describes what it
+holds. The hub never reads it.
+
+- It is stored with the message (schema 10, column `meta`) and returned
+  unchanged, under `"meta"`, in every envelope: poll, sync, history and the
+  operator view. Like `reply_to`, the key is there only when the sender set it,
+  so a message without it keeps v1's envelope.
+- A repeated send with the same id keeps the first payload's `meta`.
+- 422 refusals: `meta must be a JSON object`, `meta is larger than 4096 bytes`
+  (as compact JSON), `meta contains a NUL character` (PostgreSQL's `jsonb`
+  can't hold one). `null` means no meta.
+- It doesn't count toward the message size limit: 4096 bytes is small beside
+  any body or file, and it is no payload.
+- Whatever a client reads in it came from another client: the hub passing it
+  on vouches for nothing. Readers check it themselves.
+- `/healthz` lists `meta`. Clients send it only to hubs that do; an older hub
+  drops unknown keys, so a client that sent it anyway would just lose it.
