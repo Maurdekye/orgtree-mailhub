@@ -130,6 +130,6 @@ async fn picture_authority_convergence_and_lifetime() {
     let c=sql_client(&url).await;
     assert_eq!(c.query_one("SELECT count(*) FROM mailhub.messages",&[]).await.unwrap().get::<_,i64>(0),0);
     assert_eq!(c.query_one("SELECT count(*) FROM mailhub.attachments",&[]).await.unwrap().get::<_,i64>(0),0);
-    assert_eq!(mailhub::db::latest_schema(),9,"reserved question migration10 was changed");
+    assert_eq!(mailhub::db::latest_schema(),10,"pictures add no schema: 10 is the reserved question-card message meta");
     drop(hub); drop(c); drop(pg); std::fs::remove_dir_all(data).unwrap();
 }
