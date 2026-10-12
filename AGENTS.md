@@ -1,5 +1,16 @@
 # Mail hub development invariants
 
+- 2026-10-12: Message `meta` (feature `meta`, schema 10) is an optional JSON
+  object a client attaches on `/api/send`: at most 4096 bytes as compact JSON,
+  no NUL, stored with the message and returned unchanged in every envelope
+  (poll, sync, history, operator view) only when set; a repeated send keeps the
+  first. The hub never reads it and vouches for nothing in it (Hubchat's
+  question cards and multi-replies; clients check it themselves). Every
+  envelope reader selects it through `ENVELOPE_COLS`.
+  [decided: user via lead-astra 2026-10-11 22:40Z (additive bounded metadata);
+  verified: api/mail.rs, api/ops.rs, migrations/0010_message_meta.sql;
+  tests/message_meta.rs; docs/v2-additions.md]
+
 - 2026-10-12: Roster and picture envelopes carry a domain-separated opaque
   picture_owner token from address/full fingerprint, including absent pictures.
   Never expose the raw authentication fingerprint; different owners of a reused
