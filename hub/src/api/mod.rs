@@ -11,6 +11,7 @@ pub mod history;
 pub mod keys;
 pub mod mail;
 pub mod ops;
+pub mod pictures;
 pub mod sync;
 pub mod transfers;
 
@@ -222,6 +223,7 @@ enum Route {
     Download,
     Roster,
     Profile,
+    Picture,
     Sync,
     Devices,
     Active,
@@ -254,6 +256,9 @@ enum Route {
 /// `Some(Err(allowed))` when only the method differs, `None` otherwise.
 fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
     use Route::*;
+    if path == "/api/profile-picture" {
+        return Some(if matches!(*method, Method::GET | Method::POST) { Ok(Picture) } else { Err("GET, POST") });
+    }
     // paths with several methods
     let get_or_post = |get: Route, post: Route| -> Option<Result<Route, &'static str>> {
         Some(if *method == Method::GET {
@@ -458,6 +463,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Receipts => mail::receipts(hub, req).await,
         Route::Roster => mail::roster_route(hub, req).await,
         Route::Profile => mail::profile(hub, req).await,
+        Route::Picture => pictures::picture(hub, req).await,
         Route::Sync => sync::sync(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
         Route::Active => sync::active(hub, req).await,

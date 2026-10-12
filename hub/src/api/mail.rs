@@ -137,11 +137,12 @@ pub async fn roster(hub: &Hub, c: &impl GenericClient) -> ApiResult<Vec<Value>> 
     Ok(rows.iter().map(|r| roster_entry(hub, r)).collect())
 }
 
-const ROSTER_COLS: &str = "slug, org_name, username, blurb, last_seen, kind";
+const ROSTER_COLS: &str = "slug, org_name, username, blurb, last_seen, kind,
+    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org'))";
 
 /// One roster row as v1 sent it (presence from this process).
 pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {
-    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5))
+    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6))
 }
 
 pub fn roster_json(
@@ -152,8 +153,9 @@ pub fn roster_json(
     blurb: String,
     last_seen: Option<chrono::DateTime<chrono::Utc>>,
     kind: String,
+    picture: Option<Value>,
 ) -> Value {
-    json!({
+    let mut value = json!({
         "slug": slug,
         "org_name": org_name,
         "username": username,
@@ -161,7 +163,9 @@ pub fn roster_json(
         "online": hub.presence.online(slug),
         "last_seen": last_seen.map(clock::iso),
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
-    })
+    });
+    if let Some(picture) = picture { value["picture"] = picture; }
+    value
 }
 
 /// Every credential a request proves, with the device that signed it when

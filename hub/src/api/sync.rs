@@ -104,6 +104,11 @@ pub async fn roster_lock(tx: &impl GenericClient) -> Result<(), tokio_postgres::
 /// rows and devices go and a tombstone tells syncing directories. Their mail
 /// and change logs stay, as v1 kept their mail. Call under `roster_lock`.
 pub async fn leave(tx: &impl GenericClient, slugs: &[String]) -> Result<Vec<String>, tokio_postgres::Error> {
+    // Remove image bytes, but keep compact removal tombstones tied to the full
+    // identity fingerprint. A stale device must not resurrect a removed image
+    // by unregistering and registering again (nor inherit another identity).
+    db::execute(tx, "DELETE FROM hub_meta p USING identities i WHERE i.slug=ANY($1)
+        AND p.k='profile_picture:' || i.slug || ':' || i.fingerprint AND p.v->>'data' IS NOT NULL", &[&slugs]).await?;
     let rows = db::query(tx, "DELETE FROM identities WHERE slug = ANY($1) RETURNING slug", &[&slugs]).await?;
     let mut gone: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
     gone.sort();
@@ -383,11 +388,12 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     let rows = db::query(
         &c,
         &format!(
-            "SELECT seq, gone, slug, org_name, username, blurb, last_seen, kind FROM (
-                SELECT roster_seq AS seq, false AS gone, slug, org_name, username, blurb, last_seen, kind
+            "SELECT seq, gone, slug, org_name, username, blurb, last_seen, kind, picture FROM (
+                SELECT roster_seq AS seq, false AS gone, slug, org_name, username, blurb, last_seen, kind,
+                    (SELECT v - 'data' FROM hub_meta WHERE k='profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')) AS picture
                   FROM identities WHERE roster_seq > $1
                 UNION ALL
-                SELECT seq, true, slug, '', '', '', NULL::timestamptz, '' FROM roster_gone WHERE seq > $1
+                SELECT seq, true, slug, '', '', '', NULL::timestamptz, '', NULL::jsonb FROM roster_gone WHERE seq > $1
              ) x ORDER BY seq LIMIT {}",
             ROSTER_BATCH + 1
         ),
@@ -404,7 +410,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
         let entry = if r.get::<_, bool>(1) {
             None
         } else {
-            Some(roster_json(hub, &slug, r.get(3), r.get(4), r.get(5), r.get(6), r.get(7)))
+            Some(roster_json(hub, &slug, r.get(3), r.get(4), r.get(5), r.get(6), r.get(7), r.get(8)))
         };
         if last.insert(slug.clone(), entry).is_none() {
             order.push(slug);
