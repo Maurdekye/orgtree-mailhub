@@ -4,6 +4,32 @@ Everything here describes the standalone deployment (Docker). When the hub is
 embedded inside the Orgtree desktop, Orgtree's own settings surface drives the
 same knobs and this document is background reading.
 
+## Developer team deployment
+
+The recommended developer team setup is a **shared standalone mailhub on a
+company-accessible private server**, with **each developer installing Orgtree
+and Hubchat and connecting both applications to that same hub**. Orgtree hosts
+their local AI organizations; Hubchat handles human hub mail; the shared
+standalone mailhub relays messages and files. The built-in Orgtree mailhub is
+for individuals and small teams. This recommendation changes no defaults and
+sets no numerical team-size cutoff. [Documentation decision: user 2026-10-12]
+
+Follow [Run it](../README.md#run-it) for Docker Compose startup. Before starting,
+set the required `HUB_DB_PASSWORD`, enable the relay-only listener with
+`HUB_PUBLIC=1`, and keep the full operator interface local with
+`HUB_BIND=127.0.0.1`. Select `HUB_PUBLIC_BIND` or a private proxy for the company's
+network as described under [Trust model](#trust-model-read-before-exposing-anything).
+Give both clients the relay-only address, for example
+`http://mailhub.company.internal:7378` for the default Compose host mapping.
+"Public" in the listener setting does not mean the server needs to be exposed
+to the internet. The company operator controls network admission and can read
+the mail stored here; back up both volumes as described below.
+
+See the [README's connection steps](../README.md#recommended-developer-team-setup).
+People and Orgtree organizations keep distinct identities and secrets.
+Independent agent-session hubtool setup is optional, not required for the
+two developer applications.
+
 ## Configuration
 
 All configuration is environment variables (compose reads `.env`; see

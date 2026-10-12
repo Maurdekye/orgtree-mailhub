@@ -12,7 +12,40 @@ Full design: `docs/mailserver-spec.md`. **v2.0.0** is the hub rewritten in
 Rust with its records in PostgreSQL — the same protocol, so every client works
 unchanged; what changed and how to upgrade: [docs/v2.md](docs/v2.md).
 
+## Recommended developer team setup
+
+For a team of developers, each developer installs
+[Orgtree](https://github.com/Maurdekye/orgtree#install) and
+[Hubchat](https://github.com/Maurdekye/orgtree-hubchat#download). Connect **both
+applications to a shared standalone mailhub on a company-accessible private
+server**. Orgtree runs each developer's local AI organizations; Hubchat is the
+human chat client; the shared standalone mailhub relays messages and files.
+
+The team operator follows [Run it](#run-it) and the
+[operations guide](docs/OPERATIONS.md#developer-team-deployment), then supplies
+one relay-only client address to everyone, for example
+`http://mailhub.company.internal:7378` with the standard Docker Compose mapping.
+Add that address in each participating Orgtree organization's
+**Org settings > Connections > Add a mail hub**, and in Hubchat's
+**Settings > Hubs > Add a hub**. The
+[Hubchat setup guide](https://github.com/Maurdekye/orgtree-hubchat/blob/main/docs/setup.md)
+also covers adding devices.
+
+Each person uses their own Hubchat identity, separately from each Orgtree
+organization's identity. Do not share identity secrets or recovery words
+between developers. Human hub mail is composed in Hubchat; Orgtree is where
+developers manage and message their own agents.
+
+The **built-in Orgtree mailhub is for individuals and small teams**. It runs
+with that Orgtree computer, while the shared standalone mailhub runs
+independently of developers' desktops. These are deployment recommendations,
+not a numerical size limit or a requirement to migrate other supported setups.
+There is no universally hosted service that every installation must join.
+
 ## Connect an agent session
+
+This is an **optional separate workflow** for Claude Code or Codex sessions
+outside Orgtree. It is not required for the Orgtree + Hubchat team setup above.
 
 One command gives the Claude Code and Codex sessions on a computer a mailbox
 on a hub. It installs only `hubtool.py` (one file, Python standard library
@@ -109,7 +142,9 @@ docker compose up -d --build
 - `/healthz` for monitoring; one JSON log line per request on stdout
   (`docker logs orgtree-mailhub`).
 
-Then wire the machine's Claude Code sessions into it (once per machine):
+Optionally, for independent Claude Code sessions outside Orgtree, wire the
+machine's sessions into it (once per machine). This is not needed for Orgtree
+or Hubchat; the [hubtool installer](#connect-an-agent-session) is another option:
 
 ```sh
 python install-hook.py
@@ -134,7 +169,7 @@ Hubchat reads `/healthz` and otherwise uses only `/api/*` routes, so the door
 
 **Run a hub**, either one:
 
-- **Orgtree's built-in hub.** Every Orgtree installation runs one. In
+- **Orgtree's built-in hub, for individuals and small teams.** Every Orgtree installation runs one. In
   Orgtree, open **App settings › Mail hub**, turn on **Public access › Also
   serve a relay-only door on port 7371**, then click **Save hosting
   settings**. Leave **Hosting › Listen on** at **This computer only**.
