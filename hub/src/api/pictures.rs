@@ -14,6 +14,12 @@ pub const MAX_BYTES: usize = 256 * 1024;
 const MAX_BODY: usize = MAX_BYTES * 4 / 3 + 4096;
 const PREFIX: &str = "profile_picture:";
 
+/// Public provenance, not the raw authentication fingerprint. Stable across
+/// hubs/reconnects for the same identity; different secrets cannot share it.
+pub fn owner_token(slug: &str, fingerprint: &str) -> String {
+    hex::encode(Sha256::digest(format!("orgtree-picture-owner-v1\0{slug}\0{fingerprint}")))
+}
+
 pub fn valid_revision(s: &str) -> bool {
     s.len() == 53 && s.as_bytes()[20] == b'-'
         && s.as_bytes()[..20].iter().all(u8::is_ascii_digit)
@@ -70,10 +76,10 @@ pub async fn picture(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if req.method == Method::GET {
         let slug = req.query("slug").unwrap_or("");
         let row = db::query_opt(&c,
-            "SELECT p.v FROM identities i LEFT JOIN hub_meta p ON p.k = 'profile_picture:' || i.slug || ':' || i.fingerprint WHERE i.slug=$1 AND i.kind IN ('person','org')",
+            "SELECT p.v, i.fingerprint FROM identities i LEFT JOIN hub_meta p ON p.k = 'profile_picture:' || i.slug || ':' || i.fingerprint WHERE i.slug=$1 AND i.kind IN ('person','org')",
             &[&slug]).await?;
         let Some(row) = row else { return refuse(StatusCode::NOT_FOUND, "profile picture identity not found"); };
-        return ok(json!({"picture":row.get::<_,Option<Value>>(0)}));
+        return ok(json!({"picture":row.get::<_,Option<Value>>(0),"picture_owner":owner_token(slug,&row.get::<_,String>(1))}));
     }
     let bytes = read_limited(std::mem::take(&mut req.body), MAX_BODY).await?;
     let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return invalid(); };
@@ -107,5 +113,5 @@ pub async fn picture(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     tx.commit().await?;
     if changed { hub.presence.roster_changed(); }
-    ok(json!({"changed":changed,"picture":if changed { incoming } else { old.unwrap_or(incoming) }}))
+    ok(json!({"changed":changed,"picture_owner":owner_token(&slug,&row.get::<_,String>(1)),"picture":if changed { incoming } else { old.unwrap_or(incoming) }}))
 }

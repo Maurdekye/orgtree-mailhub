@@ -388,12 +388,12 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     let rows = db::query(
         &c,
         &format!(
-            "SELECT seq, gone, slug, org_name, username, blurb, last_seen, kind, picture FROM (
+            "SELECT seq, gone, slug, org_name, username, blurb, last_seen, kind, picture, fingerprint FROM (
                 SELECT roster_seq AS seq, false AS gone, slug, org_name, username, blurb, last_seen, kind,
-                    (SELECT v - 'data' FROM hub_meta WHERE k='profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')) AS picture
+                    (SELECT v - 'data' FROM hub_meta WHERE k='profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')) AS picture, fingerprint
                   FROM identities WHERE roster_seq > $1
                 UNION ALL
-                SELECT seq, true, slug, '', '', '', NULL::timestamptz, '', NULL::jsonb FROM roster_gone WHERE seq > $1
+                SELECT seq, true, slug, '', '', '', NULL::timestamptz, '', NULL::jsonb, '' FROM roster_gone WHERE seq > $1
              ) x ORDER BY seq LIMIT {}",
             ROSTER_BATCH + 1
         ),
@@ -410,7 +410,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
         let entry = if r.get::<_, bool>(1) {
             None
         } else {
-            Some(roster_json(hub, &slug, r.get(3), r.get(4), r.get(5), r.get(6), r.get(7), r.get(8)))
+            Some(roster_json(hub, &slug, r.get(3), r.get(4), r.get(5), r.get(6), r.get(7), r.get(8), r.get(9)))
         };
         if last.insert(slug.clone(), entry).is_none() {
             order.push(slug);

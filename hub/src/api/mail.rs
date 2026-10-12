@@ -138,11 +138,11 @@ pub async fn roster(hub: &Hub, c: &impl GenericClient) -> ApiResult<Vec<Value>> 
 }
 
 const ROSTER_COLS: &str = "slug, org_name, username, blurb, last_seen, kind,
-    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org'))";
+    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint";
 
 /// One roster row as v1 sent it (presence from this process).
 pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {
-    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6))
+    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6), r.get(7))
 }
 
 pub fn roster_json(
@@ -154,6 +154,7 @@ pub fn roster_json(
     last_seen: Option<chrono::DateTime<chrono::Utc>>,
     kind: String,
     picture: Option<Value>,
+    fingerprint: String,
 ) -> Value {
     let mut value = json!({
         "slug": slug,
@@ -165,6 +166,7 @@ pub fn roster_json(
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
     });
     if let Some(picture) = picture { value["picture"] = picture; }
+    value["picture_owner"] = json!(super::pictures::owner_token(slug,&fingerprint));
     value
 }
 

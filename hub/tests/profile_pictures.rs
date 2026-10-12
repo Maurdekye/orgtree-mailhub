@@ -66,6 +66,10 @@ async fn picture_authority_convergence_and_lifetime() {
     assert_eq!(put(&hub,&pa,"person.pic",image(1,11)).await.code(),409);
     let roster=Call::new("GET","/api/roster").auth(&pa).send(&hub).await.json();
     let row=roster["roster"].as_array().unwrap().iter().find(|v|v["slug"]=="person.pic").unwrap();
+    let identity_token=row["picture_owner"].as_str().unwrap().to_string();
+    assert_eq!(identity_token.len(),64);
+    assert_ne!(identity_token,mailhub::auth::fingerprint("picture-proof-secret"));
+    assert_eq!(get(&hub,&oa,"person.pic").await.json()["picture_owner"],identity_token);
     assert_eq!(row["picture"]["revision"],initial["revision"]);
     assert!(row["picture"].get("data").is_none());
     let snap=Call::new("POST","/api/sync").auth(&oa).json(json!({"device_id":"picture-reader","wait":0})).send(&hub).await.json();
@@ -86,9 +90,21 @@ async fn picture_authority_convergence_and_lifetime() {
     assert_eq!(get(&hub,&oa,"person.pic").await.code(),404);
     assert_eq!(register().send(&hub).await.code(),200);
     assert_eq!(put(&hub,&pa,"person.pic",initial.clone()).await.json()["changed"],false);
+    assert_eq!(get(&hub,&oa,"person.pic").await.json()["picture_owner"],identity_token);
     assert!(get(&hub,&pa,"person.pic").await.json()["picture"]["data"].is_null());
     // An explicit observed later edit can replace removal.
     assert_eq!(put(&hub,&pa,"person.pic",image(4,40)).await.json()["changed"],true);
+    // A released address can be claimed by another identity with independent
+    // ownership and version history, including no picture at registration.
+    assert_eq!(Call::new("POST","/api/unregister").auth(&pa).send(&hub).await.code(),200);
+    let new_auth=pair("person.pic","different-picture-proof-secret");
+    assert_eq!(Call::new("POST","/api/register").auth(&new_auth).json(json!({"slug":"person.pic","kind":"person","org_name":"new owner"})).send(&hub).await.code(),200);
+    let replacement=get(&hub,&oa,"person.pic").await.json();
+    assert!(replacement["picture"].is_null());
+    assert_ne!(replacement["picture_owner"],identity_token);
+    assert_eq!(put(&hub,&new_auth,"person.pic",image(1,90)).await.json()["changed"],true);
+    let changed=Call::new("POST","/api/sync").auth(&oa).json(json!({"device_id":"picture-reader","cursor":changed["cursor"],"wait":0})).send(&hub).await.json();
+    assert!(changed["roster"].as_array().unwrap().iter().any(|r|r["slug"]=="person.pic"&&r["picture_owner"]==replacement["picture_owner"]));
     // Picture endpoints use the same device credentials as the rest of the API.
     let identity = SigningKey::from_bytes(&[42; 32]);
     let device = SigningKey::from_bytes(&[43; 32]);

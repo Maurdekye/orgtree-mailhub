@@ -17,6 +17,14 @@ A record contains `revision`, `sha256`, `width`, `height`, `bytes`, and `data`
 `data`/`sha256` and zero sizes. Directory/roster entries expose `picture` metadata
 without `data`. Missing metadata means unsupported/never set, not removal.
 
+Roster rows and picture GET/POST envelopes include `picture_owner`, the SHA256
+of the domain-separated `orgtree-picture-owner-v1`, address and full fingerprint
+joined with NUL separators. This exposes no raw authentication fingerprint.
+It is stable for the same identity across hubs/unregister/re-register and changes
+when a different identity claims a released address. It exists even when no
+picture is set. Clients bind peer version/bytes and delayed responses to this
+provenance rather than the reusable address; it does not alter mail addressing.
+
 The revision is a fixed-width, zero-padded 20-digit unsigned logical counter,
 a hyphen, and a 32-character lowercase random operation ID. An explicit edit
 increments the highest counter the editing device has observed. Automatic
@@ -71,3 +79,10 @@ after shared-key disable. Compilation took7.03s and tests1.68s, exit0.
 This is isolated PostgreSQL and in-process HTTP handler verification. Device
 revocation races, installed clients and pixel UI are not measured here. Separate
 client/Orgtree receipts cover their paths; independent review remains pending.
+
+Round1 correction extends the same two focused tests with real authenticated
+unregister/re-register to a different secret, absent-picture/new-owner token,
+lower independent revision acceptance, same-owner tombstone token preservation,
+and sync roster token parity. This is native PostgreSQL/HTTP-handler measurement;
+client cache/renderer controls are measured separately in Hubchat. No migration,
+live registration, deployed hub or device action was performed.
