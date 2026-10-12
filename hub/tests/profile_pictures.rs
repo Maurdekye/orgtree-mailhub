@@ -2,6 +2,7 @@
 mod support;
 use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use ed25519_dalek::{Signer, SigningKey};
 use mailhub::Hub;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -88,6 +89,28 @@ async fn picture_authority_convergence_and_lifetime() {
     assert!(get(&hub,&pa,"person.pic").await.json()["picture"]["data"].is_null());
     // An explicit observed later edit can replace removal.
     assert_eq!(put(&hub,&pa,"person.pic",image(4,40)).await.json()["changed"],true);
+    // Picture endpoints use the same device credentials as the rest of the API.
+    let identity = SigningKey::from_bytes(&[42; 32]);
+    let device = SigningKey::from_bytes(&[43; 32]);
+    let public = |key: &SigningKey| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes());
+    let sign = |key: &SigningKey, message: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.sign(message.as_bytes()).to_bytes());
+    assert_eq!(Call::new("POST","/api/identity").auth(&oa).json(json!({"identity_key":public(&identity)})).send(&hub).await.code(),200);
+    let created = "2026-10-08T18:00:00.000Z";
+    let certificate = mailhub::api::keys::device_certificate("org.pic", "picture-device", &public(&device), created);
+    assert_eq!(Call::new("POST","/api/devices").json(json!({"slug":"org.pic","device_id":"picture-device","public_key":public(&device),"created":created,"signature":sign(&identity,&certificate),"name":"picture-device"})).send(&hub).await.code(),200);
+    let device_auth = |key: &SigningKey| {
+        let ms = chrono::Utc::now().timestamp_millis();
+        format!("org.pic:dev1.picture-device.{ms}.{}",sign(key,&mailhub::auth::call_message("org.pic","picture-device",ms)))
+    };
+    assert_eq!(get(&hub,&device_auth(&device),"person.pic").await.code(),200);
+    assert_eq!(put(&hub,&device_auth(&device),"org.pic",image(5,50)).await.json()["changed"],true);
+    assert_eq!(put(&hub,&device_auth(&device),"person.pic",image(6,60)).await.code(),401);
+    assert_eq!(put(&hub,&device_auth(&identity),"org.pic",image(6,60)).await.code(),401);
+    assert_eq!(Call::new("POST","/api/identity").auth(&oa).json(json!({"shared_key":false})).send(&hub).await.code(),200);
+    assert_eq!(get(&hub,&oa,"org.pic").await.code(),401);
+    assert_eq!(put(&hub,&oa,"org.pic",image(6,60)).await.code(),401);
+    assert_eq!(put(&hub,&device_auth(&device),"org.pic",image(6,60)).await.json()["changed"],true);
+    assert_eq!(get(&hub,&device_auth(&device),"org.pic").await.json()["picture"]["revision"],image(6,60)["revision"]);
     let c=sql_client(&url).await;
     assert_eq!(c.query_one("SELECT count(*) FROM mailhub.messages",&[]).await.unwrap().get::<_,i64>(0),0);
     assert_eq!(c.query_one("SELECT count(*) FROM mailhub.attachments",&[]).await.unwrap().get::<_,i64>(0),0);

@@ -60,10 +60,14 @@ equal replay/conflict, stale lower revisions, tombstones and concurrent edits,
 identity departure/re-registration, unchanged messages/transfers, and old-client
 registration not removing pictures. No deployment or live profile is authorized.
 
-## Measured foundation checkpoint (2026-10-12)
+## Measured verification (2026-10-12)
 
 The focused `profile_pictures` target passes 2 tests against isolated PostgreSQL:
 validation plus HTTP ownership/eligibility/revision/roster/removal/lifetime paths.
-The exact source compiled in 1.05s and tests ran in 1.47s, exit0. This is a hub
-foundation checkpoint, not end-to-end client, device-key, pixel UI or deployment
-acceptance. Client editing/synchronization and independent review remain pending.
+The final run also enrolls a device through the real identity/device APIs,
+proves signed GET/POST success, refuses another identity's writes and a forged
+device signature, and proves shared-key refusal plus continuing device access
+after shared-key disable. Compilation took7.03s and tests1.68s, exit0.
+This is isolated PostgreSQL and in-process HTTP handler verification. Device
+revocation races, installed clients and pixel UI are not measured here. Separate
+client/Orgtree receipts cover their paths; independent review remains pending.
