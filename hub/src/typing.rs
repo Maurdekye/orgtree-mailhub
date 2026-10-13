@@ -63,6 +63,11 @@ impl Default for Typing {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TooMany;
 
+/// Whether `v` holds a heartbeat from `from` still kept at `now`.
+fn holds(v: &[Beat], from: &str, now: Instant) -> bool {
+    v.iter().any(|b| b.from == from && now.saturating_duration_since(b.at) < KEEP)
+}
+
 impl Typing {
     fn inner(&self) -> MutexGuard<'_, Inner> {
         // a panic elsewhere never leaves the map half-written: carry on
@@ -75,10 +80,8 @@ impl Typing {
     pub fn beat(&self, from: &str, to: &[String], now: Instant) -> Result<Vec<String>, TooMany> {
         let mut g = self.inner();
         let inner = &mut *g;
-        let kept = |b: &Beat| now.saturating_duration_since(b.at) < KEEP;
-        let holds = |v: &Vec<Beat>| v.iter().any(|b| b.from == from && kept(b));
-        let live = inner.by_to.values().filter(|v| holds(*v)).count();
-        let new = to.iter().filter(|t| t.as_str() != from && !inner.by_to.get(*t).is_some_and(holds)).count();
+        let live = inner.by_to.values().filter(|v| holds(v, from, now)).count();
+        let new = to.iter().filter(|t| t.as_str() != from && !inner.by_to.get(*t).is_some_and(|v| holds(v, from, now))).count();
         if live + new > MAX_LIVE_PER_SENDER {
             return Err(TooMany);
         }
@@ -88,12 +91,12 @@ impl Typing {
                 continue;
             }
             let v = inner.by_to.entry(t.clone()).or_default();
-            match v.iter_mut().find(|b| b.from == from) {
-                Some(b) if now.saturating_duration_since(b.at) < MIN_GAP => continue,
-                Some(b) => {
+            match v.iter().position(|b| b.from == from) {
+                Some(i) if now.saturating_duration_since(v[i].at) < MIN_GAP => continue,
+                Some(i) => {
                     inner.seq += 1;
-                    b.at = now;
-                    b.seq = inner.seq;
+                    v[i].at = now;
+                    v[i].seq = inner.seq;
                 }
                 None => {
                     inner.seq += 1;

@@ -212,7 +212,7 @@ async fn a_heartbeat_reaches_the_device_in_use_at_once_and_ends_by_itself() {
         a
     };
     seen.sort();
-    let mut both = vec![org.0.clone(), cat.0.clone()];
+    let mut both = [org.0.clone(), cat.0.clone()];
     both.sort();
     assert_eq!(seen, both);
 
