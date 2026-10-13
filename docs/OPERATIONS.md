@@ -197,11 +197,14 @@ at startup, so upgrading the image and restarting is the whole procedure; a
 database written by a newer hub is refused rather than downgraded.
 
 ⚠ **2.1.0 is a one-way step: back up first.** Its first start adds schema 9
-(UnifiedPush subscriptions). From then on a 2.0.x hub refuses the database
+(UnifiedPush subscriptions), and so does the first start of any later
+version on a 2.0.x database. From then on a 2.0.x hub refuses the database
 ("the database schema is version 9, newer than this hub understands"), so
 going back to 2.0.x means restoring the backup you took before the upgrade,
 losing what arrived since. Take that backup (both volumes, see Backup and
-restore) before you start 2.1.0 for the first time.
+restore) before you start 2.1.0 or later for the first time. 2.1.1 keeps
+schema 9: between 2.1.0 and 2.1.1, replacing the image is the whole step,
+in either direction.
 
 v1: the store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
 idempotent column migrations at connect time — upgrading the image and
