@@ -156,7 +156,7 @@ async fn a_heartbeat_reaches_the_device_in_use_at_once_and_ends_by_itself() {
     let t = Instant::now();
     assert_eq!(beat(&hub, &org, &[&ann.0, &bob.0]).await, 2);
     let a = answered(desk_wait, t, Duration::from_millis(500), "a heartbeat wakes the device in use at once").await;
-    assert_eq!(senders(&a), [org.0.clone()]);
+    assert_eq!(senders(&a), [org.0.as_str()]);
     assert_eq!(a["typing_only"], json!(true), "{a}");
     assert_eq!((&a["cursor"], &a["changes"]), (&desk["cursor"], &json!([])), "nothing else moved: {a}");
     assert!(a.get("active").is_none(), "{a}");
@@ -178,7 +178,7 @@ async fn a_heartbeat_reaches_the_device_in_use_at_once_and_ends_by_itself() {
     assert_eq!(beat(&hub, &org, &[&ann.0]).await, 1);
     assert_eq!(beat(&hub, &org, &[&ann.0]).await, 0, "a second one within 300 ms is absorbed");
     let desk = answered(desk_wait, t, Duration::from_millis(500), "the next heartbeat is relayed at once").await;
-    assert_eq!(senders(&desk), [org.0.clone()]);
+    assert_eq!(senders(&desk), [org.0.as_str()]);
 
     // no stop: when the heartbeats stop, nothing wakes the desk, and at its
     // deadline it is told nothing stale
@@ -221,7 +221,7 @@ async fn a_heartbeat_reaches_the_device_in_use_at_once_and_ends_by_itself() {
     assert_eq!(beat(&hub, &org, &[&ann.0]).await, 1);
     send(&hub, &org, &ann.0, &format!("m-{}", token_hex3())).await;
     let a = sync_now(&hub, &ann, "ann-desk", Some(&desk["cursor"]), Some(desk["typing_seq"].clone())).await;
-    assert_eq!(senders(&a), [org.0.clone()]);
+    assert_eq!(senders(&a), [org.0.as_str()]);
     assert!(a.get("typing_only").is_none() && a["changes"].as_array().is_some_and(|c| c.len() == 1), "{a}");
     println!("  ok  a whole answer carries the heartbeats it relays");
 }
