@@ -30,6 +30,7 @@ pub mod presence;
 pub mod push;
 pub mod server;
 pub mod sweep;
+pub mod typing;
 pub mod wire;
 
 pub use api::Hub;

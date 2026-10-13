@@ -14,6 +14,7 @@ pub mod ops;
 pub mod pictures;
 pub mod sync;
 pub mod transfers;
+pub mod typing;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,6 +42,9 @@ pub struct Hub {
     pub cfg: Config,
     pub db: Db,
     pub presence: Presence,
+    /// the typing heartbeats of the last seconds (feature `typing`; memory
+    /// only)
+    pub typing: crate::typing::Typing,
     pub shutdown: CancellationToken,
     /// resumable uploads a request is writing to right now (one at a time)
     pub writing: papaya::HashSet<String>,
@@ -193,8 +197,14 @@ impl Req {
     /// The body of a v2 route (no v1 behaviour to keep): anything but a
     /// JSON object is a 400 that says so.
     pub async fn json_object_strict(&mut self) -> ApiResult<Map<String, Value>> {
+        self.json_object_strict_max(MAX_JSON_BODY).await
+    }
+
+    /// `json_object_strict` for a route whose bodies are small: more than
+    /// `limit` bytes is a 413.
+    pub async fn json_object_strict_max(&mut self, limit: usize) -> ApiResult<Map<String, Value>> {
         let body = std::mem::take(&mut self.body);
-        let bytes = read_limited(body, MAX_JSON_BODY).await?;
+        let bytes = read_limited(body, limit).await?;
         match serde_json::from_slice::<Value>(&bytes) {
             Ok(Value::Object(o)) => Ok(o),
             _ => refuse(StatusCode::BAD_REQUEST, "the request body must be a JSON object"),
@@ -225,6 +235,7 @@ enum Route {
     Profile,
     Picture,
     Sync,
+    Typing,
     Devices,
     Active,
     PushSet,
@@ -319,6 +330,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/roster" => (Roster, Method::GET),
         "/api/profile" => (Profile, Method::POST),
         "/api/sync" => (Sync, Method::POST),
+        "/api/typing" => (Typing, Method::POST),
         "/api/conversations" => (Conversations, Method::GET),
         "/api/directory" => (Directory, Method::GET),
         "/api/history" => (History, Method::GET),
@@ -465,6 +477,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Profile => mail::profile(hub, req).await,
         Route::Picture => pictures::picture(hub, req).await,
         Route::Sync => sync::sync(hub, req).await,
+        Route::Typing => typing::typing(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
         Route::Active => sync::active(hub, req).await,
         Route::Enrol => keys::enrol(hub, req).await,

@@ -7,7 +7,8 @@
 //! instant, and a `Notify` that wakes only that address's parked polls when
 //! mail or a receipt arrives for it. v2's syncs (G1) park the same way, with
 //! a second `Notify` per address for what only its own devices care about,
-//! and one more for roster changes.
+//! and one more for roster changes. A third per address wakes its parked
+//! syncs when a typing heartbeat comes for it (`crate::typing`, 2026-10-13).
 //!
 //! v2.0.2: a parked poll or sync that ends because its client hung up (the
 //! process stopped or was killed, so the connection closed) leaves the
@@ -42,6 +43,8 @@ pub struct Slot {
     /// its parked syncs only: what only its own devices care about (a
     /// message one of them sent, a receipt one of them wrote)
     sync: Notify,
+    /// its parked syncs only: a typing heartbeat came for it (`typing`)
+    typing: Notify,
 }
 
 pub struct Presence {
@@ -156,6 +159,17 @@ impl Presence {
         }
     }
 
+    /// A typing heartbeat came for these addresses (`crate::typing`): wake
+    /// their parked syncs (only a device in use that asked answers for it).
+    pub fn typing_changed<'a>(&self, slugs: impl IntoIterator<Item = &'a str>) {
+        let map = self.slots.pin();
+        for s in slugs {
+            if let Some(slot) = map.get(s) {
+                slot.typing.notify_waiters();
+            }
+        }
+    }
+
     /// The roster changed: wake every parked sync.
     pub fn roster_changed(&self) {
         self.roster.notify_waiters();
@@ -207,14 +221,22 @@ impl Presence {
         on
     }
 
-    /// A sync's wake-ups: its address's syncs, the roster and the set
-    /// online. Enabled at once, so call it BEFORE checking the database.
+    /// A sync's wake-ups: its address's syncs, the roster, the set online
+    /// and typing heartbeats for it. Enabled at once, so call it BEFORE
+    /// checking the database.
     pub fn sync_listener<'a>(&'a self, slot: &'a Slot) -> SyncListener<'a> {
         let mut mine = Box::pin(slot.sync.notified());
         mine.as_mut().enable();
         let mut roster = Box::pin(self.roster.notified());
         roster.as_mut().enable();
-        SyncListener { mine, roster, online: enabled(&self.online), online_notify: &self.online }
+        SyncListener {
+            mine,
+            roster,
+            online: enabled(&self.online),
+            online_notify: &self.online,
+            typing: enabled(&slot.typing),
+            typing_notify: &slot.typing,
+        }
     }
 
     /// The wake-up handle of one address.
@@ -255,6 +277,8 @@ pub struct SyncListener<'a> {
     roster: std::pin::Pin<Box<tokio::sync::futures::Notified<'a>>>,
     online: std::pin::Pin<Box<tokio::sync::futures::Notified<'a>>>,
     online_notify: &'a Notify,
+    typing: std::pin::Pin<Box<tokio::sync::futures::Notified<'a>>>,
+    typing_notify: &'a Notify,
 }
 
 /// What woke a parked sync.
@@ -264,6 +288,8 @@ pub enum Woke {
     Changed,
     /// only the set online: no database check needed
     Online,
+    /// only a typing heartbeat for the address: no database check needed
+    Typing,
 }
 
 impl SyncListener<'_> {
@@ -277,6 +303,10 @@ impl SyncListener<'_> {
             _ = &mut self.online => {
                 self.online = enabled(self.online_notify);
                 Woke::Online
+            }
+            _ = &mut self.typing => {
+                self.typing = enabled(self.typing_notify);
+                Woke::Typing
             }
         }
     }

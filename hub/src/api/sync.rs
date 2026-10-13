@@ -428,7 +428,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
-async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch, start_now: bool) -> ApiResult {
+async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch, start_now: bool, typing: Option<u64>) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
     let online = hub.presence.online_now();
@@ -458,7 +458,56 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
     if start_now {
         out["start"] = json!("now");
     }
+    if let Some(seen) = typing {
+        typing_rows(hub, slug, seen, &mut out);
+    }
     ok(out)
+}
+
+/// The heartbeats an answer relays (typing): the senders of the fresh ones
+/// the sync was not told yet, and the mark it sends back as `typing`.
+fn typing_rows(hub: &Hub, slug: &str, seen: u64, out: &mut Value) {
+    let (from, mark) = hub.typing.relay(slug, seen, Instant::now());
+    out["typing"] = json!(from.iter().map(|f| json!({ "from": f })).collect::<Vec<_>>());
+    out["typing_seq"] = json!(mark);
+}
+
+/// The answer to a parked sync of a device in use when all that came for
+/// it is a heartbeat (typing), built from memory without the database:
+/// nothing else moved, so the cursor is the one it sent and there are no
+/// changes. `typing_only` says so; `active` is left out (no message here
+/// needs it).
+fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64) -> ApiResult {
+    let online = hub.presence.online_now();
+    let mut out = json!({
+        "name": hub.cfg.hub_name,
+        "version": crate::VERSION,
+        "cursor": cur.render(cur.online.unwrap_or_else(|| online_print(&online))),
+        "changes": [],
+        "roster": [],
+        "roster_removed": [],
+        "more": false,
+        "identity_key_version": key_version,
+        "now": clock::now().timestamp_millis(),
+        "typing_only": true,
+    });
+    if cur.online.is_none() {
+        out["online"] = json!(online);
+    }
+    typing_rows(hub, slug, seen, &mut out);
+    ok(out)
+}
+
+/// `typing`: absent or false; true for a device that wants the heartbeats
+/// of whoever writes to its address; or the `typing_seq` of its last
+/// answer, so it is told each heartbeat once (and a device in use at once).
+fn parse_typing(hub: &Hub, v: Option<&Value>) -> ApiResult<Option<u64>> {
+    match v {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
+        Some(Value::Bool(true)) => Ok(Some(0)),
+        Some(Value::Number(n)) if n.as_u64().is_some() => Ok(n.as_u64().map(|m| hub.typing.seen(m))),
+        _ => refuse(StatusCode::UNPROCESSABLE_ENTITY, "typing must be true or the typing_seq of your last answer"),
+    }
 }
 
 /// `start`: absent, or `"now"` on a device's first sync (lazy history:
@@ -496,6 +545,7 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let name = device_name(body.get("device_name"))?;
     let mut cur = Cursor::parse(body.get("cursor"))?;
     let start_now = parse_start(body.get("start"), cur)?;
+    let typing = parse_typing(hub, body.get("typing"))?;
     let wait = match body.get("wait") {
         None | Some(Value::Null) => wait_query,
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
@@ -538,8 +588,15 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
             // changed; the rest learn it with their next answer (a phone in
             // a pocket is not woken for it)
             let online_news = || in_use && cur.online.is_some_and(|p| p != online_print(&hub.presence.online_now()));
+            // a heartbeat for a device in use that asked for them (typing,
+            // 2026-10-13): a fresh one it was not told yet
+            let typing_news = || in_use && typing.is_some_and(|seen| hub.typing.news(&slug, seen, Instant::now()));
             if batch.news() || start_now || stop || online_news() || Instant::now() >= deadline {
-                return sync_answer(hub, &slug, &device, cur, batch, start_now).await;
+                return sync_answer(hub, &slug, &device, cur, batch, start_now, typing).await;
+            }
+            // nothing but a heartbeat: answered from memory
+            if let (true, Some(seen)) = (typing_news(), typing) {
+                return typing_answer(hub, &slug, cur, batch.key_version, seen);
             }
             loop {
                 let woke = tokio::select! {
@@ -555,6 +612,9 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
                 // presence tick marked (their last_seen as it stands, v2.0.3)
                 if woke == Woke::Changed || online_news() {
                     break;
+                }
+                if let (true, Some(seen)) = (typing_news(), typing) {
+                    return typing_answer(hub, &slug, cur, batch.key_version, seen);
                 }
             }
         }
@@ -577,7 +637,8 @@ async fn device_in_use(c: &impl GenericClient, slug: &str, device: &str) -> ApiR
 /// in use answers with the new `online` (v2.0.2). An address that left the
 /// set has its roster entry marked changed first (v2.0.3), so that answer
 /// and every device's next one carry its `last_seen` as it stands: its last
-/// call, not its last roster change.
+/// call, not its last roster change. It also drops the typing heartbeats
+/// past keeping (typing, 2026-10-13); that wakes nobody.
 pub async fn presence_loop(hub: Arc<Hub>) {
     let mut last = hub.presence.online_now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -586,6 +647,7 @@ pub async fn presence_loop(hub: Arc<Hub>) {
             _ = tick.tick() => {}
             _ = hub.shutdown.cancelled() => return,
         }
+        hub.typing.sweep(Instant::now());
         let now = hub.presence.online_now();
         if now != last {
             let gone: Vec<String> = last.iter().filter(|s| now.binary_search(s).is_err()).cloned().collect();
