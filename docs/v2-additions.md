@@ -608,7 +608,7 @@ roster carries the same online flags, as of each answer.
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), and `typing`. A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 
@@ -726,3 +726,72 @@ holds. The hub never reads it.
   on vouches for nothing. Readers check it themselves.
 - `/healthz` lists `meta`. Clients send it only to hubs that do; an older hub
   drops unknown keys, so a client that sent it anyway would just lose it.
+
+## Typing (feature `typing`)
+
+A sender says it is writing a message, by heartbeat. Orgtree's engine sends
+them while an agent writes mail to an address; Hubchat sends them while its
+user writes a message. The recipient's Hubchat shows "<name> is typing…"
+while a heartbeat arrived within the last second, by its own clock. There
+is no start and no stop: when the heartbeats stop, the indicator ends by
+itself, so a sender that crashes or loses its connection can't leave one
+standing (user 2026-10-13). The hub only relays. It keeps heartbeats in
+memory for two seconds at most, never stores them, never turns them into
+mail, and forgets them on restart.
+
+`POST /api/typing` is one heartbeat, authenticated like every call (org
+credentials or a device's signature):
+
+```json
+{ "slug": "<optional: which signed-in address sends>",
+  "to": ["<address>", "..."] }
+```
+
+- A sender sends one about every 500 ms while it writes to those addresses,
+  and simply stops when it stops.
+- `to`: 1-10 addresses. The sender itself is skipped. Nothing is looked up:
+  an address that isn't registered here has no syncs to wake.
+- The body carries `slug` and `to` and nothing else, so no content can ride
+  along.
+- A sender's heartbeats to one address closer together than 300 ms count
+  once; the rest are absorbed. The answer says how many addresses this one
+  counted for: `{"ok": true, "counted": <n>}`.
+- Refusals: 401 without valid credentials; 422 for a bad `to` or any other
+  field; 413 for a body over 4096 bytes; 429 when the sender is already
+  beating to 32 addresses within the last two seconds.
+
+A sync asks for heartbeats with `"typing": true` in its body. After that it
+sends back the `typing_seq` from its last answer, so it is told each
+heartbeat once. Every answer to such a sync carries the senders of the
+heartbeats it relays (each fresh, under a second old, and not told before),
+and the mark to send back:
+
+```json
+"typing": [{ "from": "orgtree.example.b8301c" }],
+"typing_seq": 1791932400123456
+```
+
+- A parked sync of a **device in use** (`POST /api/devices/active`) answers
+  as soon as a heartbeat comes for its address. When that is all that
+  changed, the hub answers from memory, without the database: a
+  **typing-only answer** with `"typing_only": true`, the cursor the sync
+  sent, no changes, and no `active`. The device syncs again at once, with
+  the new `typing_seq`. A device that was between syncs gets the heartbeat
+  at once with its next sync.
+- Devices not in use are never woken for typing. Their next answer
+  relays only what is still fresh.
+- Nothing stale is ever relayed, and no heartbeat ending wakes anybody: the
+  receiver drops the indicator a second after the last heartbeat it got.
+- Syncs that don't ask, v1 polls, and older clients see nothing new and are
+  never woken for it.
+- `typing_seq` numbers count up from the hub's start time in microseconds,
+  so a mark from before a restart is below every new one. A mark above
+  every number the hub has given counts as none.
+- 422 refusal: `typing must be true or the typing_seq of your last answer`.
+- `/healthz` lists `typing`. Senders and clients use it only with hubs that
+  list it. An older hub ignores an unknown `typing` in a sync body.
+
+The relay's cost (measured by `tests/typing_load.rs`): each heartbeat costs
+the hub one credentials lookup, and each relay one sync round trip of the
+recipient's device in use, whose answer reads no database. One sender
+writing to one person with one device in use is about two relays a second.

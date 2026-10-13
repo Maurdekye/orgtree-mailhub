@@ -1,5 +1,19 @@
 # Mail hub development invariants
 
+- 2026-10-13: Typing (feature `typing`) is heartbeats, memory only
+  (`crate::typing`, by recipient): never stored, never mail, kept 2 s,
+  relayed only while under 1 s old, each told to a sync once (`typing_seq`,
+  counting from the start time in microseconds). No start, no stop: nothing
+  wakes a sync when heartbeats end, because the receiver drops the indicator
+  1 s after the last heartbeat it got. Only a device in use that asked is
+  woken, and a wake that brings only heartbeats is answered from memory
+  (`typing_only`, no database). `POST /api/typing` takes `slug` and `to`
+  only; 10 recipients, 32 per sender within 2 s, one per 300 ms per pair.
+  [decided: user 2026-10-13 22:34Z (heartbeats), Orgtree docket
+  show-agent-typing-in-hubchat-using-ordered-messa; verified:
+  hub/src/typing.rs, api/typing.rs, api/sync.rs, presence.rs;
+  tests/typing.rs, tests/typing_load.rs; docs/v2-additions.md]
+
 - 2026-10-13: Local bundled `2.2.0-alpha.0` preserves approved picture/message
   metadata source `33bb02d` and released recovery provenance `2c22e3d`; recovery
   runtime was already common at `7290a59`. Version changes touch only the package
