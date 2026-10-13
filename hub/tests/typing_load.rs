@@ -175,30 +175,26 @@ async fn relaying_heartbeats_costs_no_database_work_beyond_the_syncs() {
     let n = typing.relays.len().max(1) as f64;
 
     println!("  relay load (in-process, one sender, one device in use)");
-    println!("    idle:   {} syncs, {} statements in {:.1} s ({:.2}/s), CPU {:?}", idle.syncs, idle_statements, idle_secs, idle_rate, idle_cpu);
+    println!("    idle:   {} syncs, {idle_statements} statements in {idle_secs:.1} s ({idle_rate:.2}/s), CPU {idle_cpu:?}", idle.syncs);
     println!(
-        "    typing: {} heartbeats, {} syncs ({} answered typing-only), {} relays, {} statements in {:.1} s, CPU {:?}",
+        "    typing: {} heartbeats, {} syncs ({} answered typing-only), {} relays, {typing_statements} statements in {typing_secs:.1} s, CPU {typing_cpu:?}",
         beats.len(),
         typing.syncs,
         typing.typing_only,
         typing.relays.len(),
-        typing_statements,
-        typing_secs,
-        typing_cpu
     );
     println!("    beyond idle: {:.1} statements per heartbeat relayed ({:.1}/s)", extra / n, extra / typing_secs);
     if let (Some(i), Some(t)) = (idle_cpu, typing_cpu) {
         println!("    CPU beyond idle: {:.2} ms per relay ({:.2}% of one core)", (ms(t) - ms(i) * typing_secs / idle_secs) / n, (ms(t) / typing_secs - ms(i) / idle_secs) / 10.0);
     }
     println!(
-        "    heartbeat to relay: median {:.1} ms, p95 {:.1} ms, max {:.1} ms; gap between relays: median {:.0} ms, max {:.0} ms",
+        "    heartbeat to relay: median {:.1} ms, p95 {:.1} ms, max {:.1} ms; gap between relays: median {:.0} ms, max {max_gap:.0} ms",
         quantile(&mut delays.clone(), 0.5),
         quantile(&mut delays, 0.95),
         delays.iter().copied().fold(0.0, f64::max),
         quantile(&mut gaps, 0.5),
-        max_gap
     );
-    println!("    relay answer size: median {:.0} bytes; last relay {:.0} ms after the last heartbeat", quantile(&mut sizes, 0.5), after_last);
+    println!("    relay answer size: median {:.0} bytes; last relay {after_last:.0} ms after the last heartbeat", quantile(&mut sizes, 0.5));
 
     assert!(typing.relays.len() * 10 >= beats.len() * 9, "each heartbeat reaches the device: {} of {}", typing.relays.len(), beats.len());
     assert!(max_gap < 1000.0, "the indicator would drop between heartbeats: a {max_gap:.0} ms gap");
