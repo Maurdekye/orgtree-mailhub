@@ -791,7 +791,27 @@ and the mark to send back:
 - `/healthz` lists `typing`. Senders and clients use it only with hubs that
   list it. An older hub ignores an unknown `typing` in a sync body.
 
-The relay's cost (measured by `tests/typing_load.rs`): each heartbeat costs
-the hub one credentials lookup, and each relay one sync round trip of the
-recipient's device in use, whose answer reads no database. One sender
-writing to one person with one device in use is about two relays a second.
+The relay's cost: each heartbeat costs the hub one credentials lookup. Each
+relay costs one sync round trip of the recipient's device in use, and the
+answer itself reads no database. One sender writing to one person with one
+device in use is about two relays a second.
+
+Measured by `tests/typing_load.rs` (rig-opus round 431, 2026-10-13, hub
+`fbcef3b`, requests dispatched in-process, a scratch PostgreSQL). One
+sender sent 21 heartbeats over 10.5 s to one person with one device in
+use:
+
+- All 21 were relayed, every one in a typing-only answer. Each answer came a
+  median 0.8 ms after its heartbeat was posted (p95 0.9 ms, max 23 ms).
+- The relays came a median 500 ms apart and at most 501 ms apart, so the
+  receiver's 1 s window never lapsed while heartbeats came. The last relay
+  came 1 ms after the last heartbeat.
+- A typing-only answer is about 270 bytes.
+- Database load: 9.0 statements per relayed heartbeat beyond the idle device,
+  about 16 a second for this writer and device. That is the heartbeat's
+  credentials lookup plus the device's next sync request: its credentials,
+  sign-out and device checks and change-log reads.
+- The test process's CPU time didn't change at the Windows process
+  counter's 15.6 ms resolution over the 11.5 s run. That puts it on the
+  order of a millisecond per relay or less; it is an estimate, not a
+  precise figure.
