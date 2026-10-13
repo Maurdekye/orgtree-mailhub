@@ -206,6 +206,16 @@ restore) before you start 2.1.0 or later for the first time. 2.1.1 keeps
 schema 9: between 2.1.0 and 2.1.1, replacing the image is the whole step,
 in either direction.
 
+**Local 2.2.0-alpha.0 adds schema 10 (message metadata).** Its first start on
+a schema-9 database applies the already-implemented migration 10. A 2.1.x
+hub then refuses that database as newer than it understands; rolling back
+requires restoring a backup from before the migration and loses later mail.
+Use the same two-volume backup procedure above before testing an upgrade.
+No automatic backup or downgrade is added. Profile pictures use existing
+`hub_meta` storage. This local alpha retains the 2.1.1 upload-recovery code;
+version composition itself changes no runtime or migration SQL. No live
+upgrade or rollback has been performed by this packaging preparation.
+
 v1: the store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
 idempotent column migrations at connect time — upgrading the image and
 restarting is the whole procedure. Downgrading is not supported once a newer

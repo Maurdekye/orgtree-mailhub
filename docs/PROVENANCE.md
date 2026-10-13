@@ -134,6 +134,17 @@ listed is meant to be byte-identical or behavior-identical to V1.
    file that can't be removed is logged instead of failing the cancel or
    the sweep. No schema change (still 9) and no API additions; the tests
    are `transfer_recovery` in v2.md.
+14. **Local v2.2.0-alpha.0: approved pictures and message metadata**
+   (2026-10-13, lead-astra packaging composition). Merge approved source
+   `33bb02d` with released `2c22e3d`, preserving both parents. Their common
+   `7290a59` already contains identical resumable-upload recovery runtime;
+   the released-side increment is version/declaration documentation only.
+   This composition retains every runtime, test and migration blob from
+   `33bb02d`, changes the package and its lock row to `2.2.0-alpha.0`, and
+   updates provenance/operational documentation. No new protocol behavior,
+   independent review, compilation, publication or live migration is claimed.
+   Pictures remain in `hub_meta`; message metadata adds schema 10.
+   A 2.1.x hub refuses a database migrated to 10 (OPERATIONS.md, Upgrades).
 
 ## Known V1 gaps carried across deliberately
 

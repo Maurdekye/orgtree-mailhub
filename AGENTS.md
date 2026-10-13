@@ -1,5 +1,15 @@
 # Mail hub development invariants
 
+- 2026-10-13: Local bundled `2.2.0-alpha.0` preserves approved picture/message
+  metadata source `33bb02d` and released recovery provenance `2c22e3d`; recovery
+  runtime was already common at `7290a59`. Version changes touch only the package
+  declaration/lock row; runtime/tests/migrations stay byte-identical to the
+  approved source. First start migrates schema 9 to 10, so a 2.1.x hub then
+  refuses that database. No automatic backup or downgrade is added. Local
+  composition is not publication, packaging or migration acceptance.
+  [decided: lead-astra 2026-10-13 14:24UTC; verified: hub/Cargo.toml,
+  Cargo.lock, hub/src/db.rs; docs/PROVENANCE.md and OPERATIONS.md]
+
 - 2026-10-12: Message `meta` (feature `meta`, schema 10) is an optional JSON
   object a client attaches on `/api/send`: at most 4096 bytes as compact JSON,
   no NUL, stored with the message and returned unchanged in every envelope

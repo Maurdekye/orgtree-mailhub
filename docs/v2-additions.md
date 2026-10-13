@@ -603,18 +603,19 @@ roster carries the same online flags, as of each answer.
 
 ## Telling what a hub supports
 
-`/healthz` also reports `"version"` (`"2.1.1"`), `"features"` and `"now"`
+`/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`
 (the hub's clock, unix milliseconds). The features are the additions this
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
-`device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0). A
+`device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
+`profile_pictures` and `meta` (local 2.2.0-alpha.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 
 ## The hub's version, to every client
 
 Every answer that names the hub (its `"name"`) also carries
-`"version"`: the hub's own version as a string (`"2.1.1"`), the same value
+`"version"`: the hub's own version as a string (`"2.2.0-alpha.0"` in the local alpha), the same value
 `/healthz` and `orgtree-mailhub --version` report. So a client sees it on
 the paths it already uses, without a separate call:
 
