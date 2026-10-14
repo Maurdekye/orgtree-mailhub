@@ -115,6 +115,20 @@ pub fn plain(status: StatusCode, text: &'static str) -> Resp {
 }
 
 impl ApiError {
+    /// The detail a 4xx refusal carries, for the request log line: the same
+    /// text the sender is told. A 5xx has none (its error goes to tracing).
+    fn log_detail(&self) -> Option<String> {
+        match self {
+            ApiError::Http(s, d) if s.is_client_error() => Some(d.clone()),
+            ApiError::Body(s, v) if s.is_client_error() => match v.get("detail") {
+                Some(Value::String(d)) => Some(d.clone()),
+                Some(other) => Some(other.to_string()),
+                None => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn into_response(self) -> Resp {
         match self {
             ApiError::Http(s, detail) => json(s, &serde_json::json!({ "detail": detail })),
@@ -132,6 +146,9 @@ pub struct Req {
     pub method: Method,
     /// percent-decoded, as ASGI's scope["path"]
     pub path: String,
+    /// the recipient a send named, recorded for the request log line if the
+    /// hub refuses the send (slugs and the refusal reason only, never a body)
+    pub refusal_to: Option<String>,
     pub headers: http::HeaderMap,
     query: Vec<(String, String)>,
     raw_query: Option<String>,
@@ -150,7 +167,7 @@ impl Req {
         let query = parts.uri.query().map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect()).unwrap_or_default();
         let raw_query = parts.uri.query().map(str::to_string);
         let on_door = parts.extensions.get::<ThroughDoor>().is_some();
-        Req { method: parts.method, path: wire::decoded_path(parts.uri.path()), headers: parts.headers, query, raw_query, body, on_door }
+        Req { method: parts.method, path: wire::decoded_path(parts.uri.path()), refusal_to: None, headers: parts.headers, query, raw_query, body, on_door }
     }
 
     /// A query parameter; repeated names take the last value (Starlette).
@@ -388,8 +405,15 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
     let slugs = crate::auth::logged_slugs(req.headers().get("x-org-auth"));
     let mut req = Req::new(req);
     let path = req.path.clone();
+    let mut refusal_detail: Option<String> = None;
     let resp = match route(&req.method, &path) {
-        Some(Ok(r)) => handle(&hub, r, &mut req).await.unwrap_or_else(ApiError::into_response),
+        Some(Ok(r)) => match handle(&hub, r, &mut req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                refusal_detail = e.log_detail();
+                e.into_response()
+            }
+        },
         Some(Err(allow)) => {
             let mut r = json(StatusCode::METHOD_NOT_ALLOWED, &serde_json::json!({ "detail": "Method Not Allowed" }));
             r.headers_mut().insert(header::ALLOW, HeaderValue::from_static(allow));
@@ -397,7 +421,9 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
         }
         None => slash_redirect(&req).unwrap_or_else(|| json(StatusCode::NOT_FOUND, &serde_json::json!({ "detail": "Not Found" }))),
     };
-    crate::log::request_line(&path, &slugs, resp.status().as_u16(), t0.elapsed());
+    let status = resp.status();
+    let refusal = status.is_client_error().then_some(crate::log::Refusal { to: req.refusal_to.as_deref(), detail: refusal_detail.as_deref() });
+    crate::log::request_line(&path, &slugs, status.as_u16(), t0.elapsed(), refusal);
     resp
 }
 

@@ -524,6 +524,9 @@ pub async fn ack(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let body = req.json_object().await?;
     let to = py_strip(&str_field(&body, "to")).to_string();
+    // the recipient this send names, for the request log line if the hub
+    // refuses it (dispatch logs it with the refusal's detail; never the body)
+    req.refusal_to = Some(to.clone());
     let slugs = authed(hub, req).await?;
     let frm = get_or(&body, "from").map(py_str).unwrap_or_else(|| slugs.first().cloned().unwrap_or_default());
     if !slugs.contains(&frm) {

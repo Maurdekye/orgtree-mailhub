@@ -1,5 +1,14 @@
 # Mail hub development invariants
 
+- 2026-10-14: A refused send is diagnosable from the hub's own log: a 4xx
+  answer to `POST /api/send` appends the refusal's `detail` (the same text
+  the sender is told) and the recipient slug (`to`) to that request's one
+  log line; other 4xx endpoints log their detail the same way. The response
+  contract is unchanged, and bodies, attachment contents and credentials
+  are never logged. [verified: hub/src/api/mod.rs, api/mail.rs, log.rs;
+  tests/send_refusal_log.rs; Orgtree docket
+  mail-hub-logs-the-reason-and-recipient-when-it-r]
+
 - 2026-10-13: Typing (feature `typing`) is heartbeats, memory only
   (`crate::typing`, by recipient): never stored, never mail, kept 2 s,
   relayed only while under 1 s old, each told to a sync once (`typing_seq`,
