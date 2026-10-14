@@ -80,6 +80,21 @@ pub struct Refusal<'a> {
     pub detail: Option<&'a str>,
 }
 
+/// The longest a logged `to` or `detail` may run. Both can carry a string
+/// the sender chose (the recipient is read from the body before auth), so
+/// an arbitrary-length one is cut short rather than filling the log; the
+/// ellipsis says it was cut.
+const LOG_FIELD_MAX: usize = 256;
+
+fn capped(s: &str) -> String {
+    if s.chars().count() <= LOG_FIELD_MAX {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(LOG_FIELD_MAX - 1).collect();
+    t.push('\u{2026}');
+    t
+}
+
 pub fn request_line(path: &str, slugs: &[String], status: u16, elapsed: Duration, refusal: Option<Refusal<'_>>) {
     let mut v = json!({
         "ts": clock::now_iso(),
@@ -90,10 +105,10 @@ pub fn request_line(path: &str, slugs: &[String], status: u16, elapsed: Duration
     });
     if let Some(r) = refusal {
         if let Some(to) = r.to {
-            v["to"] = json!(to);
+            v["to"] = json!(capped(to));
         }
         if let Some(detail) = r.detail {
-            v["detail"] = json!(detail);
+            v["detail"] = json!(capped(detail));
         }
     }
     line(&v);

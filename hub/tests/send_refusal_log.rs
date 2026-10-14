@@ -89,6 +89,25 @@ async fn refused_send_logs_reason() {
     }
     println!("  ok  a second refusal site (meta) logs its own reason and recipient");
 
+    // an over-long recipient (named before auth, so sender-chosen) is cut
+    // to 256 chars with an ellipsis, in both the `to` and the `detail`
+    let long_ghost = format!("{}.reflog.{}", "g".repeat(300), token_hex3());
+    let r = Call::new("POST", "/api/send")
+        .auth(pair(&ann.0, &ann.1))
+        .json(json!({ "id": "stuck-2", "to": long_ghost, "body": secret_body }))
+        .send(&hub)
+        .await;
+    assert_eq!(r.code(), 422, "{}", r.text());
+    let refused = logged(422);
+    assert_eq!(refused.len(), 3, "{refused:?}");
+    for key in ["to", "detail"] {
+        let v = refused[2][key].as_str().expect("a logged string");
+        assert_eq!(v.chars().count(), 256, "{key}: {v}");
+        assert!(v.ends_with('\u{2026}'), "{key}: {v}");
+    }
+    assert!(refused[2]["detail"].as_str().unwrap().contains("no org registered as"), "{}", refused[2]);
+    println!("  ok  an over-long recipient is capped at 256 chars with an ellipsis");
+
     // a send that goes through keeps the v1 log line: no reason appended
     let r = Call::new("POST", "/api/send")
         .auth(pair(&ann.0, &ann.1))
