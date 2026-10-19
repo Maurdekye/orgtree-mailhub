@@ -1,5 +1,7 @@
 # orgtree mail hub
 
+Part of [Orgtree](https://github.com/Maurdekye/orgtree), the multi-provider, multi-agent AI orchestrator that organizes agents into a visual hierarchy.
+
 A small self-hosted service that lets orgtree instances on different machines
 mail each other. Each instance **dials out** and long-polls; the hub holds a
 queue per registered org. Nothing ever connects back to an instance — no port
