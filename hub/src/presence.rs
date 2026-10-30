@@ -15,6 +15,9 @@
 //! address online only for `HANG_UP_GRACE`, not v1's whole window, and
 //! `presence_loop` wakes parked syncs when the set online changes.
 
+#[cfg(all(feature = "test-clock", not(debug_assertions)))]
+compile_error!("test-clock moves the presence clock and must not be used in a release build");
+
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +32,26 @@ pub const PRESENCE_WINDOW: Duration = Duration::from_secs(90);
 /// client hung up, with no call since: long enough for a poller to restart
 /// or retry, short enough that a stopped client shows as gone (v2.0.2)
 pub const HANG_UP_GRACE: Duration = Duration::from_secs(10);
+
+/// how long a person may go without one of their devices in use (Hubchat in
+/// front) before they show busy instead of online (user 2026-10-30 23:06Z,
+/// "say an hour"; Orgtree docket
+/// org-presence-busy-orange-when-no-org-inbox-holde). The one place it lives.
+pub const BUSY_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// The presence clock: milliseconds since this run's start, plus one (0 is
+/// "never"). The feature `test-clock` lets a test move it forward.
+#[derive(Clone)]
+struct Clock {
+    epoch: Instant,
+    skew: Arc<AtomicU64>,
+}
+
+impl Clock {
+    fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64 + 1 + self.skew.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Default)]
 pub struct Slot {
@@ -49,7 +72,7 @@ pub struct Slot {
 
 pub struct Presence {
     slots: papaya::HashMap<String, Arc<Slot>>,
-    epoch: Instant,
+    clock: Clock,
     /// every parked sync: the roster changed (a join, an edit, a leave)
     roster: Notify,
     /// every parked sync: the set of addresses online changed (v2.0.2)
@@ -60,7 +83,13 @@ pub struct Presence {
 
 impl Default for Presence {
     fn default() -> Self {
-        Presence { slots: papaya::HashMap::new(), epoch: Instant::now(), roster: Notify::new(), online: Notify::new(), link: Notify::new() }
+        Presence {
+            slots: papaya::HashMap::new(),
+            clock: Clock { epoch: Instant::now(), skew: Arc::new(AtomicU64::new(0)) },
+            roster: Notify::new(),
+            online: Notify::new(),
+            link: Notify::new(),
+        }
     }
 }
 
@@ -70,7 +99,7 @@ impl Default for Presence {
 /// only for `HANG_UP_GRACE` from then on.
 pub struct Parked {
     slots: Vec<Arc<Slot>>,
-    epoch: Instant,
+    clock: Clock,
     finished: bool,
 }
 
@@ -83,7 +112,7 @@ impl Parked {
 
 impl Drop for Parked {
     fn drop(&mut self) {
-        let now = self.epoch.elapsed().as_millis() as u64 + 1;
+        let now = self.clock.now_ms();
         for s in &self.slots {
             // never below zero, as v1's max(0, n - 1)
             let before = s.parked.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some((n - 1).max(0))).unwrap_or(0);
@@ -104,7 +133,14 @@ impl Presence {
     }
 
     fn now_ms(&self) -> u64 {
-        self.epoch.elapsed().as_millis() as u64 + 1
+        self.clock.now_ms()
+    }
+
+    /// Move the presence clock forward (feature `test-clock`, tests only):
+    /// what an hour does to presence, without waiting an hour.
+    #[cfg(feature = "test-clock")]
+    pub fn advance(&self, by: Duration) {
+        self.clock.skew.fetch_add(by.as_millis() as u64, Ordering::AcqRel);
     }
 
     pub fn mark_seen(&self, slugs: &[String]) {
@@ -125,7 +161,7 @@ impl Presence {
         for s in &slots {
             s.parked.fetch_add(1, Ordering::AcqRel);
         }
-        Parked { slots, epoch: self.epoch, finished: false }
+        Parked { slots, clock: self.clock.clone(), finished: false }
     }
 
     /// The wake-up handles for these addresses: call `listen` on each BEFORE

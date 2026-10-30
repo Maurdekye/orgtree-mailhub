@@ -9,6 +9,9 @@ description = "The orgtree mail hub: org-to-org mail across machines (Rust + Pos
 [features]
 # Only for isolated integration tests. Release builds reject this feature.
 push-test = []
+# Only for tests: a presence clock they can move forward (tests/busy.rs).
+# Release builds reject this feature.
+test-clock = []
 
 [lib]
 name = "mailhub"
