@@ -270,9 +270,9 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/receipts` | `{receipts: [{id, state: delivered\|read, at}]}` from the recipient side |
 | `POST /api/attachments?name=` | streamed raw body ≤ advertised limit (default 1 GiB) → `{id, bytes}`; bind ids in a send (≤ 10) |
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
-| `GET /api/roster` · `GET /healthz` | roster with presence · liveness |
+| `GET /api/roster` · `GET /healthz` | roster with presence (online, busy) · liveness |
 | `POST /api/profile` | `{name?, about?, slug?}` — change your display name (≤ 48) and about line (≤ 200) |
-| `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online |
+| `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online and which of them are busy |
 | `GET /api/devices` | the devices an address syncs from |
 | `GET /api/conversations` · `GET /api/history?with=` | who you have mail with (last message, unread) · one conversation, newest first, paged |
 | `DELETE /api/messages/{id}` · `DELETE /api/conversations/{address}` | delete your copy (the other side keeps theirs) |
@@ -281,7 +281,8 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/uploads` · `PATCH`/`GET`/`DELETE /api/uploads/{id}` | a resumable upload: open it with its size, send pieces at offsets, resume after a cut |
 | `POST /api/link/put` · `/take` · `/cancel` | hand a sealed payload to a new device under a one-time code |
 | `GET`/`POST /api/identity` · `POST /api/devices` · `DELETE /api/devices/{id}` | per-device keys: the identity key, enrolling a device, signing one out (rotating the identity key) |
-| `POST /api/devices/active` | `{device_id, active, slug?}` — this device is the one in use (90 s, renewed by sending it again) or no longer; the address's other devices see it in every sync answer's `active` and can leave notifications to it |
+| `POST /api/devices/active` | `{device_id, active, slug?}` — this device is the one in use (90 s, renewed by sending it again) or no longer; the address's other devices see it in every sync answer's `active` and can leave notifications to it; a person none of whose devices has been in use for an hour shows busy (2.3.0) |
+| `POST /api/presence` | `{busy, slug?}` — (2.3.0) the address is busy: online, but no one can answer it now (an Orgtree org while none of its org-inbox holders can start a turn); kept until it says `false` or is seen offline |
 | `POST /api/push` · `DELETE /api/push?device_id=` | `{device_id, endpoint, p256dh, auth, slug?}` — optional UnifiedPush (2.1.0): when mail waits and the device is not in use, the hub sends an encrypted, content-free wake to the device's distributor; DELETE stops it |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in

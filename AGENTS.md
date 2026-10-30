@@ -1,5 +1,22 @@
 # Mail hub development invariants
 
+- 2026-10-31: Busy (feature `busy`, 2.3.0) is a part of online. An address
+  says it (`POST /api/presence`, memory only, cleared when `now_sets` sees
+  the address offline), or a person (`identities.kind`) is busy once the
+  latest in-use time of their devices is `BUSY_AFTER` old (one hour, in
+  presence.rs, the one constant). In-use times are kept per device in the
+  presence slot; `POST /api/devices/active` `false` stores the moment it
+  stopped in `devices.active_until` (in the past, so every reader still sees
+  "not in use"), read back at start by `seed_presence` from
+  `server::prepare`; no device seen: counted from the slot's birth. Sync
+  answers send `busy` with every `online` (one print for both in the
+  cursor); roster rows carry a `busy` flag. No schema change. Tests move the
+  presence clock with feature `test-clock` (release builds refuse it).
+  [decided: user 2026-10-30 23:03-23:19Z via Orgtree docket
+  org-presence-busy-orange-when-no-org-inbox-holde (an hour, 23:06Z; widened
+  to 2.3.0, 23:19Z); verified: hub/src/presence.rs, api/sync.rs, api/mail.rs,
+  server.rs; tests/busy.rs; docs/v2-additions.md]
+
 - 2026-10-14: A refused send is diagnosable from the hub's own log: a 4xx
   answer to `POST /api/send` appends the refusal's `detail` (the same text
   the sender is told) and the recipient slug (`to`) to that request's one

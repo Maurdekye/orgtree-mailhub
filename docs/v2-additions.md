@@ -88,6 +88,7 @@ X-Org-Auth: <slug>:<secret>
   "roster": [<roster entries that joined or changed>],
   "roster_removed": ["<addresses that left>"],
   "online": ["<every address online now>"],      (only when it changed since the cursor)
+  "busy": ["<those of them that are busy>"],      (2.3.0: with every "online"; see "Busy")
   "active": ["<this address's other devices in use>"],   (every answer; see "Active devices")
   "more": false,
   "reset": true                                   (only when the cursor was not this hub's; see below)
@@ -109,7 +110,9 @@ X-Org-Auth: <slug>:<secret>
   roster; later answers carry only entries that joined or changed (name,
   about line), and `roster_removed` the addresses that left. `online` lists
   every address online now, whenever that set changed since the cursor;
-  clients treat every other address as offline. Presence alone does not end
+  clients treat every other address as offline. `busy` (2.3.0) comes with
+  every `online`: those of them that are busy (see "Busy"), whom a client
+  that does not know it simply shows online. Presence alone does not end
   a parked sync early, so `online` is at most `wait` seconds old.
 - **The cursor** is per device: one device's progress never hides anything
   from another. Without one (or with `null`/`""`) the device starts from the
@@ -456,6 +459,10 @@ X-Org-Auth: <slug>:<secret>            (or the device's own signed call)
   foreground) and about once a minute while it stays in use. `false` ends
   it at once (blur, idle, lock, background). Nothing sweeps: a device that
   crashes or sleeps stops counting when its 90 seconds run out.
+- 2.3.0: `false` keeps the moment the device stopped (`active_until`, now in
+  the past) instead of clearing it. The device is not in use for every
+  reader as before (`GET /api/devices` shows `active_until` null), and the
+  hub knows when the person was last in front (see "Busy").
 - **Every sync answer** carries `"active"`: the address's other devices in
   use as of that answer, never the asking device and never a signed-out one.
   It is read when the answer is built, so a device deciding whether to
@@ -601,6 +608,45 @@ probes, every few seconds on every parked connection, would keep waking
 phones' radios; the hub does not use it.) v1 polls are unchanged: their
 roster carries the same online flags, as of each answer.
 
+## Busy: online, but no one can answer now (v2.3.0)
+
+An address online can be **busy** instead. Busy is a part of online: an
+address is busy only while it is online, every sync answer that carries
+`online` also carries `busy` (those of them that are busy), and roster rows
+carry `"busy": true|false` beside `online`. A client that does not know
+`busy` keeps showing these addresses online.
+
+- **An address says it** (Orgtree's org while none of its org-inbox holders
+  can start a turn):
+
+```
+POST /api/presence
+X-Org-Auth: <slug>:<secret>
+{"busy": true, "slug": "<when the header carries several>"}
+→ 200 {"slug": "...", "busy": true}
+```
+
+  `false` ends it. It is kept in memory, as presence is: it ends when the
+  address is seen offline, and with the hub's restart, so a client says it
+  again when it reconnects. Refusals: 401 without credentials; 422 `busy is
+  required: true or false` and `busy must be true or false`. A client that
+  never sends it is never busy by its own say.
+- **A person is busy on their own** once none of their devices has been in
+  use (`POST /api/devices/active`, see "Active devices") for **an hour**
+  (`BUSY_AFTER` in `hub/src/presence.rs`, the one place it lives), and online
+  again as soon as one is. A device in use counts until its 90-second lease
+  runs out (so one that crashes in use counts 90 seconds more); a device put
+  down counts from the moment it said `false`. When each device was last in
+  use is kept in `devices.active_until`, so it holds across a restart; a
+  person the hub has seen no device of counts from when this run first saw
+  them. Orgs and v1 chat clients have no devices in use and are never busy
+  this way.
+- **Who hears it**: the presence loop (every second) wakes the parked syncs
+  of devices in use when the set busy changes (an org says it, a person's
+  hour runs out, a device comes into use), as it does for `online`. Other
+  devices get it with their next answer.
+- `/healthz` lists the feature as `busy`.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`
@@ -608,7 +654,7 @@ roster carries the same online flags, as of each answer.
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), and `typing`. A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy` (2.3.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 
