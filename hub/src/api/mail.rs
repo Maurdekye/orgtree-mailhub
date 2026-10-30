@@ -170,6 +170,8 @@ pub fn roster_json(
         "username": username,
         "blurb": blurb,
         "online": hub.presence.online(slug),
+        // v2.3.0: online, but busy (`crate::presence`)
+        "busy": hub.presence.busy(slug),
         "last_seen": last_seen.map(clock::iso),
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
     });
@@ -354,6 +356,10 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     if changed {
         hub.presence.roster_changed();
+    }
+    // v2.3.0: a person goes busy for want of a device in use
+    if let Some(r) = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&slug]).await? {
+        hub.presence.set_person(&slug, r.get::<_, String>(0) == "person");
     }
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let roster = roster(hub, &c).await?;

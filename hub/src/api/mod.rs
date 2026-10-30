@@ -255,6 +255,7 @@ enum Route {
     Typing,
     Devices,
     Active,
+    Busy,
     PushSet,
     PushDelete,
     Enrol,
@@ -348,6 +349,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/profile" => (Profile, Method::POST),
         "/api/sync" => (Sync, Method::POST),
         "/api/typing" => (Typing, Method::POST),
+        "/api/presence" => (Busy, Method::POST),
         "/api/conversations" => (Conversations, Method::GET),
         "/api/directory" => (Directory, Method::GET),
         "/api/history" => (History, Method::GET),
@@ -506,6 +508,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Typing => typing::typing(hub, req).await,
         Route::Devices => sync::devices(hub, req).await,
         Route::Active => sync::active(hub, req).await,
+        Route::Busy => sync::presence(hub, req).await,
         Route::Enrol => keys::enrol(hub, req).await,
         Route::SignOut => {
             let device = req.path.strip_prefix("/api/devices/").unwrap_or_default().to_string();
@@ -556,6 +559,8 @@ mod tests {
     #[test]
     fn routes_like_starlette() {
         assert_eq!(route(&Method::POST, "/api/poll"), Some(Ok(Route::Poll)));
+        assert_eq!(route(&Method::POST, "/api/presence"), Some(Ok(Route::Busy)));
+        assert_eq!(route(&Method::GET, "/api/presence"), Some(Err("POST")));
         assert_eq!(route(&Method::GET, "/api/poll"), Some(Err("POST")));
         assert_eq!(route(&Method::GET, "/api/attachments/abc"), Some(Ok(Route::Download)));
         assert_eq!(route(&Method::GET, "/api/attachments/"), None);

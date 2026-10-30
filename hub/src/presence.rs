@@ -14,12 +14,19 @@
 //! process stopped or was killed, so the connection closed) leaves the
 //! address online only for `HANG_UP_GRACE`, not v1's whole window, and
 //! `presence_loop` wakes parked syncs when the set online changes.
+//!
+//! v2.3.0: busy. An address online can be busy instead: it said so (`POST
+//! /api/presence`: Orgtree's org when none of its org-inbox holders can start
+//! a turn), or it is a person none of whose devices has been in use (`POST
+//! /api/devices/active`) for `BUSY_AFTER`. Busy is a part of online, so a
+//! client that knows nothing of it still sees the address online.
 
 #[cfg(all(feature = "test-clock", not(debug_assertions)))]
 compile_error!("test-clock moves the presence clock and must not be used in a release build");
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
@@ -53,7 +60,6 @@ impl Clock {
     }
 }
 
-#[derive(Default)]
 pub struct Slot {
     parked: AtomicI64,
     /// milliseconds since `Presence::epoch`, plus one; 0 = never seen
@@ -68,6 +74,36 @@ pub struct Slot {
     sync: Notify,
     /// its parked syncs only: a typing heartbeat came for it (`typing`)
     typing: Notify,
+    /// it said it is busy (`POST /api/presence`); ends when it is seen
+    /// offline
+    declared_busy: AtomicBool,
+    /// a person (`identities.kind`): busy for want of a device in use
+    person: AtomicBool,
+    /// until when each of its devices is in use, on the presence clock in
+    /// signed milliseconds: in the future while one is (its lease), the
+    /// moment it stopped after that (from the database at start, before
+    /// this run began). The latest of them is when the person was last in
+    /// front; with none, they count from `born`.
+    fronts: Mutex<HashMap<String, i64>>,
+    /// when this run first saw the address (the presence clock)
+    born: u64,
+}
+
+impl Slot {
+    fn new(born: u64) -> Self {
+        Slot {
+            parked: AtomicI64::new(0),
+            seen: AtomicU64::new(0),
+            hung_up: AtomicU64::new(0),
+            notify: Notify::new(),
+            sync: Notify::new(),
+            typing: Notify::new(),
+            declared_busy: AtomicBool::new(false),
+            person: AtomicBool::new(false),
+            fronts: Mutex::new(HashMap::new()),
+            born,
+        }
+    }
 }
 
 pub struct Presence {
@@ -129,7 +165,8 @@ impl Presence {
         if let Some(s) = map.get(slug) {
             return s.clone();
         }
-        map.get_or_insert_with(slug.to_string(), || Arc::new(Slot::default())).clone()
+        let born = self.now_ms();
+        map.get_or_insert_with(slug.to_string(), || Arc::new(Slot::new(born))).clone()
     }
 
     fn now_ms(&self) -> u64 {
@@ -153,6 +190,33 @@ impl Presence {
     pub fn online(&self, slug: &str) -> bool {
         let map = self.slots.pin();
         map.get(slug).is_some_and(|s| s.online_at(self.now_ms()))
+    }
+
+    /// Online, and busy (v2.3.0; `Slot::busy_if_online`).
+    pub fn busy(&self, slug: &str) -> bool {
+        let map = self.slots.pin();
+        map.get(slug).is_some_and(|s| s.busy_at(self.now_ms()))
+    }
+
+    /// The address says it is busy, or no longer (`POST /api/presence`).
+    pub fn declare_busy(&self, slug: &str, busy: bool) {
+        self.slot(slug).declared_busy.store(busy, Ordering::Release);
+    }
+
+    /// Whether the address is a person (`identities.kind`): only a person is
+    /// busy for want of a device in use.
+    pub fn set_person(&self, slug: &str, person: bool) {
+        self.slot(slug).person.store(person, Ordering::Release);
+    }
+
+    /// The address's `device` is in use until `from_now_ms` from now:
+    /// `ACTIVE_FOR` for a `true` from `POST /api/devices/active`, 0 for a
+    /// `false` (the moment it stopped), and at start its stored
+    /// `active_until` (in the past for a device no longer in use).
+    pub fn in_use_until(&self, slug: &str, device: &str, from_now_ms: i64) {
+        let at = (self.now_ms() as i64).saturating_add(from_now_ms);
+        let slot = self.slot(slug);
+        slot.fronts.lock().unwrap_or_else(|e| e.into_inner()).insert(device.to_string(), at);
     }
 
     /// Park a poll for these addresses (one count per pair presented, as v1).
@@ -251,10 +315,29 @@ impl Presence {
 
     /// Every address online now, sorted.
     pub fn online_now(&self) -> Vec<String> {
+        self.now_sets().0
+    }
+
+    /// Every address online now, and those of them that are busy (v2.3.0),
+    /// both sorted, from one reading of the clock. An address seen offline
+    /// here stops being busy by its own say: one that comes back says it
+    /// again.
+    pub fn now_sets(&self) -> (Vec<String>, Vec<String>) {
         let now = self.now_ms();
-        let mut on: Vec<String> = self.slots.pin().iter().filter(|(_, s)| s.online_at(now)).map(|(k, _)| k.clone()).collect();
+        let (mut on, mut busy) = (Vec::new(), Vec::new());
+        for (k, s) in self.slots.pin().iter() {
+            if s.online_at(now) {
+                on.push(k.clone());
+                if s.busy_if_online(now) {
+                    busy.push(k.clone());
+                }
+            } else if s.declared_busy.load(Ordering::Acquire) {
+                s.declared_busy.store(false, Ordering::Release);
+            }
+        }
         on.sort_unstable();
-        on
+        busy.sort_unstable();
+        (on, busy)
     }
 
     /// A sync's wake-ups: its address's syncs, the roster, the set online
@@ -299,6 +382,26 @@ impl Slot {
             return now_ms.saturating_sub(hung_up) < HANG_UP_GRACE.as_millis() as u64;
         }
         seen != 0 && now_ms.saturating_sub(seen) < PRESENCE_WINDOW.as_millis() as u64
+    }
+
+    /// Online and busy (v2.3.0).
+    fn busy_at(&self, now_ms: u64) -> bool {
+        self.online_at(now_ms) && self.busy_if_online(now_ms)
+    }
+
+    /// Busy, if online: it said so, or it is a person none of whose devices
+    /// has been in use for `BUSY_AFTER` (none seen: since this run first saw
+    /// the address, so a restart or a new address starts online).
+    fn busy_if_online(&self, now_ms: u64) -> bool {
+        if self.declared_busy.load(Ordering::Acquire) {
+            return true;
+        }
+        if !self.person.load(Ordering::Acquire) {
+            return false;
+        }
+        let last = self.fronts.lock().unwrap_or_else(|e| e.into_inner()).values().copied().max();
+        let since = last.unwrap_or(self.born as i64);
+        (now_ms as i64).saturating_sub(since) >= BUSY_AFTER.as_millis() as i64
     }
 }
 
