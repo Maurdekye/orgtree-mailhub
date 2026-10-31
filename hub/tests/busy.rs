@@ -8,6 +8,13 @@
 //! answers carry `busy` beside `online`, roster rows a `busy` flag. The
 //! hours pass on the presence clock (feature `test-clock`).
 //!
+//! Do not disturb (v2.3.0; the docket's addition, user 2026-10-31 08:51Z):
+//! an org says it (`POST /api/presence {busy, dnd}`) while its outside mail
+//! is set to Do not disturb. A DND address is listed in `dnd` and in `busy`
+//! too, so a client that knows busy but not DND shows it busy; roster rows
+//! carry a `dnd` flag. Offline wins over DND, as over busy (user 2026-10-31
+//! 09:03Z, "Offline for both").
+//!
 //!     HUB_TEST_PG=<folder> cargo test --features test-clock --test busy -- --nocapture
 
 #![cfg(feature = "test-clock")]
@@ -53,20 +60,36 @@ async fn in_use(hub: &Arc<Hub>, who: &Id, device: &str, on: bool) {
     assert_eq!(r.code(), 200, "{}", r.text());
 }
 
-/// The org says whether it is busy.
+/// The org says whether it is busy, as an engine from before DND does
+/// (`busy` alone).
 async fn say_busy(hub: &Arc<Hub>, who: &Id, busy: bool) {
     let r = post(hub, who, "/api/presence", json!({ "busy": busy })).await;
     assert_eq!(r.code(), 200, "{}", r.text());
-    assert_eq!(r.json(), json!({ "slug": who.0, "busy": busy }));
+    assert_eq!((r.json()["slug"].clone(), r.json()["busy"].clone()), (json!(who.0), json!(busy)), "{}", r.text());
+}
+
+/// The org says whether it is busy and whether its outside mail is set to Do
+/// not disturb; the hub answers with what it took.
+async fn say(hub: &Arc<Hub>, who: &Id, busy: bool, dnd: bool) {
+    let r = post(hub, who, "/api/presence", json!({ "busy": busy, "dnd": dnd })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(r.json(), json!({ "slug": who.0, "busy": busy, "dnd": dnd }));
 }
 
 fn strings(v: &Value) -> Vec<String> {
     v.as_array().unwrap_or_else(|| panic!("not a list: {v}")).iter().map(|s| s.as_str().unwrap().to_string()).collect()
 }
 
-/// How `slug` shows in these sets: online, busy or offline.
-fn shown(online: &[String], busy: &[String], slug: &str) -> &'static str {
-    match (online.iter().any(|s| s == slug), busy.iter().any(|s| s == slug)) {
+/// How `slug` shows in these sets: offline, dnd, busy or online (offline wins
+/// over DND, DND over busy).
+fn shown(online: &[String], busy: &[String], dnd: &[String], slug: &str) -> &'static str {
+    let has = |set: &[String]| set.iter().any(|s| s == slug);
+    if has(dnd) {
+        assert!(has(online), "{slug} is in dnd while offline: offline wins over DND");
+        assert!(has(busy), "{slug} is in dnd but not in busy: a client that knows busy only would show it online");
+        return "dnd";
+    }
+    match (has(online), has(busy)) {
         (true, true) => "busy",
         (true, false) => "online",
         (false, true) => panic!("{slug} is busy without being online"),
@@ -82,11 +105,12 @@ struct Watcher {
     cursor: Value,
     online: Vec<String>,
     busy: Vec<String>,
+    dnd: Vec<String>,
 }
 
 impl Watcher {
     fn new(id: &Id, device: &'static str) -> Watcher {
-        Watcher { id: id.clone(), device, cursor: Value::Null, online: Vec::new(), busy: Vec::new() }
+        Watcher { id: id.clone(), device, cursor: Value::Null, online: Vec::new(), busy: Vec::new(), dnd: Vec::new() }
     }
 
     async fn sync(&mut self, hub: &Arc<Hub>) {
@@ -103,6 +127,8 @@ impl Watcher {
                 self.online = strings(on);
                 // `busy` comes with every `online`
                 self.busy = strings(a.get("busy").unwrap_or_else(|| panic!("an answer with online and no busy: {a}")));
+                // `dnd` too, from a hub that knows it (`an_org_is_dnd_while_it_says_so` checks this one does)
+                self.dnd = a.get("dnd").map(strings).unwrap_or_default();
             }
             if a["more"] != json!(true) {
                 return;
@@ -116,16 +142,17 @@ impl Watcher {
         let t0 = Instant::now();
         loop {
             self.sync(hub).await;
-            let now = shown(&self.online, &self.busy, &who.0);
+            let now = shown(&self.online, &self.busy, &self.dnd, &who.0);
             if now == want {
                 return;
             }
             assert!(
                 t0.elapsed() < Duration::from_secs(3),
-                "{} shows {now}, not {want} (online {:?}, busy {:?})",
+                "{} shows {now}, not {want} (online {:?}, busy {:?}, dnd {:?})",
                 who.0,
                 self.online,
-                self.busy
+                self.busy,
+                self.dnd
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -142,6 +169,12 @@ async fn roster_row(hub: &Arc<Hub>, viewer: &Id, slug: &str) -> Value {
 async fn row_shows(hub: &Arc<Hub>, viewer: &Id, slug: &str) -> (Value, Value) {
     let row = roster_row(hub, viewer, slug).await;
     (row["online"].clone(), row["busy"].clone())
+}
+
+/// The row's online, busy and dnd.
+async fn row_dnd(hub: &Arc<Hub>, viewer: &Id, slug: &str) -> (Value, Value, Value) {
+    let row = roster_row(hub, viewer, slug).await;
+    (row["online"].clone(), row["busy"].clone(), row["dnd"].clone())
 }
 
 fn data_dir(name: &str) -> std::path::PathBuf {
@@ -211,6 +244,88 @@ async fn an_org_is_busy_while_it_says_so() {
     let r = Call::new("POST", "/api/presence").json(json!({ "busy": true })).send(&hub).await;
     assert_eq!(r.code(), 401, "{}", r.text());
     println!("  ok  refused: busy missing or not a boolean (422), no credentials (401)");
+
+    let _ = std::fs::remove_dir_all(&data);
+    drop(pg);
+}
+
+#[tokio::test]
+async fn an_org_is_dnd_while_it_says_so() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubdndorg").await;
+    let data = data_dir("dnd-org");
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+
+    let acme = register(&hub, "acme", "org").await; // an Orgtree engine
+    let olde = register(&hub, "olde", "org").await; // an engine from before DND: it says busy alone
+    let wes = register(&hub, "wes", "person").await; // watching from Hubchat
+    let acme_poll = park_poll(&hub, &acme);
+    let _olde_poll = park_poll(&hub, &olde);
+    let mut w = Watcher::new(&wes, "wes-desk");
+    w.sees(&hub, &acme, "online").await;
+
+    say(&hub, &acme, false, true).await;
+    w.sees(&hub, &acme, "dnd").await;
+    assert_eq!(row_dnd(&hub, &wes, &acme.0).await, (json!(true), json!(true), json!(true)));
+    println!("  ok  its outside mail on Do not disturb: listed in dnd and in busy (a client that knows busy only shows it busy), still online; its roster row says dnd and busy");
+
+    say(&hub, &acme, true, true).await;
+    w.sees(&hub, &acme, "dnd").await;
+    say(&hub, &acme, true, false).await;
+    w.sees(&hub, &acme, "busy").await;
+    assert_eq!(row_dnd(&hub, &wes, &acme.0).await, (json!(true), json!(true), json!(false)));
+    say(&hub, &acme, false, false).await;
+    w.sees(&hub, &acme, "online").await;
+    assert_eq!(row_dnd(&hub, &wes, &acme.0).await, (json!(true), json!(false), json!(false)));
+    println!("  ok  online -> dnd -> busy -> online: DND outranks busy, and each ends when it says so");
+
+    // an engine from before DND says busy alone: never DND
+    say_busy(&hub, &olde, true).await;
+    w.sees(&hub, &olde, "busy").await;
+    let r = post(&hub, &acme, "/api/presence", json!({ "busy": false })).await;
+    assert_eq!(r.json(), json!({ "slug": acme.0, "busy": false, "dnd": false }));
+    println!("  ok  busy alone (an engine from before DND) means not DND");
+
+    // a device in use hears of a change in DND alone at once, as of one online
+    say(&hub, &acme, true, false).await;
+    w.sees(&hub, &acme, "busy").await;
+    in_use(&hub, &wes, "wes-desk", true).await;
+    w.sync(&hub).await;
+    let (h, who, cursor) = (hub.clone(), wes.clone(), w.cursor.clone());
+    let parked = tokio::spawn(async move { post(&h, &who, "/api/sync", json!({ "device_id": "wes-desk", "wait": 25, "cursor": cursor })).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!parked.is_finished(), "the sync did not park: nothing was new");
+    let t0 = Instant::now();
+    say(&hub, &acme, true, true).await;
+    let a = tokio::time::timeout(Duration::from_secs(5), parked).await.expect("the parked sync was not woken").unwrap().json();
+    assert!(t0.elapsed() < Duration::from_secs(3), "woken after {:?}", t0.elapsed());
+    assert!(strings(&a["dnd"]).contains(&acme.0) && strings(&a["busy"]).contains(&acme.0), "{a}");
+    println!("  ok  busy -> dnd wakes a device in use whose sync is parked, in {:?}; `dnd` comes with `online` and `busy`", t0.elapsed());
+
+    // offline wins over DND, as over busy (user 2026-10-31 09:03Z, "Offline
+    // for both"): its DND ends with going offline; back, it says it again
+    acme_poll.abort();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    hub.presence.advance(HANG_UP_GRACE + Duration::from_secs(1));
+    w.sees(&hub, &acme, "offline").await;
+    assert_eq!(row_dnd(&hub, &wes, &acme.0).await, (json!(false), json!(false), json!(false)));
+    let _acme_again = park_poll(&hub, &acme);
+    w.sees(&hub, &acme, "online").await;
+    println!("  ok  gone offline while DND, it shows offline (offline wins) and its DND ended with it: back, online until it says DND again");
+
+    for (body, code, detail) in [
+        (json!({ "busy": false, "dnd": "yes" }), 422, "dnd must be true or false"),
+        (json!({ "dnd": true }), 422, "busy is required: true or false"),
+    ] {
+        let r = post(&hub, &acme, "/api/presence", body.clone()).await;
+        assert_eq!((r.code(), r.json()["detail"].clone()), (code, json!(detail)), "{body}");
+    }
+    println!("  ok  refused: dnd not a boolean, dnd without busy (422)");
+
+    let h = Call::new("GET", "/healthz").send(&hub).await.json();
+    assert!(h["features"].as_array().unwrap().contains(&json!("dnd")), "{h}");
+    println!("  ok  /healthz lists the feature dnd");
 
     let _ = std::fs::remove_dir_all(&data);
     drop(pg);
