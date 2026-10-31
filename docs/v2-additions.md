@@ -664,8 +664,9 @@ X-Org-Auth: <slug>:<secret>
 
 ## A person's status (v2.3.0)
 
-A person chooses how they show: **Automatic**, **Online**, **Busy** or **Do
-not disturb** (Hubchat's status picker; user 2026-10-31 08:52Z).
+A person chooses how they show: **Automatic**, **Online**, **Busy**, **Do
+not disturb** or **Invisible** (Hubchat's status picker; user 2026-10-31
+08:52Z; Invisible 14:13Z, people only 14:14Z).
 
 ```
 POST /api/status
@@ -678,6 +679,8 @@ X-Org-Auth: <slug>:<secret>
   an hour after their last device in use (see "Busy"). `online` shows them
   online even with no device in use; `busy` and `dnd` show them busy and on
   Do not disturb as if they had said it (a `dnd` person is in `busy` too).
+  `invisible` (schema 12) shows them offline to everyone else while they
+  stay connected; see "Invisible" below.
 - **Kept until they choose again**: in `identities.status` (schema 11), so
   it holds across a restart and while they are offline, with no expiry. It
   shows only while they are online: offline wins over every status (user
@@ -695,10 +698,38 @@ X-Org-Auth: <slug>:<secret>
 - People only: anyone else is refused, 403 `only a person chooses a status;
   an org says busy and Do not disturb with POST /api/presence`. Other
   refusals: 401 without credentials; 422 `status is required: auto, online,
-  busy or dnd` and `status must be auto, online, busy or dnd`.
-- ⚠ Schema 11 is a one-way step: once a database has it, a hub without it
-  refuses that database (docs/OPERATIONS.md).
-- `/healthz` lists the feature `status`.
+  busy, dnd or invisible` and `status must be auto, online, busy, dnd or
+  invisible`.
+- ⚠ Schemas 11 and 12 are one-way steps: once a database has them, a hub
+  without them refuses that database (docs/OPERATIONS.md).
+- `/healthz` lists the feature `status`, and `invisible` where Invisible is
+  served.
+
+### Invisible (schema 12)
+
+A person connected but shown offline (user 2026-10-31 14:13Z, "add invisible
+as a selectable status in hubchat"; people only, 14:14Z).
+
+- **Everyone else is told exactly what a person really offline gives**: they
+  are in none of `online`, `busy` and `dnd`, in sync answers or anywhere
+  else; their roster rows (sync, `GET /api/roster`, `GET /api/directory`)
+  say `online`, `busy` and `dnd` false; and those rows' `last_seen` is held
+  at the moment they chose Invisible (`identities.status_since`), so it does
+  not move on with their calls. Going Invisible looks like going offline then
+  (the presence loop marks their row changed); choosing anything else looks
+  like coming back. No payload names Invisible to anyone but them: the test
+  `nobody_can_tell_invisible_from_offline` reads everything a person and an
+  org get about an Invisible person and about one really offline, and finds
+  the same bytes.
+- **Their own devices** are told `"status": "invisible"` and otherwise work
+  as ever underneath: their syncs park, devices in use count, mail, receipts,
+  push wakes and notifications go on (Invisible hides presence, not what they
+  do: what they send, their typing and read receipts still reach people, as
+  on Discord; coordinator 2026-10-31).
+- The idle sweep (`org_retention_days`) still reads the real `last_seen`, so
+  an Invisible person who keeps connecting is never swept as idle.
+- `status_since` is set when they choose Invisible (kept if they choose it
+  again) and cleared by any other status.
 
 ## Telling what a hub supports
 
@@ -707,7 +738,7 @@ X-Org-Auth: <slug>:<secret>
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy`, `dnd` and `status` (2.3.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy`, `dnd`, `status` and `invisible` (2.3.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 

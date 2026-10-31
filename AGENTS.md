@@ -30,6 +30,18 @@
   09:03Z "Offline for both"; verified: hub/src/presence.rs, api/sync.rs,
   api/mail.rs; tests/busy.rs; docs/v2-additions.md]
 
+- 2026-10-31: Invisible (feature `invisible`, 2.3.0, schema 12): a person's
+  status `invisible` is offline to everyone else. `Slot::shown_at` (online
+  and not Invisible) feeds every public read: `online()`, `busy()`,
+  `dnd()` and `now_sets`; `online_at` stays the truth underneath for their
+  own syncs and the declared-flag reset. Roster SQL shows `last_seen` as
+  `shown_seen!()` (status_since while Invisible); the idle sweep reads the
+  real `last_seen`. Never expose `status` of another address. [decided: user
+  2026-10-31 14:13Z, people only 14:14Z; schema 12 approved by the
+  coordinator 2026-10-31 via Orgtree docket hubchat-status-picker-add-invisible;
+  verified: hub/src/presence.rs, api/mail.rs, api/sync.rs,
+  migrations/0012_invisible.sql; tests/busy.rs]
+
 - 2026-10-31: A person's status (feature `status`, 2.3.0, schema 11): a
   person chooses auto, online, busy or dnd (`POST /api/status`; 403 for
   anyone but a person). Kept in `identities.status` and the slot's `status`
