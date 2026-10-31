@@ -256,6 +256,7 @@ enum Route {
     Devices,
     Active,
     Busy,
+    Status,
     PushSet,
     PushDelete,
     Enrol,
@@ -350,6 +351,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/sync" => (Sync, Method::POST),
         "/api/typing" => (Typing, Method::POST),
         "/api/presence" => (Busy, Method::POST),
+        "/api/status" => (Status, Method::POST),
         "/api/conversations" => (Conversations, Method::GET),
         "/api/directory" => (Directory, Method::GET),
         "/api/history" => (History, Method::GET),
@@ -509,6 +511,7 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::Devices => sync::devices(hub, req).await,
         Route::Active => sync::active(hub, req).await,
         Route::Busy => sync::presence(hub, req).await,
+        Route::Status => sync::status(hub, req).await,
         Route::Enrol => keys::enrol(hub, req).await,
         Route::SignOut => {
             let device = req.path.strip_prefix("/api/devices/").unwrap_or_default().to_string();
@@ -561,6 +564,8 @@ mod tests {
         assert_eq!(route(&Method::POST, "/api/poll"), Some(Ok(Route::Poll)));
         assert_eq!(route(&Method::POST, "/api/presence"), Some(Ok(Route::Busy)));
         assert_eq!(route(&Method::GET, "/api/presence"), Some(Err("POST")));
+        assert_eq!(route(&Method::POST, "/api/status"), Some(Ok(Route::Status)));
+        assert_eq!(route(&Method::GET, "/api/status"), Some(Err("POST")));
         assert_eq!(route(&Method::GET, "/api/poll"), Some(Err("POST")));
         assert_eq!(route(&Method::GET, "/api/attachments/abc"), Some(Ok(Route::Download)));
         assert_eq!(route(&Method::GET, "/api/attachments/"), None);

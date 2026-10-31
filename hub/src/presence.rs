@@ -27,12 +27,20 @@
 //! knows busy but not DND sees the address busy, and it ends as busy does
 //! when the address is seen offline: offline wins over DND (user 2026-10-31
 //! 09:03Z, "Offline for both").
+//!
+//! v2.3.0 also: a person's status. A person chooses Automatic, Online, Busy
+//! or Do not disturb (`POST /api/status`: Hubchat's picker); the hub keeps it
+//! in `identities.status` until they choose again (the slot's `status`, read
+//! back at start by `seed_presence`). It shows only while they are online,
+//! as all of this does (user 2026-10-31 09:03Z, "Offline for both"): Online
+//! holds without a device in use, Busy and Do not disturb are as if said,
+//! and Automatic is the rules above.
 
 #[cfg(all(feature = "test-clock", not(debug_assertions)))]
 compile_error!("test-clock moves the presence clock and must not be used in a release build");
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,6 +60,49 @@ pub const HANG_UP_GRACE: Duration = Duration::from_secs(10);
 /// "say an hour"; Orgtree docket
 /// org-presence-busy-orange-when-no-org-inbox-holde). The one place it lives.
 pub const BUSY_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// A person's own choice of how they show (`POST /api/status`, v2.3.0):
+/// Automatic (the hub's rules: online, busy an hour after their last device
+/// in use), or Online, Busy or Do not disturb whatever those say. Kept in
+/// `identities.status`; shown only while they are online.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Auto,
+    Online,
+    Busy,
+    Dnd,
+}
+
+impl Status {
+    /// Its word on the wire and in `identities.status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Auto => "auto",
+            Status::Online => "online",
+            Status::Busy => "busy",
+            Status::Dnd => "dnd",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Status> {
+        Some(match s {
+            "auto" => Status::Auto,
+            "online" => Status::Online,
+            "busy" => Status::Busy,
+            "dnd" => Status::Dnd,
+            _ => return None,
+        })
+    }
+
+    fn from_u8(n: u8) -> Status {
+        match n {
+            1 => Status::Online,
+            2 => Status::Busy,
+            3 => Status::Dnd,
+            _ => Status::Auto,
+        }
+    }
+}
 
 /// The presence clock: milliseconds since this run's start, plus one (0 is
 /// "never"). The feature `test-clock` lets a test move it forward.
@@ -89,6 +140,9 @@ pub struct Slot {
     declared_dnd: AtomicBool,
     /// a person (`identities.kind`): busy for want of a device in use
     person: AtomicBool,
+    /// a person's chosen status (`Status as u8`; `POST /api/status`), kept
+    /// until they choose again: going offline does not end it
+    status: AtomicU8,
     /// until when each of its devices is in use, on the presence clock in
     /// signed milliseconds: in the future while one is (its lease), the
     /// moment it stopped after that (from the database at start, before
@@ -111,6 +165,7 @@ impl Slot {
             declared_busy: AtomicBool::new(false),
             declared_dnd: AtomicBool::new(false),
             person: AtomicBool::new(false),
+            status: AtomicU8::new(Status::Auto as u8),
             fronts: Mutex::new(HashMap::new()),
             born,
         }
@@ -232,6 +287,19 @@ impl Presence {
         self.slot(slug).person.store(person, Ordering::Release);
     }
 
+    /// A person's chosen status (`POST /api/status`, and at start from
+    /// `identities.status`).
+    pub fn set_status(&self, slug: &str, status: Status) {
+        self.slot(slug).status.store(status as u8, Ordering::Release);
+    }
+
+    /// The status the address chose: Automatic for one that never did, and
+    /// for anyone but a person.
+    pub fn status(&self, slug: &str) -> Status {
+        let map = self.slots.pin();
+        map.get(slug).map_or(Status::Auto, |s| s.chosen())
+    }
+
     /// The address's `device` is in use until `from_now_ms` from now:
     /// `ACTIVE_FOR` for a `true` from `POST /api/devices/active`, 0 for a
     /// `false` (the moment it stopped), and at start its stored
@@ -344,7 +412,8 @@ impl Presence {
     /// Every address online now, and those of them that are busy and that are
     /// on Do not disturb (v2.3.0), all sorted, from one reading of the clock.
     /// An address seen offline here stops being busy and DND by its own say:
-    /// one that comes back says them again.
+    /// one that comes back says them again. A person's chosen status stays,
+    /// and shows again when they are back.
     pub fn now_sets(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
         let now = self.now_ms();
         let (mut on, mut busy, mut dnd) = (Vec::new(), Vec::new(), Vec::new());
@@ -354,7 +423,7 @@ impl Presence {
                 if s.busy_if_online(now) {
                     busy.push(k.clone());
                 }
-                if s.declared_dnd.load(Ordering::Acquire) {
+                if s.dnd_if_online() {
                     dnd.push(k.clone());
                 }
             } else {
@@ -423,16 +492,35 @@ impl Slot {
 
     /// Online and Do not disturb (v2.3.0): offline wins over DND.
     fn dnd_at(&self, now_ms: u64) -> bool {
-        self.online_at(now_ms) && self.declared_dnd.load(Ordering::Acquire)
+        self.online_at(now_ms) && self.dnd_if_online()
+    }
+
+    /// Do not disturb, if online: it said so, or a person chose it.
+    fn dnd_if_online(&self) -> bool {
+        self.declared_dnd.load(Ordering::Acquire) || self.chosen() == Status::Dnd
+    }
+
+    /// The status it chose, if a person; anyone else is on Automatic.
+    fn chosen(&self) -> Status {
+        if !self.person.load(Ordering::Acquire) {
+            return Status::Auto;
+        }
+        Status::from_u8(self.status.load(Ordering::Acquire))
     }
 
     /// Busy, if online: it said so, or said Do not disturb (a part of busy),
-    /// or it is a person none of whose devices has been in use for
+    /// or a person chose Busy or Do not disturb; else, unless they chose
+    /// Online, a person none of whose devices has been in use for
     /// `BUSY_AFTER` (none seen: since this run first saw the address, so a
     /// restart or a new address starts online).
     fn busy_if_online(&self, now_ms: u64) -> bool {
         if self.declared_busy.load(Ordering::Acquire) || self.declared_dnd.load(Ordering::Acquire) {
             return true;
+        }
+        match self.chosen() {
+            Status::Busy | Status::Dnd => return true,
+            Status::Online => return false,
+            Status::Auto => {}
         }
         if !self.person.load(Ordering::Acquire) {
             return false;

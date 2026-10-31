@@ -24,7 +24,7 @@ use super::mail::{authed, authed_callers, envelope_v2, mark_seen, one_address, r
 use super::{ok, refuse, ApiResult, Hub, Req};
 use crate::clock;
 use crate::db;
-use crate::presence::{Woke, PRESENCE_WINDOW};
+use crate::presence::{Status, Woke, PRESENCE_WINDOW};
 use crate::wire::{pg_text, py_strip};
 
 /// Message changes one sync answer carries at most; `more` says to sync
@@ -190,10 +190,12 @@ impl Cursor {
 }
 
 /// The print of the presence a device was told: the set online and, of it,
-/// the sets busy and Do not disturb (v2.3.0), so a change in any is news.
-fn presence_print(online: &[String], busy: &[String], dnd: &[String]) -> u64 {
+/// the sets busy and Do not disturb (v2.3.0), so a change in any is news;
+/// and the status its own address chose (v2.3.0), so a choice made on one
+/// of its devices is news to the others.
+fn presence_print(online: &[String], busy: &[String], dnd: &[String], status: Status) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (online, busy, dnd).hash(&mut h);
+    (online, busy, dnd, status.as_str()).hash(&mut h);
     h.finish()
 }
 
@@ -434,7 +436,8 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
     let c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
     let (online, busy, dnd) = hub.presence.now_sets();
-    let print = presence_print(&online, &busy, &dnd);
+    let status = hub.presence.status(slug);
+    let print = presence_print(&online, &busy, &dnd, status);
     // in every answer, read now: a device deciding whether to notify about
     // the mail in this answer sees who is in use as of this answer
     let active = active_others(&c, slug, device).await?;
@@ -448,6 +451,9 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
         "more": b.more,
         "identity_key_version": b.key_version,
         "active": active,
+        // v2.3.0: the status the address chose (a person, `POST
+        // /api/status`; "auto" for everyone else), in every answer
+        "status": status.as_str(),
         // the hub's clock in unix milliseconds, as in /healthz
         "now": clock::now().timestamp_millis(),
     });
@@ -485,16 +491,18 @@ fn typing_rows(hub: &Hub, slug: &str, seen: u64, out: &mut Value) {
 /// needs it).
 fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64) -> ApiResult {
     let (online, busy, dnd) = hub.presence.now_sets();
+    let status = hub.presence.status(slug);
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
-        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&online, &busy, &dnd))),
+        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&online, &busy, &dnd, status))),
         "changes": [],
         "roster": [],
         "roster_removed": [],
         "more": false,
         "identity_key_version": key_version,
         "now": clock::now().timestamp_millis(),
+        "status": status.as_str(),
         "typing_only": true,
     });
     if cur.online.is_none() {
@@ -595,12 +603,13 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
             // v2.0.2: a device in use hears at once when the set online
             // changed; the rest learn it with their next answer (a phone in
             // a pocket is not woken for it)
-            // (v2.3.0: or the set busy, or Do not disturb)
+            // (v2.3.0: or the set busy, or Do not disturb, or the status its
+            // address chose)
             let online_news = || {
                 in_use
                     && cur.online.is_some_and(|p| {
                         let (online, busy, dnd) = hub.presence.now_sets();
-                        p != presence_print(&online, &busy, &dnd)
+                        p != presence_print(&online, &busy, &dnd, hub.presence.status(&slug))
                     })
             };
             // a heartbeat for a device in use that asked for them (typing,
@@ -813,13 +822,60 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     ok(json!({ "slug": slug, "busy": busy, "dnd": dnd }))
 }
 
-/// At start (v2.3.0): which addresses are people, and until when each of
-/// their devices was last in use (`devices.active_until`, which keeps when a
-/// device stopped), so a person's busy holds across a restart.
+/// `POST /api/status {status, slug?}` (v2.3.0): a person chooses how they
+/// show: `auto` (the hub's rules: online, and busy an hour after their last
+/// device in use), `online` (whatever those say), `busy` or `dnd` (Do not
+/// disturb, a part of busy). Kept in `identities.status` until they choose
+/// again, across a restart and while they are offline; it shows only while
+/// they are online (offline wins, user 2026-10-31 09:03Z, "Offline for
+/// both"). Every sync answer of theirs says it (`status`), and their parked
+/// syncs are woken for it: a device in use answers at once (it is in the
+/// cursor's print), so each of their devices knows it (Hubchat shows no
+/// notifications on any of them on Do not disturb). People only: an org says
+/// busy and Do not disturb with `POST /api/presence`. The credentials and
+/// `slug` of a poll; no device.
+#[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
+pub async fn status(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
+    let body = req.json_object_strict().await?;
+    let slugs = authed(hub, req).await?;
+    if slugs.is_empty() {
+        return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+    }
+    let slug = one_address(&slugs, body.get("slug"))?;
+    let status = match body.get("status") {
+        Some(Value::String(s)) => Status::parse(s),
+        None | Some(Value::Null) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status is required: auto, online, busy or dnd"),
+        Some(_) => None,
+    };
+    let Some(status) = status else {
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status must be auto, online, busy or dnd");
+    };
+    let c = hub.db.get().await?;
+    let kept = db::execute(&c, "UPDATE identities SET status = $2 WHERE slug = $1 AND kind = 'person'", &[&slug, &status.as_str()]).await?;
+    if kept == 0 {
+        return refuse(StatusCode::FORBIDDEN, "only a person chooses a status; an org says busy and Do not disturb with POST /api/presence");
+    }
+    mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
+    hub.presence.set_status(&slug, status);
+    // their parked syncs read it again: one in use answers with it at once
+    // (it is in the cursor's print); a change in the sets everyone sees
+    // wakes theirs with the presence loop's next look, as any other does
+    hub.presence.wake_sync([slug.as_str()]);
+    ok(json!({ "slug": slug, "status": status.as_str() }))
+}
+
+/// At start (v2.3.0): which addresses are people, the status each chose
+/// (kept until they choose again), and until when each of their devices was
+/// last in use (`devices.active_until`, which keeps when a device stopped),
+/// so a person's busy holds across a restart.
 pub async fn seed_presence(hub: &Hub) -> anyhow::Result<()> {
     let c = hub.db.get().await?;
-    for r in db::query(&c, "SELECT slug FROM identities WHERE kind = 'person'", &[]).await? {
-        hub.presence.set_person(&r.get::<_, String>(0), true);
+    for r in db::query(&c, "SELECT slug, status FROM identities WHERE kind = 'person'", &[]).await? {
+        let slug: String = r.get(0);
+        hub.presence.set_person(&slug, true);
+        if let Some(status) = Status::parse(r.get::<_, &str>(1)) {
+            hub.presence.set_status(&slug, status);
+        }
     }
     let now = clock::now();
     for r in db::query(&c, "SELECT slug, device_id, active_until FROM devices WHERE active_until IS NOT NULL", &[]).await? {
