@@ -170,8 +170,10 @@ pub fn roster_json(
         "username": username,
         "blurb": blurb,
         "online": hub.presence.online(slug),
-        // v2.3.0: online, but busy (`crate::presence`)
+        // v2.3.0: online, but busy (`crate::presence`), and Do not disturb
+        // (a part of busy while online)
         "busy": hub.presence.busy(slug),
+        "dnd": hub.presence.dnd(slug),
         "last_seen": last_seen.map(clock::iso),
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
     });

@@ -190,10 +190,10 @@ impl Cursor {
 }
 
 /// The print of the presence a device was told: the set online and, of it,
-/// the set busy (v2.3.0), so a change in either is news.
-fn presence_print(online: &[String], busy: &[String]) -> u64 {
+/// the sets busy and Do not disturb (v2.3.0), so a change in any is news.
+fn presence_print(online: &[String], busy: &[String], dnd: &[String]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (online, busy).hash(&mut h);
+    (online, busy, dnd).hash(&mut h);
     h.finish()
 }
 
@@ -433,8 +433,8 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
 async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch, start_now: bool, typing: Option<u64>) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
-    let (online, busy) = hub.presence.now_sets();
-    let print = presence_print(&online, &busy);
+    let (online, busy, dnd) = hub.presence.now_sets();
+    let print = presence_print(&online, &busy, &dnd);
     // in every answer, read now: a device deciding whether to notify about
     // the mail in this answer sees who is in use as of this answer
     let active = active_others(&c, slug, device).await?;
@@ -453,8 +453,10 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
     });
     if b.reset || cur.online != Some(print) {
         out["online"] = json!(online);
-        // v2.3.0: those of them that are busy, always with `online`
+        // v2.3.0: those of them that are busy, always with `online`, and
+        // those that show Do not disturb (a part of busy while online)
         out["busy"] = json!(busy);
+        out["dnd"] = json!(dnd);
     }
     if b.reset {
         out["reset"] = json!(true);
@@ -482,11 +484,11 @@ fn typing_rows(hub: &Hub, slug: &str, seen: u64, out: &mut Value) {
 /// changes. `typing_only` says so; `active` is left out (no message here
 /// needs it).
 fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64) -> ApiResult {
-    let (online, busy) = hub.presence.now_sets();
+    let (online, busy, dnd) = hub.presence.now_sets();
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
-        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&online, &busy))),
+        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&online, &busy, &dnd))),
         "changes": [],
         "roster": [],
         "roster_removed": [],
@@ -498,6 +500,7 @@ fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64
     if cur.online.is_none() {
         out["online"] = json!(online);
         out["busy"] = json!(busy);
+        out["dnd"] = json!(dnd);
     }
     typing_rows(hub, slug, seen, &mut out);
     ok(out)
@@ -592,12 +595,12 @@ pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
             // v2.0.2: a device in use hears at once when the set online
             // changed; the rest learn it with their next answer (a phone in
             // a pocket is not woken for it)
-            // (v2.3.0: or the set busy)
+            // (v2.3.0: or the set busy, or Do not disturb)
             let online_news = || {
                 in_use
                     && cur.online.is_some_and(|p| {
-                        let (online, busy) = hub.presence.now_sets();
-                        p != presence_print(&online, &busy)
+                        let (online, busy, dnd) = hub.presence.now_sets();
+                        p != presence_print(&online, &busy, &dnd)
                     })
             };
             // a heartbeat for a device in use that asked for them (typing,
@@ -651,8 +654,8 @@ async fn device_in_use(c: &impl GenericClient, slug: &str, device: &str) -> ApiR
 /// and every device's next one carry its `last_seen` as it stands: its last
 /// call, not its last roster change. It also drops the typing heartbeats
 /// past keeping (typing, 2026-10-13); that wakes nobody. v2.3.0: a change in
-/// the set busy wakes them the same way (an org says it, a person's hour
-/// runs out, a device comes into use).
+/// the set busy or Do not disturb wakes them the same way (an org says it, a
+/// person's hour runs out, a device comes into use).
 pub async fn presence_loop(hub: Arc<Hub>) {
     let mut last = hub.presence.now_sets();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -775,13 +778,16 @@ pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     ok(json!({ "slug": slug, "device_id": device, "active": on, "active_until": until.map(clock::iso) }))
 }
 
-/// `POST /api/presence {busy, slug?}` (v2.3.0): the address says whether it
-/// is busy: online, but no one can answer it now (Orgtree's org while none of
-/// its org-inbox holders can start a turn). Sync answers (`busy`) and roster
-/// rows show it while the address stays online. In memory, as presence is:
-/// it ends when the address is seen offline and with the hub's restart, so a
-/// client says it again when it (re)connects. The credentials and `slug` of
-/// a poll; no device.
+/// `POST /api/presence {busy, dnd?, slug?}` (v2.3.0): the address says
+/// whether it is busy: online, but no one can answer it now (Orgtree's org
+/// while none of its org-inbox holders can start a turn), and whether it does
+/// not want to be disturbed (`dnd`, false when left out: Orgtree's org while
+/// its outside mail is set to Do not disturb; a part of busy). Sync answers
+/// (`busy`, `dnd`) and roster rows show them while the address stays online
+/// (offline wins over both). In memory, as presence is: they end when the
+/// address is seen offline and with the hub's restart, so a client says them
+/// again when it (re)connects. The credentials and `slug` of a poll; no
+/// device.
 #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let body = req.json_object_strict().await?;
@@ -795,10 +801,16 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         None | Some(Value::Null) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "busy is required: true or false"),
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "busy must be true or false"),
     };
+    let dnd = match body.get("dnd") {
+        Some(Value::Bool(b)) => *b,
+        None | Some(Value::Null) => false,
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "dnd must be true or false"),
+    };
     let c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     hub.presence.declare_busy(&slug, busy);
-    ok(json!({ "slug": slug, "busy": busy }))
+    hub.presence.declare_dnd(&slug, dnd);
+    ok(json!({ "slug": slug, "busy": busy, "dnd": dnd }))
 }
 
 /// At start (v2.3.0): which addresses are people, and until when each of

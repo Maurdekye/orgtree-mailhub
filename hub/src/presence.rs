@@ -20,6 +20,13 @@
 //! a turn), or it is a person none of whose devices has been in use (`POST
 //! /api/devices/active`) for `BUSY_AFTER`. Busy is a part of online, so a
 //! client that knows nothing of it still sees the address online.
+//!
+//! v2.3.0 also: Do not disturb. An address can say it does not want to be
+//! disturbed (`POST /api/presence {dnd}`: Orgtree's org while its outside
+//! mail is set to Do not disturb). DND is a part of busy, so a client that
+//! knows busy but not DND sees the address busy, and it ends as busy does
+//! when the address is seen offline: offline wins over DND (user 2026-10-31
+//! 09:03Z, "Offline for both").
 
 #[cfg(all(feature = "test-clock", not(debug_assertions)))]
 compile_error!("test-clock moves the presence clock and must not be used in a release build");
@@ -77,6 +84,9 @@ pub struct Slot {
     /// it said it is busy (`POST /api/presence`); ends when it is seen
     /// offline
     declared_busy: AtomicBool,
+    /// it said it does not want to be disturbed (`POST /api/presence`);
+    /// ends when it is seen offline
+    declared_dnd: AtomicBool,
     /// a person (`identities.kind`): busy for want of a device in use
     person: AtomicBool,
     /// until when each of its devices is in use, on the presence clock in
@@ -99,6 +109,7 @@ impl Slot {
             sync: Notify::new(),
             typing: Notify::new(),
             declared_busy: AtomicBool::new(false),
+            declared_dnd: AtomicBool::new(false),
             person: AtomicBool::new(false),
             fronts: Mutex::new(HashMap::new()),
             born,
@@ -201,6 +212,18 @@ impl Presence {
     /// The address says it is busy, or no longer (`POST /api/presence`).
     pub fn declare_busy(&self, slug: &str, busy: bool) {
         self.slot(slug).declared_busy.store(busy, Ordering::Release);
+    }
+
+    /// Online, and Do not disturb (v2.3.0; `Slot::dnd_at`).
+    pub fn dnd(&self, slug: &str) -> bool {
+        let map = self.slots.pin();
+        map.get(slug).is_some_and(|s| s.dnd_at(self.now_ms()))
+    }
+
+    /// The address says it does not want to be disturbed, or no longer
+    /// (`POST /api/presence`).
+    pub fn declare_dnd(&self, slug: &str, dnd: bool) {
+        self.slot(slug).declared_dnd.store(dnd, Ordering::Release);
     }
 
     /// Whether the address is a person (`identities.kind`): only a person is
@@ -318,26 +341,35 @@ impl Presence {
         self.now_sets().0
     }
 
-    /// Every address online now, and those of them that are busy (v2.3.0),
-    /// both sorted, from one reading of the clock. An address seen offline
-    /// here stops being busy by its own say: one that comes back says it
-    /// again.
-    pub fn now_sets(&self) -> (Vec<String>, Vec<String>) {
+    /// Every address online now, and those of them that are busy and that are
+    /// on Do not disturb (v2.3.0), all sorted, from one reading of the clock.
+    /// An address seen offline here stops being busy and DND by its own say:
+    /// one that comes back says them again.
+    pub fn now_sets(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
         let now = self.now_ms();
-        let (mut on, mut busy) = (Vec::new(), Vec::new());
+        let (mut on, mut busy, mut dnd) = (Vec::new(), Vec::new(), Vec::new());
         for (k, s) in self.slots.pin().iter() {
             if s.online_at(now) {
                 on.push(k.clone());
                 if s.busy_if_online(now) {
                     busy.push(k.clone());
                 }
-            } else if s.declared_busy.load(Ordering::Acquire) {
-                s.declared_busy.store(false, Ordering::Release);
+                if s.declared_dnd.load(Ordering::Acquire) {
+                    dnd.push(k.clone());
+                }
+            } else {
+                if s.declared_busy.load(Ordering::Acquire) {
+                    s.declared_busy.store(false, Ordering::Release);
+                }
+                if s.declared_dnd.load(Ordering::Acquire) {
+                    s.declared_dnd.store(false, Ordering::Release);
+                }
             }
         }
         on.sort_unstable();
         busy.sort_unstable();
-        (on, busy)
+        dnd.sort_unstable();
+        (on, busy, dnd)
     }
 
     /// A sync's wake-ups: its address's syncs, the roster, the set online
@@ -389,11 +421,17 @@ impl Slot {
         self.online_at(now_ms) && self.busy_if_online(now_ms)
     }
 
-    /// Busy, if online: it said so, or it is a person none of whose devices
-    /// has been in use for `BUSY_AFTER` (none seen: since this run first saw
-    /// the address, so a restart or a new address starts online).
+    /// Online and Do not disturb (v2.3.0): offline wins over DND.
+    fn dnd_at(&self, now_ms: u64) -> bool {
+        self.online_at(now_ms) && self.declared_dnd.load(Ordering::Acquire)
+    }
+
+    /// Busy, if online: it said so, or said Do not disturb (a part of busy),
+    /// or it is a person none of whose devices has been in use for
+    /// `BUSY_AFTER` (none seen: since this run first saw the address, so a
+    /// restart or a new address starts online).
     fn busy_if_online(&self, now_ms: u64) -> bool {
-        if self.declared_busy.load(Ordering::Acquire) {
+        if self.declared_busy.load(Ordering::Acquire) || self.declared_dnd.load(Ordering::Acquire) {
             return true;
         }
         if !self.person.load(Ordering::Acquire) {
