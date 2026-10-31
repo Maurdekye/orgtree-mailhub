@@ -23,6 +23,14 @@
 //! a device in use; Automatic is the hour's rule. Every sync answer of theirs
 //! says `status`, and a device in use hears a change to it at once.
 //!
+//! Invisible (v2.3.0, schema 12; Orgtree docket hubchat-status-picker-add-invisible,
+//! user 2026-10-31 14:13Z "add invisible as a selectable status in hubchat",
+//! people only 14:14Z): a person connected but shown offline. Everyone else
+//! gets exactly what a person really offline gives: out of every set, a
+//! roster row saying offline, and `last_seen` held at the moment they went
+//! Invisible (`identities.status_since`). Only their own sync answers say
+//! `status: "invisible"`.
+//!
 //!     HUB_TEST_PG=<folder> cargo test --features test-clock --test busy -- --nocapture
 
 #![cfg(feature = "test-clock")]
@@ -32,7 +40,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mailhub::api::sync::presence_loop;
-use mailhub::presence::{BUSY_AFTER, HANG_UP_GRACE};
+use mailhub::presence::{Status, BUSY_AFTER, HANG_UP_GRACE, PRESENCE_WINDOW};
 use tokio::time::timeout;
 use mailhub::Hub;
 use serde_json::{json, Value};
@@ -558,10 +566,10 @@ async fn a_person_chooses_their_status() {
     println!("  ok  kept in identities.status across a restart: Do not disturb as soon as they connect");
 
     for (body, code, detail) in [
-        (json!({}), 422, "status is required: auto, online, busy or dnd"),
-        (json!({ "status": null }), 422, "status is required: auto, online, busy or dnd"),
-        (json!({ "status": "away" }), 422, "status must be auto, online, busy or dnd"),
-        (json!({ "status": true }), 422, "status must be auto, online, busy or dnd"),
+        (json!({}), 422, "status is required: auto, online, busy, dnd or invisible"),
+        (json!({ "status": null }), 422, "status is required: auto, online, busy, dnd or invisible"),
+        (json!({ "status": "away" }), 422, "status must be auto, online, busy, dnd or invisible"),
+        (json!({ "status": true }), 422, "status must be auto, online, busy, dnd or invisible"),
     ] {
         let r = post(&hub, &pat, "/api/status", body.clone()).await;
         assert_eq!((r.code(), r.json()["detail"].clone()), (code, json!(detail)), "{body}");
@@ -575,7 +583,162 @@ async fn a_person_chooses_their_status() {
     let r = Call::new("POST", "/api/status").json(json!({ "status": "dnd" })).send(&hub).await;
     assert_eq!(r.code(), 401, "{}", r.text());
     assert_eq!(told(&hub, &pat, "pat-phone").await, json!("dnd"), "a refusal changes nothing");
-    println!("  ok  refused: status missing or not auto, online, busy or dnd (422), an org (403), no credentials (401)");
+    println!("  ok  refused: status missing or not auto, online, busy, dnd or invisible (422), an org (403), no credentials (401)");
+
+    let _ = std::fs::remove_dir_all(&data);
+    drop(pg);
+}
+
+/// A person goes Invisible: everyone else sees them offline at once, with
+/// `last_seen` held at that moment however much they do; their own devices
+/// are told `invisible`; it holds across a restart; Automatic shows them again.
+#[tokio::test]
+async fn an_invisible_person_shows_offline_to_everyone_else() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubinvisible").await;
+    let data = data_dir("invisible");
+    let first = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(first.clone()));
+
+    let h = Call::new("GET", "/healthz").send(&first).await.json();
+    assert!(h["features"].as_array().unwrap().contains(&json!("invisible")), "{h}");
+    println!("  ok  /healthz lists the feature invisible");
+
+    let pat = register(&first, "pat", "person").await;
+    let wes = register(&first, "wes", "person").await;
+    let acme = register(&first, "acme", "org").await;
+    let pat_poll = park_poll(&first, &pat);
+    in_use(&first, &pat, "pat-laptop", true).await;
+    let mut w = Watcher::new(&wes, "wes-desk");
+    w.sees(&first, &pat, "online").await;
+
+    let t0 = Instant::now();
+    choose(&first, &pat, "invisible").await;
+    w.sees(&first, &pat, "offline").await;
+    println!("  ok  Invisible with the laptop in front and a poll parked: offline to another person in {:?}", t0.elapsed());
+    assert_eq!(row_dnd(&first, &wes, &pat.0).await, (json!(false), json!(false), json!(false)));
+    assert_eq!(row_dnd(&first, &acme, &pat.0).await, (json!(false), json!(false), json!(false)));
+    assert_eq!(told(&first, &pat, "pat-phone").await, json!("invisible"));
+    println!("  ok  roster rows say offline to a person and to an org; their own devices are told status invisible");
+
+    let held = roster_row(&first, &wes, &pat.0).await["last_seen"].clone();
+    assert!(held.is_string(), "{held}");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    in_use(&first, &pat, "pat-laptop", false).await;
+    in_use(&first, &pat, "pat-laptop", true).await;
+    told(&first, &pat, "pat-phone").await;
+    assert_eq!(roster_row(&first, &wes, &pat.0).await["last_seen"], held, "last_seen moved on while Invisible");
+    assert_eq!(roster_row(&first, &acme, &pat.0).await["last_seen"], held);
+    let sql = sql_client(&url).await;
+    let r = sql.query_one("SELECT status, status_since IS NOT NULL, last_seen > status_since FROM identities WHERE slug = $1", &[&pat.0]).await.unwrap();
+    assert_eq!((r.get::<_, String>(0), r.get::<_, bool>(1), r.get::<_, bool>(2)), ("invisible".to_string(), true, true));
+    println!("  ok  last_seen held at the moment they went Invisible while they keep using it (the real one, for the idle sweep, moves on)");
+
+    pat_poll.abort();
+    first.shutdown.cancel();
+    drop(first);
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let pat_poll = park_poll(&hub, &pat);
+    in_use(&hub, &pat, "pat-laptop", true).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut w = Watcher::new(&wes, "wes-desk");
+    w.sync(&hub).await;
+    assert_eq!(shown(&w.online, &w.busy, &w.dnd, &pat.0), "offline");
+    assert_eq!(roster_row(&hub, &wes, &pat.0).await["last_seen"], held);
+    assert_eq!(told(&hub, &pat, "pat-phone").await, json!("invisible"));
+    println!("  ok  kept across a restart: still offline to others, last_seen still held, their devices told invisible");
+
+    choose(&hub, &pat, "auto").await;
+    w.sees(&hub, &pat, "online").await;
+    let since: Option<chrono::DateTime<chrono::Utc>> = sql.query_one("SELECT status_since FROM identities WHERE slug = $1", &[&pat.0]).await.unwrap().get(0);
+    assert!(since.is_none());
+    assert_ne!(roster_row(&hub, &wes, &pat.0).await["last_seen"], held);
+    println!("  ok  back to Automatic: online at once, last_seen their real one again");
+    pat_poll.abort();
+
+    let _ = std::fs::remove_dir_all(&data);
+    drop(pg);
+}
+
+/// What a viewer can read of `who`: its row in `GET /api/roster`, its entry
+/// in `GET /api/directory`, and, for a viewer that syncs, its row and the
+/// three sets in a whole sync from scratch.
+async fn everything_about(hub: &Arc<Hub>, viewer: &Id, device: Option<&str>, who: &Id) -> Value {
+    let mut seen = json!({ "roster": roster_row(hub, viewer, &who.0).await });
+    let d = Call::new("GET", &format!("/api/directory?q={}", who.0)).auth(pair(&viewer.0, &viewer.1)).send(hub).await;
+    assert_eq!(d.code(), 200, "{}", d.text());
+    seen["directory"] = d.json()["entries"].as_array().unwrap().iter().find(|e| e["slug"] == json!(who.0)).cloned().unwrap();
+    if let Some(device) = device {
+        let (mut cursor, mut row, mut sets) = (Value::Null, Value::Null, Value::Null);
+        loop {
+            let mut body = json!({ "device_id": device, "wait": 0 });
+            if !cursor.is_null() {
+                body["cursor"] = cursor.clone();
+            }
+            let a = post(hub, viewer, "/api/sync", body).await.json();
+            if let Some(r) = a["roster"].as_array().unwrap().iter().find(|e| e["slug"] == json!(who.0)) {
+                row = r.clone();
+            }
+            if a.get("online").is_some() {
+                sets = json!({ "online": a["online"], "busy": a["busy"], "dnd": a["dnd"] });
+            }
+            cursor = a["cursor"].clone();
+            if a["more"] != json!(true) {
+                break;
+            }
+        }
+        seen["sync_roster"] = row;
+        seen["sync_sets"] = sets;
+    }
+    seen
+}
+
+/// The leak test: nobody else can tell Invisible from offline. A person and
+/// an org read everything the hub gives about Pat while Pat is connected and
+/// Invisible, then again when Pat is really offline (on Automatic, last seen
+/// at the same moment, set so by construction): byte for byte the same.
+#[tokio::test]
+async fn nobody_can_tell_invisible_from_offline() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubinvisibleleak").await;
+    let data = data_dir("invisibleleak");
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let pat = register(&hub, "pat", "person").await;
+    let wes = register(&hub, "wes", "person").await;
+    let acme = register(&hub, "acme", "org").await;
+    let _wes_poll = park_poll(&hub, &wes);
+    let _acme_poll = park_poll(&hub, &acme);
+    in_use(&hub, &wes, "wes-desk", true).await;
+
+    // A: connected (a parked poll, the laptop in front) and Invisible
+    let pat_poll = park_poll(&hub, &pat);
+    in_use(&hub, &pat, "pat-laptop", true).await;
+    choose(&hub, &pat, "invisible").await;
+    let mut w = Watcher::new(&wes, "wes-desk");
+    w.sees(&hub, &pat, "offline").await;
+    let held = roster_row(&hub, &wes, &pat.0).await["last_seen"].clone();
+    let a_wes = everything_about(&hub, &wes, Some("wes-fresh-a"), &pat).await;
+    let a_acme = everything_about(&hub, &acme, None, &pat).await;
+
+    // B: really offline, on Automatic, last seen at that same moment
+    pat_poll.abort();
+    in_use(&hub, &pat, "pat-laptop", false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    hub.presence.advance(PRESENCE_WINDOW + HANG_UP_GRACE + Duration::from_secs(1));
+    let sql = sql_client(&url).await;
+    let at = chrono::DateTime::parse_from_rfc3339(held.as_str().unwrap()).unwrap().with_timezone(&chrono::Utc);
+    sql.execute("UPDATE identities SET status = 'auto', status_since = NULL, last_seen = $2 WHERE slug = $1", &[&pat.0, &at]).await.unwrap();
+    hub.presence.set_status(&pat.0, Status::Auto);
+    w.sees(&hub, &pat, "offline").await;
+    let b_wes = everything_about(&hub, &wes, Some("wes-fresh-b"), &pat).await;
+    let b_acme = everything_about(&hub, &acme, None, &pat).await;
+
+    assert_eq!(serde_json::to_string(&a_wes).unwrap(), serde_json::to_string(&b_wes).unwrap(), "a person can tell Invisible from offline");
+    assert_eq!(serde_json::to_string(&a_acme).unwrap(), serde_json::to_string(&b_acme).unwrap(), "an org can tell Invisible from offline");
+    assert!(!a_wes["sync_sets"]["online"].as_array().unwrap().contains(&json!(pat.0)), "{a_wes}");
+    println!("  ok  a person (roster, directory, a whole sync: row and sets) and an org (roster, directory) read the same bytes about Invisible Pat as about offline Pat");
 
     let _ = std::fs::remove_dir_all(&data);
     drop(pg);
