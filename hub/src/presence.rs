@@ -35,6 +35,13 @@
 //! as all of this does (user 2026-10-31 09:03Z, "Offline for both"): Online
 //! holds without a device in use, Busy and Do not disturb are as if said,
 //! and Automatic is the rules above.
+//!
+//! Invisible (schema 12; user 2026-10-31 14:13Z, people only): a person
+//! connected but shown offline. Everything others are told (`online`,
+//! `busy`, `dnd`, the sets) is `Slot::shown_at`, which is false for them;
+//! their own calls still keep them online underneath (`online_at`: their
+//! parked syncs, the hour's rule, declared flags), so it changes nothing for
+//! their own devices but the word `invisible` in their own answers.
 
 #[cfg(all(feature = "test-clock", not(debug_assertions)))]
 compile_error!("test-clock moves the presence clock and must not be used in a release build");
@@ -63,7 +70,8 @@ pub const BUSY_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// A person's own choice of how they show (`POST /api/status`, v2.3.0):
 /// Automatic (the hub's rules: online, busy an hour after their last device
-/// in use), or Online, Busy or Do not disturb whatever those say. Kept in
+/// in use), or Online, Busy or Do not disturb whatever those say, or
+/// Invisible (offline to everyone else; schema 12). Kept in
 /// `identities.status`; shown only while they are online.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -71,6 +79,7 @@ pub enum Status {
     Online,
     Busy,
     Dnd,
+    Invisible,
 }
 
 impl Status {
@@ -81,6 +90,7 @@ impl Status {
             Status::Online => "online",
             Status::Busy => "busy",
             Status::Dnd => "dnd",
+            Status::Invisible => "invisible",
         }
     }
 
@@ -90,6 +100,7 @@ impl Status {
             "online" => Status::Online,
             "busy" => Status::Busy,
             "dnd" => Status::Dnd,
+            "invisible" => Status::Invisible,
             _ => return None,
         })
     }
@@ -99,6 +110,7 @@ impl Status {
             1 => Status::Online,
             2 => Status::Busy,
             3 => Status::Dnd,
+            4 => Status::Invisible,
             _ => Status::Auto,
         }
     }
@@ -253,9 +265,11 @@ impl Presence {
         }
     }
 
+    /// Online as everyone else is told (`Slot::shown_at`: an Invisible
+    /// person is not).
     pub fn online(&self, slug: &str) -> bool {
         let map = self.slots.pin();
-        map.get(slug).is_some_and(|s| s.online_at(self.now_ms()))
+        map.get(slug).is_some_and(|s| s.shown_at(self.now_ms()))
     }
 
     /// Online, and busy (v2.3.0; `Slot::busy_if_online`).
@@ -410,7 +424,8 @@ impl Presence {
     }
 
     /// Every address online now, and those of them that are busy and that are
-    /// on Do not disturb (v2.3.0), all sorted, from one reading of the clock.
+    /// on Do not disturb (v2.3.0), all sorted, from one reading of the clock:
+    /// as everyone is told them, so an Invisible person is in none.
     /// An address seen offline here stops being busy and DND by its own say:
     /// one that comes back says them again. A person's chosen status stays,
     /// and shows again when they are back.
@@ -419,6 +434,9 @@ impl Presence {
         let (mut on, mut busy, mut dnd) = (Vec::new(), Vec::new(), Vec::new());
         for (k, s) in self.slots.pin().iter() {
             if s.online_at(now) {
+                if !s.shown_at(now) {
+                    continue;
+                }
                 on.push(k.clone());
                 if s.busy_if_online(now) {
                     busy.push(k.clone());
@@ -485,14 +503,20 @@ impl Slot {
         seen != 0 && now_ms.saturating_sub(seen) < PRESENCE_WINDOW.as_millis() as u64
     }
 
-    /// Online and busy (v2.3.0).
-    fn busy_at(&self, now_ms: u64) -> bool {
-        self.online_at(now_ms) && self.busy_if_online(now_ms)
+    /// Online as everyone else is told: online, and not a person who chose
+    /// Invisible (schema 12).
+    fn shown_at(&self, now_ms: u64) -> bool {
+        self.online_at(now_ms) && self.chosen() != Status::Invisible
     }
 
-    /// Online and Do not disturb (v2.3.0): offline wins over DND.
+    /// Online and busy (v2.3.0), as shown.
+    fn busy_at(&self, now_ms: u64) -> bool {
+        self.shown_at(now_ms) && self.busy_if_online(now_ms)
+    }
+
+    /// Online and Do not disturb (v2.3.0), as shown: offline wins over DND.
     fn dnd_at(&self, now_ms: u64) -> bool {
-        self.online_at(now_ms) && self.dnd_if_online()
+        self.shown_at(now_ms) && self.dnd_if_online()
     }
 
     /// Do not disturb, if online: it said so, or a person chose it.
@@ -520,7 +544,8 @@ impl Slot {
         match self.chosen() {
             Status::Busy | Status::Dnd => return true,
             Status::Online => return false,
-            Status::Auto => {}
+            // never shown (`shown_at`); the hour's rule, as on Automatic
+            Status::Auto | Status::Invisible => {}
         }
         if !self.person.load(Ordering::Acquire) {
             return false;

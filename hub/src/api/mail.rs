@@ -145,8 +145,17 @@ pub async fn roster(hub: &Hub, c: &impl GenericClient) -> ApiResult<Vec<Value>> 
     Ok(rows.iter().map(|r| roster_entry(hub, r)).collect())
 }
 
-const ROSTER_COLS: &str = "slug, org_name, username, blurb, last_seen, kind,
-    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint";
+/// The `last_seen` everyone is shown: an Invisible person's held at the
+/// moment they chose it (schema 12), so it does not move on with their calls.
+macro_rules! shown_seen {
+    () => {
+        "CASE WHEN identities.status = 'invisible' THEN COALESCE(identities.status_since, identities.last_seen) ELSE identities.last_seen END"
+    };
+}
+pub const SHOWN_SEEN: &str = shown_seen!();
+
+const ROSTER_COLS: &str = concat!("slug, org_name, username, blurb, ", shown_seen!(), ", kind,
+    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint");
 
 /// One roster row as v1 sent it (presence from this process).
 pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {

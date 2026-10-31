@@ -20,7 +20,7 @@ use deadpool_postgres::GenericClient;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use super::mail::{authed, authed_callers, envelope_v2, mark_seen, one_address, roster_json, ENVELOPE_COLS, POLL_CEILING};
+use super::mail::{authed, authed_callers, envelope_v2, mark_seen, one_address, roster_json, ENVELOPE_COLS, POLL_CEILING, SHOWN_SEEN};
 use super::{ok, refuse, ApiResult, Hub, Req};
 use crate::clock;
 use crate::db;
@@ -393,7 +393,7 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
         &c,
         &format!(
             "SELECT seq, gone, slug, org_name, username, blurb, last_seen, kind, picture, fingerprint FROM (
-                SELECT roster_seq AS seq, false AS gone, slug, org_name, username, blurb, last_seen, kind,
+                SELECT roster_seq AS seq, false AS gone, slug, org_name, username, blurb, {SHOWN_SEEN} AS last_seen, kind,
                     (SELECT v - 'data' FROM hub_meta WHERE k='profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')) AS picture, fingerprint
                   FROM identities WHERE roster_seq > $1
                 UNION ALL
@@ -825,7 +825,9 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 /// `POST /api/status {status, slug?}` (v2.3.0): a person chooses how they
 /// show: `auto` (the hub's rules: online, and busy an hour after their last
 /// device in use), `online` (whatever those say), `busy` or `dnd` (Do not
-/// disturb, a part of busy). Kept in `identities.status` until they choose
+/// disturb, a part of busy), or `invisible` (schema 12: offline to everyone
+/// else, their roster rows' `last_seen` held at the moment they chose it in
+/// `identities.status_since`, kept while they stay Invisible). Kept in `identities.status` until they choose
 /// again, across a restart and while they are offline; it shows only while
 /// they are online (offline wins, user 2026-10-31 09:03Z, "Offline for
 /// both"). Every sync answer of theirs says it (`status`), and their parked
@@ -844,14 +846,23 @@ pub async fn status(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let slug = one_address(&slugs, body.get("slug"))?;
     let status = match body.get("status") {
         Some(Value::String(s)) => Status::parse(s),
-        None | Some(Value::Null) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status is required: auto, online, busy or dnd"),
+        None | Some(Value::Null) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status is required: auto, online, busy, dnd or invisible"),
         Some(_) => None,
     };
     let Some(status) = status else {
-        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status must be auto, online, busy or dnd");
+        return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status must be auto, online, busy, dnd or invisible");
     };
     let c = hub.db.get().await?;
-    let kept = db::execute(&c, "UPDATE identities SET status = $2 WHERE slug = $1 AND kind = 'person'", &[&slug, &status.as_str()]).await?;
+    // Invisible holds the `last_seen` others see at this moment (kept when
+    // already Invisible); any other status clears it
+    let kept = db::execute(
+        &c,
+        "UPDATE identities SET status = $2,
+                status_since = CASE WHEN $2 <> 'invisible' THEN NULL WHEN status = 'invisible' THEN status_since ELSE $3 END
+          WHERE slug = $1 AND kind = 'person'",
+        &[&slug, &status.as_str(), &clock::now()],
+    )
+    .await?;
     if kept == 0 {
         return refuse(StatusCode::FORBIDDEN, "only a person chooses a status; an org says busy and Do not disturb with POST /api/presence");
     }

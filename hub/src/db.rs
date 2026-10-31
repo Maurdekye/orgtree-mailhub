@@ -41,6 +41,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (9, "UnifiedPush", include_str!("../migrations/0009_unifiedpush.sql")),
     (10, "message meta", include_str!("../migrations/0010_message_meta.sql")),
     (11, "status", include_str!("../migrations/0011_status.sql")),
+    (12, "invisible", include_str!("../migrations/0012_invisible.sql")),
 ];
 
 /// Gives messages that have no change-log entry one (schema 3 does it for
