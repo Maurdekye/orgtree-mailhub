@@ -17,6 +17,19 @@
   to 2.3.0, 23:19Z); verified: hub/src/presence.rs, api/sync.rs, api/mail.rs,
   server.rs; tests/busy.rs; docs/v2-additions.md]
 
+- 2026-10-31: Do not disturb (feature `dnd`, 2.3.0) is a part of busy. An
+  address says it beside busy (`POST /api/presence {busy, dnd}`; `dnd` left
+  out = false, so an engine from before DND is never DND), memory only.
+  `now_sets` returns online, busy and dnd: a DND address online is in `busy`
+  too, so a client that knows busy only shows it busy. It ends as busy does,
+  when `now_sets` sees the address offline: offline wins over DND, and `dnd`
+  lists online addresses only. Sync answers send `dnd` with every `online`
+  (in the same cursor print); roster rows carry `dnd`. [decided: user
+  2026-10-31 08:51Z via Orgtree docket
+  org-presence-busy-orange-when-no-org-inbox-holde; offline wins, user
+  09:03Z "Offline for both"; verified: hub/src/presence.rs, api/sync.rs,
+  api/mail.rs; tests/busy.rs; docs/v2-additions.md]
+
 - 2026-10-14: A refused send is diagnosable from the hub's own log: a 4xx
   answer to `POST /api/send` appends the refusal's `detail` (the same text
   the sender is told) and the recipient slug (`to`) to that request's one

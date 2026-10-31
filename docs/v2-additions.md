@@ -89,6 +89,7 @@ X-Org-Auth: <slug>:<secret>
   "roster_removed": ["<addresses that left>"],
   "online": ["<every address online now>"],      (only when it changed since the cursor)
   "busy": ["<those of them that are busy>"],      (2.3.0: with every "online"; see "Busy")
+  "dnd": ["<those of them on Do not disturb>"],   (2.3.0: with every "online"; also in "busy")
   "active": ["<this address's other devices in use>"],   (every answer; see "Active devices")
   "more": false,
   "reset": true                                   (only when the cursor was not this hub's; see below)
@@ -112,7 +113,8 @@ X-Org-Auth: <slug>:<secret>
   every address online now, whenever that set changed since the cursor;
   clients treat every other address as offline. `busy` (2.3.0) comes with
   every `online`: those of them that are busy (see "Busy"), whom a client
-  that does not know it simply shows online. Presence alone does not end
+  that does not know it simply shows online; so does `dnd`, those on Do not
+  disturb, who are in `busy` too. Presence alone does not end
   a parked sync early, so `online` is at most `wait` seconds old.
 - **The cursor** is per device: one device's progress never hides anything
   from another. Without one (or with `null`/`""`) the device starts from the
@@ -623,7 +625,7 @@ carry `"busy": true|false` beside `online`. A client that does not know
 POST /api/presence
 X-Org-Auth: <slug>:<secret>
 {"busy": true, "slug": "<when the header carries several>"}
-→ 200 {"slug": "...", "busy": true}
+→ 200 {"slug": "...", "busy": true, "dnd": false}
 ```
 
   `false` ends it. It is kept in memory, as presence is: it ends when the
@@ -631,6 +633,18 @@ X-Org-Auth: <slug>:<secret>
   again when it reconnects. Refusals: 401 without credentials; 422 `busy is
   required: true or false` and `busy must be true or false`. A client that
   never sends it is never busy by its own say.
+- **Do not disturb** (`dnd`): an address can also say it does not want to be
+  disturbed (Orgtree's org while its outside mail is set to Do not disturb),
+  `{"busy": false, "dnd": true}` → 200 `{"slug": "...", "busy": false,
+  "dnd": true}`. `dnd` is optional (false when left out, so a client that
+  never sends it is never DND); 422 `dnd must be true or false`. A DND
+  address is busy too: sync answers list it in `dnd` and in `busy`, and its
+  roster row says `"dnd": true` and `"busy": true`, so a client that knows
+  busy but not DND shows it busy, and one from before busy online. It ends
+  as busy does: when the address says `false`, is seen offline, or the hub
+  restarts. Offline wins over DND, as over busy (user 2026-10-31 09:03Z,
+  "Offline for both"): `dnd` lists online addresses only, and clients show
+  offline, then Do not disturb, then busy, then online.
 - **A person is busy on their own** once none of their devices has been in
   use (`POST /api/devices/active`, see "Active devices") for **an hour**
   (`BUSY_AFTER` in `hub/src/presence.rs`, the one place it lives), and online
@@ -642,10 +656,10 @@ X-Org-Auth: <slug>:<secret>
   them. Orgs and v1 chat clients have no devices in use and are never busy
   this way.
 - **Who hears it**: the presence loop (every second) wakes the parked syncs
-  of devices in use when the set busy changes (an org says it, a person's
-  hour runs out, a device comes into use), as it does for `online`. Other
-  devices get it with their next answer.
-- `/healthz` lists the feature as `busy`.
+  of devices in use when the set busy or dnd changes (an org says it, a
+  person's hour runs out, a device comes into use), as it does for `online`.
+  Other devices get it with their next answer.
+- `/healthz` lists the features as `busy` and `dnd`.
 
 ## Telling what a hub supports
 
@@ -654,7 +668,7 @@ X-Org-Auth: <slug>:<secret>
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy` (2.3.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy` and `dnd` (2.3.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 
