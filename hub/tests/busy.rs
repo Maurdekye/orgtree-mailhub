@@ -15,6 +15,14 @@
 //! carry a `dnd` flag. Offline wins over DND, as over busy (user 2026-10-31
 //! 09:03Z, "Offline for both").
 //!
+//! A person's status (v2.3.0; the docket's addition, user 2026-10-31
+//! 08:52Z): a person chooses Automatic, Online, Busy or Do not disturb in
+//! Hubchat (`POST /api/status`). The hub keeps it (`identities.status`) until
+//! they choose again, across a restart and while they are offline, and shows
+//! it only while they are online (offline wins, 09:03Z). Online holds without
+//! a device in use; Automatic is the hour's rule. Every sync answer of theirs
+//! says `status`, and a device in use hears a change to it at once.
+//!
 //!     HUB_TEST_PG=<folder> cargo test --features test-clock --test busy -- --nocapture
 
 #![cfg(feature = "test-clock")]
@@ -25,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use mailhub::api::sync::presence_loop;
 use mailhub::presence::{BUSY_AFTER, HANG_UP_GRACE};
+use tokio::time::timeout;
 use mailhub::Hub;
 use serde_json::{json, Value};
 use support::*;
@@ -74,6 +83,21 @@ async fn say(hub: &Arc<Hub>, who: &Id, busy: bool, dnd: bool) {
     let r = post(hub, who, "/api/presence", json!({ "busy": busy, "dnd": dnd })).await;
     assert_eq!(r.code(), 200, "{}", r.text());
     assert_eq!(r.json(), json!({ "slug": who.0, "busy": busy, "dnd": dnd }));
+}
+
+/// The person chooses their status; the hub answers with what it took.
+async fn choose(hub: &Arc<Hub>, who: &Id, status: &str) {
+    let r = post(hub, who, "/api/status", json!({ "status": status })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(r.json(), json!({ "slug": who.0, "status": status }));
+}
+
+/// The status a device of `who` is told: a whole sync answer, without a
+/// cursor.
+async fn told(hub: &Arc<Hub>, who: &Id, device: &str) -> Value {
+    let r = post(hub, who, "/api/sync", json!({ "device_id": device, "wait": 0 })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    r.json()["status"].clone()
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -429,6 +453,129 @@ async fn the_last_device_in_use_holds_across_a_restart() {
     hub.presence.advance(Duration::from_secs(2 * 60));
     w.sees(&hub, &pat, "busy").await;
     println!("  ok  after a restart, busy an hour after the laptop was put down (not an hour after the restart)");
+
+    let _ = std::fs::remove_dir_all(&data);
+    drop(pg);
+}
+
+#[tokio::test]
+async fn a_person_chooses_their_status() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubstatus").await;
+    let data = data_dir("status");
+    let first = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(first.clone()));
+
+    let h = Call::new("GET", "/healthz").send(&first).await.json();
+    assert!(h["features"].as_array().unwrap().contains(&json!("status")), "{h}");
+    println!("  ok  /healthz lists the feature status");
+
+    let pat = register(&first, "pat", "person").await; // Hubchat on a laptop and a phone
+    let wes = register(&first, "wes", "person").await; // watching from Hubchat
+    let pat_poll = park_poll(&first, &pat);
+    in_use(&first, &pat, "pat-laptop", true).await;
+    let mut w = Watcher::new(&wes, "wes-desk");
+    w.sees(&first, &pat, "online").await;
+    assert_eq!(told(&first, &pat, "pat-phone").await, json!("auto"));
+    println!("  ok  a person starts on Automatic: their sync answers say status auto");
+
+    choose(&first, &pat, "dnd").await;
+    w.sees(&first, &pat, "dnd").await;
+    assert_eq!(row_dnd(&first, &wes, &pat.0).await, (json!(true), json!(true), json!(true)));
+    assert_eq!(told(&first, &pat, "pat-phone").await, json!("dnd"));
+    println!("  ok  Do not disturb: listed in dnd and busy, its roster row says dnd; every device of theirs is told status dnd");
+
+    choose(&first, &pat, "busy").await;
+    w.sees(&first, &pat, "busy").await;
+    assert_eq!(row_dnd(&first, &wes, &pat.0).await, (json!(true), json!(true), json!(false)));
+    choose(&first, &pat, "online").await;
+    w.sees(&first, &pat, "online").await;
+    println!("  ok  dnd -> busy -> online, each at once, with the laptop in front");
+
+    // Online holds without a device in use; Automatic is the hour's rule
+    in_use(&first, &pat, "pat-laptop", false).await;
+    first.presence.advance(BUSY_AFTER + Duration::from_secs(60));
+    w.sees(&first, &pat, "online").await;
+    choose(&first, &pat, "auto").await;
+    w.sees(&first, &pat, "busy").await;
+    in_use(&first, &pat, "pat-phone", true).await;
+    w.sees(&first, &pat, "online").await;
+    println!("  ok  Online holds an hour after their last device in use; Automatic is busy then, and online with the phone in front");
+
+    // a device in use hears of a change to its own status at once, even one
+    // that changes no set (Automatic -> Online with the phone in front)
+    let mut cursor = Value::Null;
+    loop {
+        let mut body = json!({ "device_id": "pat-phone", "wait": 0 });
+        if !cursor.is_null() {
+            body["cursor"] = cursor.clone();
+        }
+        let a = post(&first, &pat, "/api/sync", body).await.json();
+        cursor = a["cursor"].clone();
+        if a["more"] != json!(true) {
+            break;
+        }
+    }
+    let (h, who) = (first.clone(), pat.clone());
+    let parked = tokio::spawn(async move { post(&h, &who, "/api/sync", json!({ "device_id": "pat-phone", "wait": 25, "cursor": cursor })).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!parked.is_finished(), "the sync did not park: nothing was new");
+    let t0 = Instant::now();
+    choose(&first, &pat, "online").await;
+    let a = timeout(Duration::from_secs(5), parked).await.expect("the parked sync was not woken").unwrap().json();
+    assert!(t0.elapsed() < Duration::from_secs(3), "woken after {:?}", t0.elapsed());
+    assert_eq!(a["status"], json!("online"), "{a}");
+    assert_eq!(shown(&strings(&a["online"]), &strings(&a["busy"]), &strings(&a["dnd"]), &pat.0), "online", "no set changed: {a}");
+    println!("  ok  Automatic -> Online wakes their device in use whose sync is parked, in {:?}, though no set changed", t0.elapsed());
+
+    // offline wins (user 2026-10-31 09:03Z, "Offline for both"); the hub
+    // keeps the choice, so it shows again when they are back
+    choose(&first, &pat, "dnd").await;
+    w.sees(&first, &pat, "dnd").await;
+    in_use(&first, &pat, "pat-phone", false).await;
+    pat_poll.abort();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    first.presence.advance(HANG_UP_GRACE + Duration::from_secs(1));
+    w.sees(&first, &pat, "offline").await;
+    assert_eq!(row_dnd(&first, &wes, &pat.0).await, (json!(false), json!(false), json!(false)));
+    let pat_again = park_poll(&first, &pat);
+    w.sees(&first, &pat, "dnd").await;
+    println!("  ok  offline on Do not disturb: shown offline; back, Do not disturb again (the hub kept it)");
+
+    // kept in the database: a restart keeps it
+    let sql = sql_client(&url).await;
+    let stored: String = sql.query_one("SELECT status FROM identities WHERE slug = $1", &[&pat.0]).await.unwrap().get(0);
+    assert_eq!(stored, "dnd");
+    pat_again.abort();
+    first.shutdown.cancel();
+    drop(first);
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let _pat_poll = park_poll(&hub, &pat);
+    let mut w = Watcher::new(&wes, "wes-desk");
+    w.sees(&hub, &pat, "dnd").await;
+    assert_eq!(told(&hub, &pat, "pat-phone").await, json!("dnd"));
+    println!("  ok  kept in identities.status across a restart: Do not disturb as soon as they connect");
+
+    for (body, code, detail) in [
+        (json!({}), 422, "status is required: auto, online, busy or dnd"),
+        (json!({ "status": null }), 422, "status is required: auto, online, busy or dnd"),
+        (json!({ "status": "away" }), 422, "status must be auto, online, busy or dnd"),
+        (json!({ "status": true }), 422, "status must be auto, online, busy or dnd"),
+    ] {
+        let r = post(&hub, &pat, "/api/status", body.clone()).await;
+        assert_eq!((r.code(), r.json()["detail"].clone()), (code, json!(detail)), "{body}");
+    }
+    let acme = register(&hub, "acme", "org").await;
+    let r = post(&hub, &acme, "/api/status", json!({ "status": "dnd" })).await;
+    assert_eq!(
+        (r.code(), r.json()["detail"].clone()),
+        (403, json!("only a person chooses a status; an org says busy and Do not disturb with POST /api/presence"))
+    );
+    let r = Call::new("POST", "/api/status").json(json!({ "status": "dnd" })).send(&hub).await;
+    assert_eq!(r.code(), 401, "{}", r.text());
+    assert_eq!(told(&hub, &pat, "pat-phone").await, json!("dnd"), "a refusal changes nothing");
+    println!("  ok  refused: status missing or not auto, online, busy or dnd (422), an org (403), no credentials (401)");
 
     let _ = std::fs::remove_dir_all(&data);
     drop(pg);
