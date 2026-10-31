@@ -30,6 +30,22 @@
   09:03Z "Offline for both"; verified: hub/src/presence.rs, api/sync.rs,
   api/mail.rs; tests/busy.rs; docs/v2-additions.md]
 
+- 2026-10-31: A person's status (feature `status`, 2.3.0, schema 11): a
+  person chooses auto, online, busy or dnd (`POST /api/status`; 403 for
+  anyone but a person). Kept in `identities.status` and the slot's `status`
+  (`seed_presence` reads it back), never cleared by going offline; it shows
+  only while they are online (offline wins). `Slot::chosen` feeds
+  `busy_if_online` (Online overrides the hour's rule, Busy and DND count as
+  said) and `dnd_if_online`. Every sync answer carries `status`, and it is
+  folded into the cursor's presence print, so a change wakes their parked
+  syncs (`wake_sync`) and a device in use answers at once. A database at
+  schema 11 is refused by a hub without it. [decided: user 2026-10-31
+  08:52Z (a person sets their status), 09:03Z "Offline for both"; API and
+  schema approved by the coordinator 2026-10-31, via Orgtree docket
+  org-presence-busy-orange-when-no-org-inbox-holde; verified:
+  hub/src/presence.rs, api/sync.rs, migrations/0011_status.sql;
+  tests/busy.rs; docs/v2-additions.md]
+
 - 2026-10-14: A refused send is diagnosable from the hub's own log: a 4xx
   answer to `POST /api/send` appends the refusal's `detail` (the same text
   the sender is told) and the recipient slug (`to`) to that request's one

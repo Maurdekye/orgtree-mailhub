@@ -91,6 +91,7 @@ X-Org-Auth: <slug>:<secret>
   "busy": ["<those of them that are busy>"],      (2.3.0: with every "online"; see "Busy")
   "dnd": ["<those of them on Do not disturb>"],   (2.3.0: with every "online"; also in "busy")
   "active": ["<this address's other devices in use>"],   (every answer; see "Active devices")
+  "status": "auto",                               (2.3.0: every answer; see "A person's status")
   "more": false,
   "reset": true                                   (only when the cursor was not this hub's; see below)
 }
@@ -661,6 +662,44 @@ X-Org-Auth: <slug>:<secret>
   Other devices get it with their next answer.
 - `/healthz` lists the features as `busy` and `dnd`.
 
+## A person's status (v2.3.0)
+
+A person chooses how they show: **Automatic**, **Online**, **Busy** or **Do
+not disturb** (Hubchat's status picker; user 2026-10-31 08:52Z).
+
+```
+POST /api/status
+X-Org-Auth: <slug>:<secret>
+{"status": "dnd", "slug": "<when the header carries several>"}
+→ 200 {"slug": "...", "status": "dnd"}
+```
+
+- `auto` (the default) is the hub's own rules: online while connected, busy
+  an hour after their last device in use (see "Busy"). `online` shows them
+  online even with no device in use; `busy` and `dnd` show them busy and on
+  Do not disturb as if they had said it (a `dnd` person is in `busy` too).
+- **Kept until they choose again**: in `identities.status` (schema 11), so
+  it holds across a restart and while they are offline, with no expiry. It
+  shows only while they are online: offline wins over every status (user
+  2026-10-31 09:03Z, "Offline for both"), and it shows again as soon as one
+  of their devices connects.
+- **Their own devices**: every sync answer carries `"status"` (the
+  address's choice; `"auto"` for everyone else), and it is part of the
+  cursor's presence print, so a change wakes their parked syncs: a device in
+  use answers at once, the others with their next answer. Hubchat shows no
+  notification and plays no sound on any of their devices on `dnd`; mail,
+  receipts and push wakes go on as ever.
+- **Everyone else** sees only its effect: `online`, `busy` and `dnd` in sync
+  answers and roster rows, as for any address. The choice itself (`auto`
+  against `online`, say) is told to no one else.
+- People only: anyone else is refused, 403 `only a person chooses a status;
+  an org says busy and Do not disturb with POST /api/presence`. Other
+  refusals: 401 without credentials; 422 `status is required: auto, online,
+  busy or dnd` and `status must be auto, online, busy or dnd`.
+- ⚠ Schema 11 is a one-way step: once a database has it, a hub without it
+  refuses that database (docs/OPERATIONS.md).
+- `/healthz` lists the feature `status`.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`
@@ -668,7 +707,7 @@ X-Org-Auth: <slug>:<secret>
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy` and `dnd` (2.3.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy`, `dnd` and `status` (2.3.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 

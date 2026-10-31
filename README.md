@@ -272,7 +272,7 @@ Auth rides one header, never URLs or bodies:
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
 | `GET /api/roster` · `GET /healthz` | roster with presence (online, busy, dnd) · liveness |
 | `POST /api/profile` | `{name?, about?, slug?}` — change your display name (≤ 48) and about line (≤ 200) |
-| `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online and which of them are busy or on Do not disturb |
+| `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online and which of them are busy or on Do not disturb, and the address's own chosen status |
 | `GET /api/devices` | the devices an address syncs from |
 | `GET /api/conversations` · `GET /api/history?with=` | who you have mail with (last message, unread) · one conversation, newest first, paged |
 | `DELETE /api/messages/{id}` · `DELETE /api/conversations/{address}` | delete your copy (the other side keeps theirs) |
@@ -283,6 +283,7 @@ Auth rides one header, never URLs or bodies:
 | `GET`/`POST /api/identity` · `POST /api/devices` · `DELETE /api/devices/{id}` | per-device keys: the identity key, enrolling a device, signing one out (rotating the identity key) |
 | `POST /api/devices/active` | `{device_id, active, slug?}` — this device is the one in use (90 s, renewed by sending it again) or no longer; the address's other devices see it in every sync answer's `active` and can leave notifications to it; a person none of whose devices has been in use for an hour shows busy (2.3.0) |
 | `POST /api/presence` | `{busy, dnd?, slug?}` — (2.3.0) the address is busy: online, but no one can answer it now (an Orgtree org while none of its org-inbox holders can start a turn); `dnd`: it does not want to be disturbed (an Orgtree org while its outside mail is set to Do not disturb), a part of busy; kept until it says `false` or is seen offline |
+| `POST /api/status` | `{status, slug?}` — (2.3.0) a person chooses how they show: `auto` (online, busy an hour after their last device in use), `online`, `busy` or `dnd` (Do not disturb); kept until they choose again (schema 11), shown while they are online; every sync answer of theirs carries it as `status` |
 | `POST /api/push` · `DELETE /api/push?device_id=` | `{device_id, endpoint, p256dh, auth, slug?}` — optional UnifiedPush (2.1.0): when mail waits and the device is not in use, the hub sends an encrypted, content-free wake to the device's distributor; DELETE stops it |
 
 The v2 additions (profiles, replies, and the rest of Phase 2) are described in

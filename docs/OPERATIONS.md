@@ -216,6 +216,14 @@ No automatic backup or downgrade is added. Profile pictures use existing
 version composition itself changes no runtime or migration SQL. No live
 upgrade or rollback has been performed by this packaging preparation.
 
+⚠ **Mail hub 2.3.0 adds schema 11 (a person's status), another one-way
+step.** Its first start on a schema-10 database adds `identities.status`.
+From then on a hub without schema 11 (2.2.x, and builds of 2.3.0 from
+before it, which had busy presence only) refuses the database ("the
+database schema is version 11, newer than this hub understands"): going
+back means restoring a backup taken before the upgrade, losing what arrived
+since. Take the two-volume backup above before its first start.
+
 v1: the store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
 idempotent column migrations at connect time — upgrading the image and
 restarting is the whole procedure. Downgrading is not supported once a newer
