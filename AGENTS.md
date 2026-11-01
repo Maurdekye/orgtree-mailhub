@@ -1,5 +1,21 @@
 # Mail hub development invariants
 
+- 2026-11-01: Translation (feature `translate`, 2.4.0, schema 13). Planned in
+  the send transaction (`translate::plan`, after the row, before the push
+  wake and the change logs); the provider is called only by the worker
+  (`translate::run`, SKIP LOCKED leases, no DB connection held over HTTP).
+  `translation` goes into an envelope ONLY when the caller is the message's
+  `to_slug` (sync and history); never for the sender, never in the roster
+  or directory, and `identities.language` is told only to its own address.
+  A sender without a language writes in the runtime file's
+  `default_language`. Never log or format the key, a provider error or a
+  message body. Tests: `--features translate-test` (fake provider on
+  loopback; release refuses it). [decided: user 2026-11-01 12:15Z answers +
+  12:16Z "Build it" via Orgtree docket
+  mail-hub-hubchat-automatic-translation-between-u; verified:
+  hub/src/translate.rs, api/mail.rs, api/sync.rs, api/history.rs,
+  migrations/0013_translation.sql; tests/translation.rs]
+
 - 2026-10-31: Busy (feature `busy`, 2.3.0) is a part of online. An address
   says it (`POST /api/presence`, memory only, cleared when `now_sets` sees
   the address offline), or a person (`identities.kind`) is busy once the

@@ -731,6 +731,79 @@ as a selectable status in hubchat"; people only, 14:14Z).
 - `status_since` is set when they choose Invisible (kept if they choose it
   again) and cleared by any other status.
 
+## Translation between people (v2.4.0, schema 13; feature `translate`)
+
+A person reads in a language, and mail to them in another language is
+translated for them on the hub (Orgtree docket
+mail-hub-hubchat-automatic-translation-between-u; the user's answers
+2026-11-01 12:15Z and "Build it" 12:16Z).
+
+- **The reader's language.** `POST /api/profile {language}` sets it: a BCP 47
+  tag (`en`, `he`, `pt-BR`: a 2-3 letter language, then subtags of 2-8
+  letters or digits, at most 35 characters), or `""` for none. People only
+  (403 `only a person reads in a language`); 422 for anything else that is
+  not a tag. A language alone leaves the name and about line alone and
+  changes no roster row. The answer and every sync answer of theirs carry
+  `"language"` (or null). Nobody else is ever told it: not the roster, the
+  directory, or anyone's sync.
+- **What gets translated.** A message whose reader is a person with a
+  language, when the hub's translation is on, the body is not empty and the
+  sender's language differs from the reader's (by the language alone: `he`
+  and `he-IL` are the same). A sender with no language (an agent, an org, a
+  person who set none) is taken to write in the hub's **default language**
+  (user: "assume a default language that can be configured per hub, such as
+  english"); the hub detects nothing. Sending is never delayed: the message
+  is stored and delivered exactly as sent, and a job (`translate_jobs`) asks
+  the provider after commit.
+- **What the reader gets.** In their sync and history only, the message
+  carries `translation`:
+  - `{"lang", "status": "pending"}` while the job waits;
+  - `{"lang", "source_lang", "status": "translated", "body"}`;
+  - `{"lang", "status": "too_long"}` (a body over 10,000 characters, or kept
+    in a file), `"limit"` (the month's limit was reached) or `"failed"` (the
+    provider failed after the retries, cut the reply off, refused, or the
+    translation lost a piece that must not change).
+  Nothing when no translation was needed, or the model found the message
+  already in their language. When the outcome comes, the message moves to
+  the end of the reader's change log, so their devices get it again with it.
+  The sender's copy, history and receipts never carry it; the test
+  `nobody_else_can_tell_a_message_was_translated` compares what the sender
+  and an org read about a translated message and an untranslated one and
+  finds the same bytes.
+- **Push wakes wait for it** up to 4 seconds (user: "Wait up to 4 s"): a
+  message with a job queues its reader's wake no earlier than then, and the
+  outcome (or a retry) lets it go at once.
+- **The provider** is Anthropic's Messages API only (user: "Anthropic only"),
+  model `claude-haiku-5-5` unless set, with thinking off and low effort. The
+  message is sent as text to translate, never to follow; code blocks, code
+  spans, URLs and @mentions must come back unchanged, or the translation is
+  not shown. Failures retry after 5 s, 30 s, 2 min, 10 min and 30 min, then
+  give up; a 429 waits its `retry-after` without counting as a try and drops
+  the worker to one call at a time until a call succeeds; a refused or
+  missing key waits 5 minutes and shows on `/healthz`.
+- **Deletes.** A reader deleting their copy deletes its translation and any
+  job; a message deleted outright takes both with it. The sender deleting
+  theirs leaves the reader's.
+- **The hub owner's settings** are the runtime file's `translation` object
+  (`HUB_RUNTIME_CONFIG_FILE`, read at each use, so a change needs no
+  restart): `enabled` (true to translate), `model`, `default_language`
+  (default `en`), `monthly_limit_usd` (default 5), `input_usd_per_mtok` and
+  `output_usd_per_mtok` (default 0.10 and 0.50, Claude Haiku 5.5's prices).
+  Anything invalid in it means off. The key is the first line of the file
+  `HUB_TRANSLATE_KEY_FILE`, read at each call, never logged or shown.
+- **The month's limit.** Each call's tokens are charged at those prices into
+  `translation_spend` (UTC months). Once the month has spent its limit, new
+  mail gets `"limit"` and waiting jobs end so; mail is delivered as ever.
+- **`/healthz` on the main port** (never the door) carries `translation`:
+  `enabled`, `state` (`off`, `ok`, `no_key`, `key_refused`), `model`,
+  `default_language`, `month`, `spent_usd`, `messages` (translated this
+  month) and `limit_usd`.
+- ⚠ Schema 13 is a one-way step: a hub without it refuses a database that has
+  it (docs/OPERATIONS.md).
+- Tests use a fake provider on loopback (feature `translate-test`, which
+  lets `HUB_TRANSLATE_URL` point at plain HTTP; release builds refuse it). No
+  real key is used by any test.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`
@@ -738,7 +811,7 @@ as a selectable status in hubchat"; people only, 14:14Z).
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, and `busy`, `dnd`, `status` and `invisible` (2.3.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), and `translate` (2.4.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 

@@ -49,6 +49,7 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_PUBLIC_PORT` | `7371` | the public listener's port inside the container/host process (v1 fixed it) |
 | `HUB_RETENTION_DAYS` | unset | unset or empty: mail and files are kept until their owners delete them (`retention_days: null`). A number: the hourly sweep deletes messages and attachment blobs older than this — **regardless of delivery state, and overriding the kept history** (v1's default was 30). Uploads no send ever bound go after 7 days either way |
 | `HUB_ORG_RETENTION_DAYS` | unset | unset or empty: an address stays on the roster until it unregisters or the operator removes it (`orgtree-mailhub remove-address SLUG...`). A number: roster rows silent this long are pruned, except rows still holding queued mail (v1's default was 45); a pruned client re-registers itself on its next 401 |
+| `HUB_TRANSLATE_KEY_FILE` | unset | optional translation (v2.4.0): a file whose first line is the Anthropic API key the hub translates with; read at each call, never logged. Turn translation on in the runtime file's `translation` object. See [Translation](#translation) |
 | `HUB_PUSH_ALLOW` | empty | optional UnifiedPush (v2.1.0): private distributor hosts or CIDRs the hub may send wakes to, comma-separated exact entries (e.g. `ntfy.example.ts.net,100.64.5.6/32`); public HTTPS endpoints need no entry. Read on startup. See [UnifiedPush delivery](#unifiedpush-delivery) |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
 | `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker the hub honors it directly (an embedding desktop process sets `127.0.0.1`) |
@@ -226,6 +227,14 @@ hub understands"): going back means restoring a backup taken before the
 upgrade, losing what arrived since. Take the two-volume backup above before
 its first start.
 
+⚠ **Mail hub 2.4.0 adds schema 13 (translation), another one-way step.** Its
+first start on an older database adds `identities.language`, the tables
+`translate_jobs`, `message_translations` and `translation_spend`. From then
+on a hub without schema 13 (2.3.x and older) refuses the database ("the
+database schema is version 13, newer than this hub understands"): going back
+means restoring a backup taken before the upgrade, losing what arrived since.
+Take the two-volume backup above before its first start.
+
 v1: the store schema is created with `CREATE TABLE IF NOT EXISTS` plus additive,
 idempotent column migrations at connect time — upgrading the image and
 restarting is the whole procedure. Downgrading is not supported once a newer
@@ -307,3 +316,23 @@ loopback resolution; release builds explicitly refuse to compile it. Never use
 that debug test binary to host a real hub. Regular builds allow public HTTPS and
 explicitly allowed private HTTPS. No proxy environment variable overrides the
 outbound destination policy.
+
+## Translation
+
+Optional, off until the owner turns it on (v2.4.0; docs/v2-additions.md has
+the protocol). The hub then sends the text of mail between people who read
+in different languages to Anthropic's Messages API: **message text leaves
+the hub**. Turn it on only where the people on it agree to that.
+
+1. Put the Anthropic API key, alone on the first line, in a file only the
+   hub's account can read, and point `HUB_TRANSLATE_KEY_FILE` at it.
+2. In the runtime file (`HUB_RUNTIME_CONFIG_FILE`) add
+   `"translation": {"enabled": true, "default_language": "en", "monthly_limit_usd": 5}`
+   (optional `model`, `input_usd_per_mtok`, `output_usd_per_mtok`). The hub
+   reads it at each use: no restart.
+3. `/healthz` on the main port shows `translation.state` (`ok`, `no_key`,
+   `key_refused`) and the month's `spent_usd`.
+
+Past the month's limit, mail is delivered untranslated and its readers are
+told why. Orgtree's App settings > Mail hub > Hosting writes both files for
+the bundled hub.
