@@ -322,13 +322,16 @@ outbound destination policy.
 Optional, off until the owner turns it on (v2.4.0; docs/v2-additions.md has
 the protocol). The hub then sends the text of mail between people who read
 in different languages to Anthropic's Messages API: **message text leaves
-the hub**. Turn it on only where the people on it agree to that.
+the hub**. Turn it on only where the people on it agree to that. Only mail
+from one person to another is translated, unless `translate_agents` is true
+(then agents' and orgs' mail to people too); mail to agents never is.
 
 1. Put the Anthropic API key, alone on the first line, in a file only the
    hub's account can read, and point `HUB_TRANSLATE_KEY_FILE` at it.
 2. In the runtime file (`HUB_RUNTIME_CONFIG_FILE`) add
    `"translation": {"enabled": true, "default_language": "en", "monthly_limit_usd": 5}`
-   (optional `model`, `input_usd_per_mtok`, `output_usd_per_mtok`). The hub
+   (optional `translate_agents`, `model`, `input_usd_per_mtok`,
+   `output_usd_per_mtok`). The hub
    reads it at each use: no restart.
 3. `/healthz` on the main port shows `translation.state` (`ok`, `no_key`,
    `key_refused`) and the month's `spent_usd`.

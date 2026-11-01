@@ -744,15 +744,24 @@ mail-hub-hubchat-automatic-translation-between-u; the user's answers
   (403 `only a person reads in a language`); 422 for anything else that is
   not a tag. A language alone leaves the name and about line alone and
   changes no roster row. The answer and every sync answer of theirs carry
-  `"language"` (or null). Nobody else is ever told it: not the roster, the
-  directory, or anyone's sync.
-- **What gets translated.** A message whose reader is a person with a
-  language, when the hub's translation is on, the body is not empty and the
-  sender's language differs from the reader's (by the language alone: `he`
-  and `he-IL` are the same). A sender with no language (an agent, an org, a
-  person who set none) is taken to write in the hub's **default language**
-  (user: "assume a default language that can be configured per hub, such as
-  english"); the hub detects nothing. Sending is never delayed: the message
+  `"language"` (or null). Others see it on the person's roster entry (the
+  roster, the directory and every sync's roster changes carry `language`
+  for a person who set one; user 2026-11-01 16:13Z: "this is something that
+  ought to be exposed to the end user when looking at a person's profile",
+  and agents are told it so they can write in it). A change is a roster
+  change, so others' next sync has it.
+- **What gets translated.** Mail between people: a message whose reader is
+  a person with a language (a reader with none never gets a translation),
+  from a sender who is a person too, when the hub's translation is on, the
+  body is not empty and the sender's language differs from the reader's (by
+  the language alone: `he` and `he-IL` are the same). A person who set no
+  language is taken to write in the hub's **default language** (user:
+  "assume a default language that can be configured per hub, such as
+  english"); the hub detects nothing. Mail from an org or chat address (an
+  agent's, an @org:'s, a chat client's) is never translated (user
+  2026-11-01 16:12Z: agents write in their reader's language themselves)
+  unless the owner turns on `translate_agents`; it is then taken to be in
+  the default language. Mail to an agent is never translated. Sending is never delayed: the message
   is stored and delivered exactly as sent, and a job (`translate_jobs`) asks
   the provider after commit.
 - **What the reader gets.** In their sync and history only, the message
@@ -775,9 +784,14 @@ mail-hub-hubchat-automatic-translation-between-u; the user's answers
   outcome (or a retry) lets it go at once.
 - **The provider** is Anthropic's Messages API only (user: "Anthropic only"),
   model `claude-haiku-5-5` unless set, with thinking off and low effort. The
-  message is sent as text to translate, never to follow; code blocks, code
-  spans, URLs and @mentions must come back unchanged, or the translation is
-  not shown. Failures retry after 5 s, 30 s, 2 min, 10 min and 30 min, then
+  message is sent exactly as written, as text to translate, never to
+  follow; code blocks, code spans and URLs must come back unchanged, and so
+  must every mention, as often as it was there (user 2026-11-01 16:19Z,
+  16:21Z), read with the clients' own grammar (`translate::mentions`:
+  Orgtree's typed references `@item:`, `@doc:`, `@app:`, `@panel:`,
+  `@agent:`, `@project:`, `@mail:`; Hubchat's `@name`, `@net:` and `@org:`
+  addresses; Orgtree's `@name@<generation>`). Otherwise the translation is
+  not shown (`failed`, not retried). Failures retry after 5 s, 30 s, 2 min, 10 min and 30 min, then
   give up; a 429 waits its `retry-after` without counting as a try and drops
   the worker to one call at a time until a call succeeds; a refused or
   missing key waits 5 minutes and shows on `/healthz`.
@@ -787,7 +801,8 @@ mail-hub-hubchat-automatic-translation-between-u; the user's answers
 - **The hub owner's settings** are the runtime file's `translation` object
   (`HUB_RUNTIME_CONFIG_FILE`, read at each use, so a change needs no
   restart): `enabled` (true to translate), `model`, `default_language`
-  (default `en`), `monthly_limit_usd` (default 5), `input_usd_per_mtok` and
+  (default `en`), `translate_agents` (default false: only people's mail),
+  `monthly_limit_usd` (default 5), `input_usd_per_mtok` and
   `output_usd_per_mtok` (default 0.10 and 0.50, Claude Haiku 5.5's prices).
   Anything invalid in it means off. The key is the first line of the file
   `HUB_TRANSLATE_KEY_FILE`, read at each call, never logged or shown.

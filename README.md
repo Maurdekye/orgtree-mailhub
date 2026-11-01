@@ -273,7 +273,7 @@ Auth rides one header, never URLs or bodies:
 | `POST /api/attachments?name=` | streamed raw body ≤ advertised limit (default 1 GiB) → `{id, bytes}`; bind ids in a send (≤ 10) |
 | `GET /api/attachments/{id}` | streamed download (uploader or recipient only) |
 | `GET /api/roster` · `GET /healthz` | roster with presence (online, busy, dnd) · liveness |
-| `POST /api/profile` | `{name?, about?, language?, slug?}` — change your display name (≤ 48) and about line (≤ 200); (2.4.0) a person's `language` (a BCP 47 tag, `""` for none): mail to them in another language is translated for them when the hub translates (schema 13) |
+| `POST /api/profile` | `{name?, about?, language?, slug?}` — change your display name (≤ 48) and about line (≤ 200); (2.4.0) a person's `language` (a BCP 47 tag, `""` for none): mail from other people in another language is translated for them when the hub translates (schema 13); others see it on the person's roster entry |
 | `POST /api/sync` | `{device_id, device_name?, cursor?, wait?}` — every device of an address gets every change since its own cursor: mail in and out with receipts, roster changes, who is online and which of them are busy or on Do not disturb, and the address's own chosen status |
 | `GET /api/devices` | the devices an address syncs from |
 | `GET /api/conversations` · `GET /api/history?with=` | who you have mail with (last message, unread) · one conversation, newest first, paged |

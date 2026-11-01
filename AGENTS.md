@@ -6,9 +6,14 @@
   (`translate::run`, SKIP LOCKED leases, no DB connection held over HTTP).
   `translation` goes into an envelope ONLY when the caller is the message's
   `to_slug` (sync and history); never for the sender, never in the roster
-  or directory, and `identities.language` is told only to its own address.
-  A sender without a language writes in the runtime file's
-  `default_language`. Never log or format the key, a provider error or a
+  or directory. A person's `identities.language` IS on their roster entry
+  (user 2026-11-01 16:13Z), and changing it bumps roster_seq. Only a
+  person's mail is translated, unless the runtime file's
+  `translation.translate_agents` is true (user 16:12Z); a sender without a
+  language writes in `default_language`; a reader without one gets none.
+  Every mention must survive (`translate::keeps_mentions`, the clients'
+  grammar ported; user 16:19Z/16:21Z: the model reads the message
+  verbatim). Never log or format the key, a provider error or a
   message body. Tests: `--features translate-test` (fake provider on
   loopback; release refuses it). [decided: user 2026-11-01 12:15Z answers +
   12:16Z "Build it" via Orgtree docket
