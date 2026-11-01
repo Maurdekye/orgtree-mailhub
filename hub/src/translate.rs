@@ -678,11 +678,62 @@ mod tests {
     #[test]
     fn pieces_that_must_survive() {
         let p = fixed_pieces("Meet at **noon**: see https://example.com/plan. and `cargo test` @ann.\n```\nlet x = 1;\n```\n(http://a.b/c)");
-        assert_eq!(p, vec!["\nlet x = 1;\n", "`cargo test`", "https://example.com/plan", "@ann", "http://a.b/c"]);
+        assert_eq!(p, vec!["\nlet x = 1;\n", "`cargo test`", "https://example.com/plan", "http://a.b/c"]);
         assert!(keeps_what_must_not_change("hi @bob", "שלום @bob"));
         assert!(!keeps_what_must_not_change("see `ls`", "ראה ls"));
         // a lone backtick or fence is just text
         assert!(fixed_pieces("it's 5` long and ``` open").is_empty());
+    }
+
+    /// Every mention form the clients render survives, or the translation
+    /// is not shown (user 2026-11-01 16:19Z / 16:21Z).
+    #[test]
+    fn every_mention_must_come_through_unchanged() {
+        let forms = [
+            "@ann",
+            "@net:ann.tr.2946da",
+            "@org:acme.o.5e1f00",
+            "@item:acme/plan-x",
+            "@doc:acme/weekly-status",
+            "@app:acme/calendar",
+            "@panel:acme/calendar-2",
+            "@agent:acme/alpha@12",
+            "@project:acme/build-slot",
+            "@mail:acme/user/m2589cc9e3781",
+            "@mail:acme/org/m2589cc9e3781",
+            "@mail:acme/node/alpha/m2589cc9e3781",
+            "@alpha@12",
+            "@user",
+        ];
+        for f in forms {
+            let original = format!("Please ask {f}, then reply.");
+            assert!(keeps_what_must_not_change(&original, &format!("נא לשאול את {f}, ואז להשיב.")), "{f} kept");
+            // dropped, changed in its last character, or cut short: not shown
+            let mut changed = f.to_string();
+            let last = changed.pop().unwrap();
+            changed.push(if last == '9' { '8' } else if last.is_ascii_digit() { '9' } else { 'q' });
+            for bad in [String::new(), changed, f[..f.len() - 2].to_string()] {
+                let t = format!("נא לשאול את {bad}, ואז להשיב.");
+                assert!(!keeps_what_must_not_change(&original, &t), "{f} -> {bad:?} must fail");
+            }
+        }
+        // next to punctuation, in brackets, quotes and Markdown
+        let original = "(@ann), \"@net:bob.x.1a2b3c\"; **@item:acme/plan-x**! @alpha: done? [@doc:acme/notes].";
+        assert!(keeps_what_must_not_change(original, "(@ann)، \"@net:bob.x.1a2b3c\"؛ **@item:acme/plan-x**! @alpha: בוצע? [@doc:acme/notes]."));
+        assert!(!keeps_what_must_not_change(original, "(@ann), \"@net:bob.x.1a2b3c\"; **@item:acme/plan**! @alpha: done? [@doc:acme/notes]."));
+        // right-to-left text both ways: Hebrew into English and English into Hebrew
+        let he = "שלום @ann, ראית את @item:acme/plan-x? תשאל את @agent:acme/alpha.";
+        assert!(keeps_what_must_not_change(he, "Hi @ann, did you see @item:acme/plan-x? Ask @agent:acme/alpha."));
+        assert!(!keeps_what_must_not_change(he, "Hi Ann, did you see @item:acme/plan-x? Ask @agent:acme/alpha."));
+        assert!(!keeps_what_must_not_change(he, "Hi @ann, did you see @item:acme/plan-y? Ask @agent:acme/alpha."));
+        let en = "Ask @net:dana.he.77aa01 about @doc:acme/weekly-status.";
+        assert!(keeps_what_must_not_change(en, "שאל את @net:dana.he.77aa01 על @doc:acme/weekly-status."));
+        assert!(!keeps_what_must_not_change(en, "שאל את דנה על @doc:acme/weekly-status."));
+        // a mention the model adds is a change too; an e-mail address is no mention
+        assert!(!keeps_what_must_not_change("hi", "שלום @ann"));
+        assert!(keeps_what_must_not_change("write to ann@example.com", "כתוב ל-ann@example.com"));
+        // the same mention twice must stay twice
+        assert!(!keeps_what_must_not_change("@ann and @ann", "@ann ו-אן"));
     }
 
     #[test]

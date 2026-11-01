@@ -414,6 +414,53 @@ async fn when_it_cannot_translate_the_reader_is_told_why() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mentions_reach_the_model_verbatim_and_come_back_unchanged() {
+    // user 2026-11-01 16:19Z / 16:21Z: the model reads the exact message; a
+    // translation that changed a mention falls back to the original (failed,
+    // once, never retried)
+    let rig = Rig::start("hubtrmention").await;
+    let (ann, bob) = (rig.register("ann", "person").await, rig.register("bob", "person").await);
+    rig.reads(&ann, "he").await;
+    rig.reads(&bob, "en").await;
+    // Hebrew into English: every mention kept
+    let he = "שלום @bob, ראית את @item:acme/plan-x ואת @doc:acme/notes? תשאל את @agent:acme/alpha או @net:dana.he.77aa01 (@org:acme.o.5e1f00).";
+    let id = rig.send(&ann, &bob, he).await;
+    rig.fake.then(Answer::Text(
+        "Hi @bob, did you see @item:acme/plan-x and @doc:acme/notes? Ask @agent:acme/alpha or @net:dana.he.77aa01 (@org:acme.o.5e1f00).".into(),
+    ));
+    assert_eq!(rig.work().await, 1);
+    assert_eq!(inner(&rig.fake.last().1), he, "the model reads the message exactly as written");
+    let m = rig.seen(&bob, &id).await;
+    assert_eq!(m["translation"]["status"], json!("translated"), "{m}");
+    assert!(m["translation"]["body"].as_str().unwrap().contains("@item:acme/plan-x"));
+    // English into Hebrew: kept again
+    let en = "Ask @net:dana.he.77aa01 about @mail:acme/user/m2589cc9e3781, thanks @ann!";
+    let id = rig.send(&bob, &ann, en).await;
+    rig.fake.then(Answer::Text("שאל את @net:dana.he.77aa01 על @mail:acme/user/m2589cc9e3781, תודה @ann!".into()));
+    assert_eq!(rig.work().await, 1);
+    assert_eq!(inner(&rig.fake.last().1), en);
+    assert_eq!(rig.seen(&ann, &id).await["translation"]["status"], json!("translated"));
+    // a reply that changed a mention: the reader gets the original, no retry
+    let id = rig.send(&ann, &bob, he).await;
+    rig.fake.then(Answer::Text(
+        "Hi Bob, did you see @item:acme/plan-x and @doc:acme/notes? Ask @agent:acme/alpha or @net:dana.he.77aa01 (@org:acme.o.5e1f00).".into(),
+    ));
+    let calls = rig.fake.calls();
+    assert_eq!(rig.work().await, 1);
+    let m = rig.seen(&bob, &id).await;
+    assert_eq!(m["translation"], json!({ "lang": "en", "status": "failed" }), "{m}");
+    assert_eq!(m["body"], json!(he), "the original is what shows");
+    rig.due().await;
+    assert_eq!(rig.work().await, 0, "never retried");
+    assert_eq!(rig.fake.calls(), calls + 1);
+    // and one that altered a typed reference's id
+    let id = rig.send(&bob, &ann, en).await;
+    rig.fake.then(Answer::Text("שאל את @net:dana.he.77aa01 על @mail:acme/user/m2589cc9e378, תודה @ann!".into()));
+    rig.work().await;
+    assert_eq!(rig.seen(&ann, &id).await["translation"]["status"], json!("failed"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleting_a_message_removes_the_readers_translation() {
     let rig = Rig::start("hubtrdel").await;
     let (ann, bob) = (rig.register("ann", "person").await, rig.register("bob", "person").await);
