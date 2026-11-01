@@ -12,6 +12,9 @@ push-test = []
 # Only for tests: a presence clock they can move forward (tests/busy.rs).
 # Release builds reject this feature.
 test-clock = []
+# Only for tests: a translation provider on loopback over plain HTTP
+# (HUB_TRANSLATE_URL, tests/translation.rs). Release builds reject this feature.
+translate-test = []
 
 [lib]
 name = "mailhub"
