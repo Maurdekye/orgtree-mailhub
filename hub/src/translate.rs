@@ -385,7 +385,7 @@ async fn ask(hub: &Hub, s: &Settings, body: &str, source: &str, target: &str) ->
 }
 
 /// The pieces of `original` a translation must carry unchanged: code blocks,
-/// code spans (with their backticks), URLs and @mentions.
+/// code spans (with their backticks) and URLs. Mentions: `keeps_mentions`.
 pub fn fixed_pieces(original: &str) -> Vec<String> {
     let mut out = Vec::new();
     // fenced blocks: the odd pieces between ``` fences
@@ -420,17 +420,201 @@ pub fn fixed_pieces(original: &str) -> Vec<String> {
         let word = word.trim_start_matches(['*', '_']);
         if word.starts_with("https://") || word.starts_with("http://") {
             out.push(word.to_string());
-        } else if let Some(name) = word.strip_prefix('@') {
-            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | ':')) {
-                out.push(word.to_string());
-            }
         }
     }
     out
 }
 
 fn keeps_what_must_not_change(original: &str, translated: &str) -> bool {
-    fixed_pieces(original).iter().all(|p| translated.contains(p.as_str()))
+    fixed_pieces(original).iter().all(|p| translated.contains(p.as_str())) && keeps_mentions(original, translated)
+}
+
+// ------------------------------------------------------------ mentions
+
+/// One mention in a message: its exact text and what kind of thing it names
+/// (the kind is for tests and logs only: the model reads the message as it is).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mention {
+    pub text: String,
+    /// ticket, document, app, panel, agent, project, mail (Orgtree's typed
+    /// references), org (`@org:`), address (`@net:`) or name (a bare `@name`)
+    pub kind: &'static str,
+}
+
+fn is_seg(c: u8) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'
+}
+
+/// `[a-z0-9-]+` from `i`: where it ends, if it has at least one character.
+fn seg(b: &[u8], i: usize) -> Option<usize> {
+    let mut j = i;
+    while j < b.len() && is_seg(b[j]) {
+        j += 1;
+    }
+    (j > i).then_some(j)
+}
+
+/// A node: a segment and an optional `@<digits>` generation.
+fn node(b: &[u8], i: usize) -> Option<usize> {
+    let j = seg(b, i)?;
+    if b.get(j) == Some(&b'@') {
+        let mut k = j + 1;
+        while k < b.len() && b[k].is_ascii_digit() {
+            k += 1;
+        }
+        if k > j + 1 {
+            return Some(k);
+        }
+    }
+    Some(j)
+}
+
+const CANON: [(&str, &str); 7] = [
+    ("item:", "ticket"),
+    ("doc:", "document"),
+    ("app:", "app"),
+    ("panel:", "panel"),
+    ("agent:", "agent"),
+    ("project:", "project"),
+    ("mail:", "mail"),
+];
+
+fn slash(b: &[u8], j: usize) -> Option<usize> {
+    (b.get(j) == Some(&b'/')).then_some(j + 1)
+}
+
+/// Orgtree's typed references (renderer `canvas/workrefs.tsx` REF_TOKEN_RE):
+/// `@item|doc|app|panel:SEG/SEG`, `@agent|project:SEG/NODE`,
+/// `@mail:SEG/(user|org)/SEG` or `@mail:SEG/node/NODE/SEG`, ended by its END
+/// rule (no id character after it, and `@` only when another one follows).
+fn canonical(b: &[u8], at: usize) -> Option<(usize, &'static str)> {
+    let rest = &b[at + 1..];
+    let (prefix, kind) = CANON.iter().find(|(p, _)| rest.starts_with(p.as_bytes()))?;
+    let i = at + 1 + prefix.len();
+    let end = match *prefix {
+        "agent:" | "project:" => node(b, slash(b, seg(b, i)?)?)?,
+        "mail:" => {
+            let bx = slash(b, seg(b, i)?)?;
+            if b[bx..].starts_with(b"node/") {
+                seg(b, slash(b, node(b, bx + 5)?)?)?
+            } else if b[bx..].starts_with(b"user/") {
+                seg(b, bx + 5)?
+            } else if b[bx..].starts_with(b"org/") {
+                seg(b, bx + 4)?
+            } else {
+                return None;
+            }
+        }
+        _ => seg(b, slash(b, seg(b, i)?)?)?,
+    };
+    // END: nothing that could have been part of the id; `@` only before another reference
+    match b.get(end) {
+        Some(c) if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'/' | b'-') => None,
+        Some(b'@') if !CANON.iter().any(|(p, _)| b[end + 1..].starts_with(p.as_bytes())) => None,
+        _ => Some((end, *kind)),
+    }
+}
+
+/// A hub address or name (Hubchat `src/lib/md.ts` MENTION_HEAD_RE):
+/// `@` then optional `net:` or `org:` (any case), then
+/// `[A-Za-z0-9]((\.|[_-]+)?[A-Za-z0-9])*`, then (Orgtree's agent mentions,
+/// renderer `canvas/agentmentions.tsx`) an optional `@<digits>` generation.
+/// Returns the end and the prefix.
+fn address(b: &[u8], at: usize) -> Option<(usize, Option<&'static str>)> {
+    let mut i = at + 1;
+    let head = |k: usize| b.get(k..k + 4).map(|s| s.to_ascii_lowercase());
+    let prefix = match head(i).as_deref() {
+        Some(b"net:") => Some("net"),
+        Some(b"org:") => Some("org"),
+        _ => None,
+    };
+    if prefix.is_some() {
+        i += 4;
+    }
+    if !b.get(i).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    let mut end = i + 1;
+    loop {
+        let mut k = end;
+        if b.get(k) == Some(&b'.') {
+            k += 1;
+        } else {
+            while matches!(b.get(k), Some(b'_' | b'-')) {
+                k += 1;
+            }
+        }
+        if b.get(k).is_some_and(u8::is_ascii_alphanumeric) {
+            end = k + 1;
+        } else {
+            break;
+        }
+    }
+    if prefix.is_none() && b.get(end) == Some(&b'@') {
+        let mut k = end + 1;
+        while b.get(k).is_some_and(u8::is_ascii_digit) {
+            k += 1;
+        }
+        if k > end + 1 && !b.get(k).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'.') {
+            end = k;
+        }
+    }
+    Some((end, prefix))
+}
+
+/// Every mention the clients render, in order, never overlapping. A mention
+/// starts at the text's start or after a character that can't be part of an
+/// address (Hubchat's scan: not `[0-9A-Za-z._%+-]`, nor `@`), or right where
+/// the last one ended (Orgtree's adjacent references).
+pub fn mentions(text: &str) -> Vec<Mention> {
+    let b = text.as_bytes();
+    let mut out: Vec<Mention> = Vec::new();
+    let mut last_end = usize::MAX;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'@' {
+            i += 1;
+            continue;
+        }
+        let free = i == 0
+            || last_end == i
+            || !matches!(b[i - 1], b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'.' | b'_' | b'%' | b'+' | b'-' | b'@');
+        let found = if free {
+            canonical(b, i).or_else(|| {
+                address(b, i).map(|(end, prefix)| {
+                    let kind = match prefix {
+                        Some("org") => "org",
+                        Some(_) => "address",
+                        None => "name",
+                    };
+                    (end, kind)
+                })
+            })
+        } else {
+            None
+        };
+        match found {
+            Some((end, kind)) => {
+                out.push(Mention { text: text[i..end].to_string(), kind });
+                last_end = end;
+                i = end;
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// Whether a translation kept every mention of the original exactly: the
+/// same mentions, as often, read with the clients' own grammar (user
+/// 2026-11-01 16:19Z and 16:21Z: the model reads the message verbatim; a
+/// translation that changed a mention is not shown).
+pub fn keeps_mentions(original: &str, translated: &str) -> bool {
+    let mut want: Vec<String> = mentions(original).into_iter().map(|m| m.text).collect();
+    let mut got: Vec<String> = mentions(translated).into_iter().map(|m| m.text).collect();
+    want.sort_unstable();
+    got.sort_unstable();
+    want == got
 }
 
 // ------------------------------------------------------------ the worker
