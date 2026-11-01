@@ -203,12 +203,21 @@ async fn a_person_reads_in_a_language() {
     // a language alone leaves the name and about line as they were
     let me = rig.post(&ann, "/api/profile", json!({ "language": "he" })).await.json();
     assert_eq!(me["profile"]["org_name"], json!("ann"), "{me}");
-    // nobody else learns it: not in the roster, not in their sync
+    // others see it on her roster entry (user 2026-11-01 16:13Z: a person's
+    // language shows on their profile and to agents), never as their own
     let other = rig.sync(&bob).await;
     assert_eq!(other["language"], Value::Null, "{other}");
     let row = other["roster"].as_array().unwrap().iter().find(|r| r["slug"] == ann.0).cloned().unwrap();
+    assert_eq!(row["language"], json!("he"), "{row}");
+    // a change reaches the others' next sync as a roster change
+    rig.reads(&ann, "fr").await;
+    let later = rig.sync(&bob).await;
+    let row = later["roster"].as_array().unwrap().iter().find(|r| r["slug"] == ann.0).cloned();
+    assert_eq!(row.map(|r| r["language"].clone()), Some(json!("fr")), "{later}");
+    rig.reads(&ann, "he").await;
+    // an org's entry and a person without one carry none
+    let row = rig.sync(&ann).await["roster"].as_array().unwrap().iter().find(|r| r["slug"] == org.0 || r["slug"] == bob.0).cloned().unwrap();
     assert!(row.get("language").is_none(), "{row}");
-    assert!(!other.to_string().contains("\"he\""), "{other}");
     // only a person reads in a language; a tag must look like one
     assert_eq!(rig.post(&org, "/api/profile", json!({ "language": "en" })).await.code(), 403);
     for bad in ["english", "e", "he_IL", "he-", "x".repeat(40).as_str()] {
@@ -293,11 +302,12 @@ async fn nothing_is_translated_that_needs_none() {
     rig.reads(&ann, "he").await;
     rig.reads(&bob, "he-IL").await;
     rig.reads(&cy, "en").await;
+    let dee = rig.register("dee", "person").await;
     let mut ids = vec![
         rig.send(&ann, &bob, "same language, another region").await, // he -> he-IL
         rig.send(&bob, &acme, "an org reads the original").await,
         rig.send(&acme, &cy, "an org writes in the hub's default, en").await,
-        rig.send(&ann, &rig.register("dee", "person").await, "a reader with no language").await,
+        rig.send(&ann, &dee, "a reader with no language").await,
         rig.send(&ann, &cy, "").await,
     ];
     // translation off at the hub: nothing either
@@ -305,16 +315,35 @@ async fn nothing_is_translated_that_needs_none() {
     ids.push(rig.send(&ann, &cy, "off").await);
     assert_eq!(rig.work().await, 0);
     assert_eq!(rig.fake.calls(), 0);
-    for (who, id) in [(&bob, &ids[0]), (&acme, &ids[1]), (&cy, &ids[2]), (&cy, &ids[4]), (&cy, &ids[5])] {
+    for (who, id) in [(&bob, &ids[0]), (&acme, &ids[1]), (&cy, &ids[2]), (&dee, &ids[3]), (&cy, &ids[4]), (&cy, &ids[5])] {
         let m = rig.seen(who, id).await;
         assert!(m.get("translation").is_none(), "{m}");
     }
-    // a hub whose default is not the reader's: an org's mail is translated
+    // a hub whose default is not the reader's: an agent's (org's) mail stays
+    // untranslated by default (user 2026-11-01 16:12Z: agents write in their
+    // reader's language themselves), and so does a chat client's
     rig.settings(json!({ "enabled": true, "default_language": "fr", "monthly_limit_usd": 5 }));
+    let bot = rig.register("bot", "chat").await;
+    let quiet = [rig.send(&acme, &cy, "bonjour").await, rig.send(&bot, &cy, "salut").await];
+    assert_eq!(rig.work().await, 0);
+    for id in &quiet {
+        assert!(rig.seen(&cy, id).await.get("translation").is_none(), "no translation and no reason line");
+    }
+    // a person without a language of their own is taken to write in the hub's default
+    let id = rig.send(&dee, &cy, "bonjour de dee").await;
+    assert_eq!(rig.work().await, 1);
+    assert!(rig.fake.last().1["system"].as_str().unwrap().contains("from fr"));
+    assert_eq!(rig.seen(&cy, &id).await["translation"]["status"], json!("translated"));
+    // the owner's "Translate messages from agents": an org's mail is translated, from the default
+    rig.settings(json!({ "enabled": true, "default_language": "fr", "monthly_limit_usd": 5, "translate_agents": true }));
     let id = rig.send(&acme, &cy, "bonjour").await;
     assert_eq!(rig.work().await, 1);
     assert!(rig.fake.last().1["system"].as_str().unwrap().contains("from fr"));
     assert_eq!(rig.seen(&cy, &id).await["translation"]["status"], json!("translated"));
+    // mail to an agent stays the original even then
+    let id = rig.send(&cy, &acme, "hello agent").await;
+    assert_eq!(rig.work().await, 0);
+    assert!(rig.seen(&acme, &id).await.get("translation").is_none());
     // already in the reader's language after all: the model says so and nothing shows
     rig.fake.then(Answer::Text("<same/>".into()));
     let id = rig.send(&acme, &cy, "this was English all along").await;
@@ -425,7 +454,9 @@ async fn nobody_else_can_tell_a_message_was_translated() {
     // two readers, one in Hebrew and one with no language: everything the
     // sender and an org on the hub read about the two messages is the same,
     // byte for byte, once the parts that differ anyway (ids, addresses,
-    // times) are set aside
+    // times) are set aside. A person's chosen language is on their profile
+    // for everyone (user 2026-11-01 16:13Z); whether a message was translated
+    // for them is still nobody else's business.
     let rig = Rig::start("hubtrleak").await;
     let (ann, he, plain, acme) = (
         rig.register("ann", "person").await,
@@ -447,10 +478,11 @@ async fn nobody_else_can_tell_a_message_was_translated() {
     assert_eq!(strip(rig.seen(&ann, &a).await), strip(rig.seen(&ann, &b).await));
     let row = |all: &Value, slug: &str| {
         let mut r = all["roster"].as_array().unwrap().iter().find(|r| r["slug"] == slug).cloned().unwrap();
-        for k in ["slug", "org_name", "picture_owner", "last_seen"] {
+        for k in ["slug", "org_name", "picture_owner", "last_seen", "language"] {
             r.as_object_mut().unwrap().remove(k);
         }
-        serde_json::to_string(&r).unwrap()
+        // compared as values: removing a key may reorder the rest
+        r
     };
     for viewer in [&ann, &acme] {
         let all = rig.sync(viewer).await;
@@ -461,6 +493,8 @@ async fn nobody_else_can_tell_a_message_was_translated() {
         let who = who.clone();
         async move { Call::new("GET", "/api/directory").auth(pair(&who.0, &who.1)).send(&hub).await.text() }
     };
-    let listing = dir(&acme).await;
-    assert!(!listing.contains("\"language\""), "{listing}");
+    let listing: Value = serde_json::from_str(&dir(&acme).await).unwrap();
+    let langs: Vec<Value> = listing["entries"].as_array().cloned().unwrap_or_default()
+        .iter().map(|e| e.get("language").cloned().unwrap_or(Value::Null)).collect();
+    assert_eq!(langs.iter().filter(|l| **l == json!("he")).count(), 1, "the profile's language, once: {listing}");
 }
