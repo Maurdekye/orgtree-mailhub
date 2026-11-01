@@ -72,6 +72,10 @@ pub struct Settings {
     pub limit_micros: Option<i64>,
     pub input_micros_per_token: f64,
     pub output_micros_per_token: f64,
+    /// the owner's "Translate messages from agents": mail from an org or chat
+    /// address is translated too (from `default_language`). Off by default
+    /// (user 2026-11-01 16:12Z: agents write in their reader's language).
+    pub translate_agents: bool,
 }
 
 impl Settings {
@@ -83,6 +87,7 @@ impl Settings {
             limit_micros: Some(usd_micros(DEFAULT_LIMIT_USD)),
             input_micros_per_token: DEFAULT_INPUT_USD_PER_MTOK,
             output_micros_per_token: DEFAULT_OUTPUT_USD_PER_MTOK,
+            translate_agents: false,
         }
     }
 }
@@ -126,6 +131,11 @@ pub fn settings(cfg: &Config) -> Settings {
         Some(Value::String(l)) if valid_language(l) => s.default_language = l.clone(),
         Some(_) => return Settings::off(),
     }
+    s.translate_agents = match t.get("translate_agents") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Settings::off(),
+    };
     s.enabled = t.get("enabled") == Some(&Value::Bool(true));
     s
 }
@@ -186,9 +196,17 @@ pub async fn plan(tx: &impl GenericClient, hub: &Hub, from: &str, to: &str, n: i
         return Ok(false);
     };
     let Some(lang) = reader.get::<_, Option<String>>(0) else { return Ok(false) };
-    let source = db::query_opt(tx, "SELECT language FROM identities WHERE slug = $1 AND kind = 'person'", &[&from])
-        .await?
-        .and_then(|r| r.get::<_, Option<String>>(0))
+    // only a person's mail, unless the owner lets agents' (org and chat
+    // addresses) be translated too; a sender without a language of their own
+    // is taken to write in the hub's default
+    let sender = db::query_opt(tx, "SELECT kind, language FROM identities WHERE slug = $1", &[&from]).await?;
+    let person = sender.as_ref().is_some_and(|r| r.get::<_, String>(0) == "person");
+    if !person && !s.translate_agents {
+        return Ok(false);
+    }
+    let source = sender
+        .filter(|_| person)
+        .and_then(|r| r.get::<_, Option<String>>(1))
         .unwrap_or_else(|| s.default_language.clone());
     if primary(&source) == primary(&lang) {
         return Ok(false);

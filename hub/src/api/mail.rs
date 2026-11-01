@@ -155,11 +155,11 @@ macro_rules! shown_seen {
 pub const SHOWN_SEEN: &str = shown_seen!();
 
 const ROSTER_COLS: &str = concat!("slug, org_name, username, blurb, ", shown_seen!(), ", kind,
-    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint");
+    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint, language");
 
 /// One roster row as v1 sent it (presence from this process).
 pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {
-    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6), r.get(7))
+    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6), r.get(7), r.get(8))
 }
 
 pub fn roster_json(
@@ -172,6 +172,7 @@ pub fn roster_json(
     kind: String,
     picture: Option<Value>,
     fingerprint: String,
+    language: Option<String>,
 ) -> Value {
     let mut value = json!({
         "slug": slug,
@@ -187,6 +188,9 @@ pub fn roster_json(
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
     });
     if let Some(picture) = picture { value["picture"] = picture; }
+    // v2.4.0: the language a person reads in, for others to see (user
+    // 2026-11-01 16:13Z: on their profile, and so agents can write in it)
+    if let Some(l) = language.filter(|l| !l.is_empty() && value["kind"] == "person") { value["language"] = json!(l); }
     value["picture_owner"] = json!(super::pictures::owner_token(slug,&fingerprint));
     value
 }
@@ -994,7 +998,8 @@ pub async fn profile(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         }
         db::execute(&tx, "UPDATE identities SET language = $2 WHERE slug = $1", &[&slug, language]).await?;
     }
-    let roster = name.is_some() || about.is_some();
+    // a language is on the roster too, so a change reaches everyone's next sync
+    let roster = name.is_some() || about.is_some() || language.is_some();
     if roster {
         sync::roster_lock(&tx).await?;
         db::execute(
