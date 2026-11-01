@@ -52,11 +52,10 @@ impl Fake {
     }
 }
 
+/// Exactly what the model was given as the message, compared to the
+/// original as it is: nothing stripped, nothing added (user 2026-11-01 16:21Z).
 fn inner(body: &Value) -> String {
-    let text = body["messages"][0]["content"].as_str().unwrap_or_default();
-    let start = text.find("<message>\n").map(|i| i + "<message>\n".len()).unwrap_or(0);
-    let end = text.rfind("\n</message>").unwrap_or(text.len());
-    text[start..end].to_string()
+    body["messages"][0]["content"].as_str().unwrap_or_default().to_string()
 }
 
 fn reply(text: &str) -> Value {
