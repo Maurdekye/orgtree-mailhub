@@ -392,8 +392,8 @@ async fn deleting_a_message_removes_the_readers_translation() {
     rig.reads(&bob, "he").await;
     let kept = rig.send(&ann, &bob, "kept by bob").await;
     let gone = rig.send(&ann, &bob, "deleted by bob").await;
-    let waiting = rig.send(&ann, &bob, "deleted before translation").await;
     rig.work().await;
+    let waiting = rig.send(&ann, &bob, "deleted before translation").await;
     let count = |id: String| {
         let sql = &rig.sql;
         async move {

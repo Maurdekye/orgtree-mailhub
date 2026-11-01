@@ -687,13 +687,22 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         .await?
     };
     let fresh = inserted.is_some();
+    let mut translating = false;
     let received = if let Some(row) = inserted {
         db::execute(&tx, "UPDATE attachments SET message_id = $1 WHERE id = ANY($2)", &[&mid, &lookup]).await?;
         if let Some(l) = &long {
             l.bind(&tx, &mid, &frm).await?;
         }
+        // v2.4.0: a translation for its reader, after commit, in the worker;
+        // their push wake waits for it a few seconds
+        translating = crate::translate::plan(&tx, hub, &frm, &to, row.get(0), &text, body_bytes.is_some()).await?;
         // Queue only: network delivery happens after commit in the worker.
-        crate::push::queue(&tx, &to).await?;
+        if translating {
+            let hold = chrono::Duration::from_std(crate::translate::HOLD).unwrap_or_default();
+            crate::push::queue_at(&tx, &to, received + hold).await?;
+        } else {
+            crate::push::queue(&tx, &to).await?;
+        }
         // G1: both sides' devices see it (last: this holds the logs' heads)
         sync::log_changes(&tx, vec![(frm.clone(), row.get(0)), (to.clone(), row.get(0))]).await?;
         received
@@ -708,6 +717,9 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if fresh {
         hub.presence.wake([to.as_str()]);
         hub.presence.wake_sync([frm.as_str()]);
+    }
+    if translating {
+        hub.translate.wake.notify_one();
     }
     ok(json!({ "id": mid, "received_at": clock::iso(received), "duplicate": !fresh }))
 }
@@ -958,28 +970,49 @@ pub async fn profile(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     };
     let name = field(["name", "org_name"], PROFILE_NAME_MAX, "name")?;
     let about = field(["about", "blurb"], PROFILE_ABOUT_MAX, "about")?;
-    if name.is_none() && about.is_none() {
+    // v2.4.0: the language a person reads in (a BCP 47 tag; "" for none).
+    // Their own: never in the roster, the directory or anyone else's sync.
+    let language = match body.get("language") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(l)) if l.is_empty() => Some(None),
+        Some(Value::String(l)) if crate::translate::valid_language(l) => Some(Some(l.clone())),
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "language must be a language tag such as en, he or pt-BR, or empty for none"),
+    };
+    if name.is_none() && about.is_none() && language.is_none() {
         return refuse(StatusCode::UNPROCESSABLE_ENTITY, "nothing to update: give name and/or about");
     }
     let mut c = hub.db.get().await?;
     let tx = c.transaction().await?;
-    sync::roster_lock(&tx).await?;
-    let updated = db::execute(
-        &tx,
-        "UPDATE identities SET org_name = COALESCE($2, org_name), blurb = COALESCE($3, blurb), roster_seq = nextval('roster_seq')
-          WHERE slug = $1",
-        &[&slug, &name, &about],
-    )
-    .await?;
-    tx.commit().await?;
-    if updated == 0 {
+    let kind: Option<String> = db::query_opt(&tx, "SELECT kind FROM identities WHERE slug = $1 FOR UPDATE", &[&slug]).await?.map(|r| r.get(0));
+    let Some(kind) = kind else {
         // unregistered between the credential check and the update
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
+    };
+    if let Some(language) = &language {
+        if kind != "person" {
+            return refuse(StatusCode::FORBIDDEN, "only a person reads in a language");
+        }
+        db::execute(&tx, "UPDATE identities SET language = $2 WHERE slug = $1", &[&slug, language]).await?;
     }
-    hub.presence.roster_changed();
+    let roster = name.is_some() || about.is_some();
+    if roster {
+        sync::roster_lock(&tx).await?;
+        db::execute(
+            &tx,
+            "UPDATE identities SET org_name = COALESCE($2, org_name), blurb = COALESCE($3, blurb), roster_seq = nextval('roster_seq')
+              WHERE slug = $1",
+            &[&slug, &name, &about],
+        )
+        .await?;
+    }
+    let language: Option<String> = db::query_one(&tx, "SELECT language FROM identities WHERE slug = $1", &[&slug]).await?.get(0);
+    tx.commit().await?;
+    if roster {
+        hub.presence.roster_changed();
+    }
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let me = roster_one(hub, &c, &slug).await?.unwrap_or(Value::Null);
-    ok(json!({ "ok": true, "profile": me }))
+    ok(json!({ "ok": true, "profile": me, "language": language }))
 }
 
 #[cfg(test)]

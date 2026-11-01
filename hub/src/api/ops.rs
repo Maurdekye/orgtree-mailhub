@@ -56,13 +56,18 @@ pub async fn healthz(hub: &Arc<Hub>, on_door: bool) -> ApiResult {
         }
         o.insert("door".into(), d);
     }
+    // v2.4.0: translation, for the hub's owner (Orgtree's Hosting tab): on
+    // or off, whether its key works, this month's spend. Never at the door.
+    if let (false, Value::Object(o)) = (on_door, &mut health) {
+        o.insert("translation".into(), crate::translate::health(hub, &c).await?);
+    }
     ok(health)
 }
 
 /// The protocol additions this hub serves (docs/v2-additions.md), so a
 /// client can tell what a hub supports without probing routes.
 pub const FEATURES: &[&str] =
-    &["person", "profile", "profile_pictures", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history", "door", "unifiedpush", "meta", "typing", "busy", "dnd", "status", "invisible"];
+    &["person", "profile", "profile_pictures", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history", "door", "unifiedpush", "meta", "typing", "busy", "dnd", "status", "invisible", "translate"];
 
 /// v1 read the page in text mode, so line endings reached the browser as
 /// `\n` whatever the checkout's were; the embedded copy is served the same.

@@ -134,7 +134,7 @@ pub async fn history(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let rows = db::query(
         &c,
         &format!(
-            "SELECT {ENVELOPE_COLS} FROM messages WHERE n IN (
+            "SELECT {ENVELOPE_COLS}, {translation} FROM messages WHERE n IN (
                 (SELECT n FROM messages
                   WHERE from_slug = $1 AND to_slug = $2 AND sender_deleted_at IS NULL AND (received_at, n) < ($3, $4)
                   ORDER BY received_at DESC, n DESC LIMIT $5)
@@ -142,7 +142,8 @@ pub async fn history(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
                 (SELECT n FROM messages
                   WHERE from_slug = $2 AND to_slug = $1 AND recipient_deleted_at IS NULL AND (received_at, n) < ($3, $4)
                   ORDER BY received_at DESC, n DESC LIMIT $5))
-             ORDER BY received_at DESC, n DESC LIMIT $5"
+             ORDER BY received_at DESC, n DESC LIMIT $5",
+            translation = crate::translate::columns("messages")
         ),
         &[&me, &with, &at, &n, &(limit + 1)],
     )
@@ -154,7 +155,19 @@ pub async fn history(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     } else {
         None
     };
-    let messages: Vec<Value> = page.iter().map(|r| Value::Object(with_ladder(r))).collect();
+    let messages: Vec<Value> = page
+        .iter()
+        .map(|r| {
+            let mut m = with_ladder(r);
+            // v2.4.0: its translation, for its reader only
+            if r.get::<_, String>("to_slug") == me {
+                if let Some(t) = crate::translate::envelope_translation(r) {
+                    m.insert("translation".into(), t);
+                }
+            }
+            Value::Object(m)
+        })
+        .collect();
     ok(json!({ "slug": me, "with": with, "messages": messages, "before": next }))
 }
 
@@ -202,6 +215,8 @@ async fn delete_copies(
         files.extend(att.iter().map(|r| r.get::<_, String>(0)));
         db::execute(tx, "DELETE FROM messages WHERE id = ANY($1)", &[&purge]).await?;
     }
+    // v2.4.0: the reader's translations go with their copies
+    crate::translate::forget(tx, me, ns).await?;
     sync::log_deletions(tx, me, &gone).await?;
     Ok((gone, files, owed))
 }

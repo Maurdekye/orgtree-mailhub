@@ -355,9 +355,10 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
     let rows = db::query(
         &c,
         &format!(
-            "SELECT l.seq AS log_seq, l.deleted_id, m.sender_deleted_at, m.recipient_deleted_at, {ENVELOPE_COLS}
+            "SELECT l.seq AS log_seq, l.deleted_id, m.sender_deleted_at, m.recipient_deleted_at, {ENVELOPE_COLS}, {}
                FROM mailbox_log l LEFT JOIN messages m ON m.n = l.message_n
               WHERE l.slug = $1 AND l.seq > $2 ORDER BY l.seq LIMIT {}",
+            crate::translate::columns("m"),
             SYNC_BATCH + 1
         ),
         &[&slug, &from.mail],
@@ -386,6 +387,12 @@ async fn sync_check(hub: &Hub, slug: &str, cur: Cursor) -> ApiResult<Batch> {
         let mut m = envelope_v2(r);
         m.insert("delivered_at".into(), json!(r.get::<_, Option<String>>("delivered_at")));
         m.insert("read_at".into(), json!(r.get::<_, Option<String>>("read_at")));
+        // v2.4.0: its translation, for its reader only
+        if r.get::<_, String>("to_slug") == slug {
+            if let Some(t) = crate::translate::envelope_translation(r) {
+                m.insert("translation".into(), t);
+            }
+        }
         changes.push(json!({ "type": "message", "message": m }));
     }
 
@@ -441,6 +448,9 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
     // in every answer, read now: a device deciding whether to notify about
     // the mail in this answer sees who is in use as of this answer
     let active = active_others(&c, slug, device).await?;
+    // v2.4.0: the language this person reads in, told only to them
+    let language: Option<String> =
+        db::query_opt(&c, "SELECT language FROM identities WHERE slug = $1", &[&slug]).await?.and_then(|r| r.get(0));
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
@@ -454,6 +464,8 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
         // v2.3.0: the status the address chose (a person, `POST
         // /api/status`; "auto" for everyone else), in every answer
         "status": status.as_str(),
+        // v2.4.0: the language they read in (`POST /api/profile`), or null
+        "language": language,
         // the hub's clock in unix milliseconds, as in /healthz
         "now": clock::now().timestamp_millis(),
     });

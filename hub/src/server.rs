@@ -33,7 +33,7 @@ pub async fn prepare(cfg: Config) -> Result<Arc<Hub>> {
     if removed > 0 {
         tracing::info!(removed, "removed partial uploads left by a previous run");
     }
-    let hub = Arc::new(Hub { cfg, db, presence: Presence::default(), typing: Default::default(), shutdown: CancellationToken::new(), writing: papaya::HashSet::new(), door: std::sync::OnceLock::new(), push_dns: Arc::new(tokio::sync::Semaphore::new(8)), push_delivery_dns: Arc::new(tokio::sync::Semaphore::new(4)), push_dns_addresses: Arc::new(papaya::HashSet::new()) });
+    let hub = Arc::new(Hub { cfg, db, presence: Presence::default(), typing: Default::default(), shutdown: CancellationToken::new(), writing: papaya::HashSet::new(), door: std::sync::OnceLock::new(), push_dns: Arc::new(tokio::sync::Semaphore::new(8)), push_delivery_dns: Arc::new(tokio::sync::Semaphore::new(4)), push_dns_addresses: Arc::new(papaya::HashSet::new()), translate: Default::default() });
     // v2.3.0: who is a person, and when their devices were last in use, so
     // busy holds across a restart
     if let Err(e) = api::sync::seed_presence(&hub).await {
@@ -86,6 +86,7 @@ pub async fn serve(cfg: Config) -> Result<()> {
     tokio::spawn(sweep::sweep_loop(hub.clone()));
     tokio::spawn(api::sync::presence_loop(hub.clone()));
     let push_task = tokio::spawn(crate::push::run(hub.clone()));
+    tokio::spawn(crate::translate::run(hub.clone()));
     {
         let hub = hub.clone();
         tokio::spawn(async move {

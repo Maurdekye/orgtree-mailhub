@@ -432,11 +432,30 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
 /// Called in the new-mail transaction, before mailbox head locks. One row
 /// per subscription bounds storage even when a distributor is unavailable.
 pub async fn queue(tx: &impl GenericClient, slug: &str) -> Result<(), tokio_postgres::Error> {
+    queue_at(tx, slug, clock::now()).await
+}
+
+/// `queue`, but a wake not already due goes no earlier than `at` (v2.4.0: a
+/// message waiting for its translation holds it up to `translate::HOLD`).
+pub async fn queue_at(tx: &impl GenericClient, slug: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(), tokio_postgres::Error> {
     db::execute(
         tx,
         "UPDATE device_push SET pending = pending + 1,
            next_attempt = COALESCE(next_attempt, GREATEST($2::timestamptz, last_sent + interval '5 seconds')),
            attempts = CASE WHEN next_attempt IS NULL THEN 0 ELSE attempts END WHERE slug = $1",
+        &[&slug, &at],
+    )
+    .await?;
+    Ok(())
+}
+
+/// A held wake need wait no longer (its translation is in, or will not
+/// come soon): due now, or as soon as the five-second spacing allows.
+pub async fn hurry(c: &impl GenericClient, slug: &str) -> Result<(), tokio_postgres::Error> {
+    db::execute(
+        c,
+        "UPDATE device_push SET next_attempt = LEAST(next_attempt, GREATEST($2::timestamptz, last_sent + interval '5 seconds'))
+          WHERE slug = $1 AND next_attempt IS NOT NULL",
         &[&slug, &clock::now()],
     )
     .await?;

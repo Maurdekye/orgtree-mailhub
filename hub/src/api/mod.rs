@@ -58,6 +58,8 @@ pub struct Hub {
     pub push_delivery_dns: Arc<tokio::sync::Semaphore>,
     /// One registration lookup per authenticated address until the OS returns.
     pub push_dns_addresses: Arc<papaya::HashSet<String>>,
+    /// The translation worker's nudge and pace (v2.4.0)
+    pub translate: crate::translate::Shared,
 }
 
 pub type Resp = Response<Body>;
