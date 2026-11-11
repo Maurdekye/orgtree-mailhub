@@ -1,5 +1,34 @@
 # The official container image
 
+`ghcr.io/maurdekye/orgtree-mailhub` is **the standalone mail hub**: one server
+that carries mail between Orgtree orgs, and Hubchat, on different machines. Run
+it when you want a hub of your own that stays up on a server, a home lab or a
+VM, separate from any desktop.
+
+**It is optional.** The Orgtree desktop app uses the hub built into it, or any
+hub it can reach; you need this package only to run a hub on its own.
+
+Orgtree has two other optional packages, each with its own purpose, and this one
+is neither: the **headless Orgtree engine** (`ghcr.io/maurdekye/orgtree-engine`,
+which runs orgs without the desktop app) and **Hubchat for the web** (the Hubchat
+app served to a browser). This package carries mail; it runs no orgs and serves
+no Hubchat app.
+
+## At a glance
+
+| | |
+| --- | --- |
+| PostgreSQL | Required (the official compose file runs `postgres:18`, the version CI tests; not published on any host port). The hub reads `HUB_DATABASE_URL` and `HUB_DATABASE_PASSWORD`. |
+| Port 7370 | The full app, including the operator page with **unauthenticated access to all mail**. Publish it only where everyone who can reach it may read all mail (loopback, a trusted tailnet; see [the Trust model](OPERATIONS.md#trust-model-read-before-exposing-anything)); `HUB_BIND` chooses the host interface under compose. |
+| Port 7371 | The API-only public listener, off unless `HUB_PUBLIC=1`; compose maps it to host port `HUB_PUBLIC_HOST_PORT` (default 7378). Expose or tunnel this one, never 7370. |
+| Volume `/data` | Attachment bytes (`blobs/`). The records are in PostgreSQL's own volume. Back up both. |
+| Required env | `HUB_DB_PASSWORD` in `.env` (compose passes it to both services). Optional: `HUB_NAME`, retention, `HUB_WEB_ORIGINS` and the rest in [OPERATIONS.md, Configuration](OPERATIONS.md#configuration). |
+| Health | `GET /healthz` (`ok`, `version`, `name`); the image's `HEALTHCHECK` runs `orgtree-mailhub healthcheck`. |
+| Upgrade | Back up, `pull`, `up -d` ([Use it](#use-it)); the first start migrates the schema. Going back to an older version means restoring the backup ([OPERATIONS.md, Upgrades](OPERATIONS.md#upgrades)). |
+| Backup | Both volumes, or `pg_dump` plus `blobs/`: [OPERATIONS.md, Backup and restore](OPERATIONS.md#backup-and-restore). |
+
+## Releases and tags
+
 From 2.5.0 on, every mail hub release publishes its container image, built by
 CI from the release's own commit with this repository's `Dockerfile`
 (`.github/workflows/release-image.yml`):
