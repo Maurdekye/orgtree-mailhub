@@ -5,9 +5,11 @@
 #   - the release gets orgtree-mailhub-<v>-docker-<arch>.tar.gz (`docker load`)
 #     and build-info-docker.json, and their lines are added to SHA256SUMS
 #     (the hubtool lines already there are kept byte for byte);
-#   - those same images go to ghcr.io/<owner>/orgtree-mailhub: <v>-amd64,
-#     <v>-arm64, the two-platform <v>, and latest for a stable release only
-#     (never for a prerelease), with the run's own GITHUB_TOKEN;
+#   - those same images go to ghcr.io/<owner>/orgtree-mailhub as OCI images:
+#     <v>-amd64, <v>-arm64, the two-platform OCI index <v> (it carries the
+#     package description as index annotations; publish.sh checks it), and
+#     latest for a stable release only (never for a prerelease), with the
+#     run's own GITHUB_TOKEN;
 #   - then, on each platform, the published <v> is pulled (anonymously when
 #     the package is public), checked to be the release's image by config
 #     digest, started on PostgreSQL 18, and /healthz must answer its version.
@@ -78,6 +80,11 @@ jobs:
       PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          sparse-checkout: .github/ci
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: docker-image-*
@@ -116,27 +123,13 @@ jobs:
           (cd dist && gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}")
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber sums/SHA256SUMS
 
-      - name: Push to GHCR (<v>-amd64, <v>-arm64, <v>, latest for stable)
+      - name: Push to GHCR as OCI (<v>-amd64, <v>-arm64; the OCI index <v>, and latest for stable)
         run: |
           image="$(jq -r .image dist/build-info-docker.json)"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          for a in amd64 arm64; do
-            docker load -i "dist/orgtree-mailhub-$VERSION-docker-$a.tar.gz"
-            docker push "$image:$VERSION-$a"
-          done
-          tags=(-t "$image:$VERSION")
+          tags=("$VERSION")
           # latest follows stable releases only
-          [ "$PRERELEASE" = true ] || tags+=(-t "$image:latest")
-          # GHCR's package page shows the last pushed tag's description; for the
-          # two-platform index that is an index annotation, copied from the image's labels
-          ann=()
-          for k in description source url documentation licenses; do
-            val="$(docker image inspect -f "{{index .Config.Labels \"org.opencontainers.image.$k\"}}" "$image:$VERSION-amd64")"
-            [ -z "$val" ] || ann+=(--annotation "index:org.opencontainers.image.$k=$val")
-          done
-          docker buildx imagetools create "${tags[@]}" "${ann[@]}" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
-          docker buildx imagetools inspect "$image:$VERSION"
-          docker logout ghcr.io
+          [ "$PRERELEASE" = true ] || tags+=(latest)
+          bash .github/ci/image/publish.sh dist "$image" "$VERSION" "${tags[@]}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

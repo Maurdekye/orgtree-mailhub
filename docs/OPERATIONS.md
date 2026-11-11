@@ -311,7 +311,12 @@ Watch it with `gh run list -R Maurdekye/orgtree-mailhub -w release-image`. To
 re-run it, or to add the image to a published release that lacks it:
 `gh workflow run release-image.yml -R Maurdekye/orgtree-mailhub -f tag=v<version>`.
 A push to the branch `ci-test/mailhub-image` runs `build-image.yml` alone (build
-and smoke, both platforms, nothing published).
+and smoke, both platforms), then its `publish-test` job runs the release's publish
+logic (`.github/ci/image/publish.sh`) on throwaway tags `ci-test-<sha7>-amd64`,
+`-arm64` and `-index` (no real tag is touched) and checks that the index is an OCI
+index (`application/vnd.oci.image.index.v1+json`) with a description annotation.
+The release pushes OCI images and that OCI index (a Docker manifest list cannot carry
+annotations, so GHCR showed no package description); `ci-test-*` tags are throwaway.
 
 **The GHCR package's visibility.** GitHub creates a package private on its first
 push, and a workflow token cannot change that. After the first push (2.5.0) the
