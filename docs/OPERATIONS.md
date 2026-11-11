@@ -315,8 +315,9 @@ and smoke, both platforms), then a `publish-test` job that runs the release's pu
 logic (`.github/ci/image/publish.sh`) on throwaway tags `ci-test-<sha7>-amd64`,
 `-arm64` and `-index` (no real tag is touched) and checks that the index is an OCI
 index (`application/vnd.oci.image.index.v1+json`) with a description annotation.
-The release pushes OCI images and that OCI index (a Docker manifest list cannot carry
-annotations, so GHCR showed no package description); `ci-test-*` tags are throwaway.
+The release pushes the platform images unconverted (a conversion to OCI drops the
+HEALTHCHECK and changes the config digest) and an OCI index over them (a Docker
+manifest list cannot carry annotations, so GHCR showed no package description); `ci-test-*` tags are throwaway.
 
 **The GHCR package's visibility.** GitHub creates a package private on its first
 push, and a workflow token cannot change that. After the first push (2.5.0) the

@@ -5,7 +5,7 @@
 #   - the release gets orgtree-mailhub-<v>-docker-<arch>.tar.gz (`docker load`)
 #     and build-info-docker.json, and their lines are added to SHA256SUMS
 #     (the hubtool lines already there are kept byte for byte);
-#   - those same images go to ghcr.io/<owner>/orgtree-mailhub as OCI images:
+#   - those same images go to ghcr.io/<owner>/orgtree-mailhub, unconverted:
 #     <v>-amd64, <v>-arm64, the two-platform OCI index <v> (it carries the
 #     package description as index annotations; publish.sh checks it), and
 #     latest for a stable release only (never for a prerelease), with the
@@ -17,8 +17,8 @@
 # starts when the release is published. Re-run or backfill a published release:
 #   gh workflow run release-image.yml -R Maurdekye/orgtree-mailhub -f tag=v2.5.0
 # index_only=true (for a release published before the OCI index): builds, attaches and uploads nothing; the
-# existing <v>-amd64 and <v>-arm64 are copied to OCI on GHCR, the index is recreated with its annotations, checked,
-# and verified. Dispatch it from the branch that holds .github/ci/image/publish.sh.
+# existing <v>-amd64 and <v>-arm64 images are kept as they are (optionally re-pointed with amd64_manifest and
+# arm64_manifest), the OCI index is recreated over them with its annotations, checked, and verified. Dispatch it from the branch that holds .github/ci/image/publish.sh.
 name: release-image
 
 on:
@@ -34,6 +34,14 @@ on:
         description: Only recreate the GHCR OCI index (and its annotations) from the existing per-platform images; no build, attach or upload
         type: boolean
         default: false
+      amd64_manifest:
+        description: index_only only, optional - point <v>-amd64 back at this manifest (sha256:...) before indexing
+        type: string
+        default: ''
+      arm64_manifest:
+        description: index_only only, optional - point <v>-arm64 back at this manifest (sha256:...) before indexing
+        type: string
+        default: ''
 
 permissions: {contents: read}
 
@@ -132,7 +140,7 @@ jobs:
           (cd dist && gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}")
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber sums/SHA256SUMS
 
-      - name: Push to GHCR as OCI (<v>-amd64, <v>-arm64; the OCI index <v>, and latest for stable)
+      - name: Push to GHCR (<v>-amd64, <v>-arm64 as docker pushes them; the OCI index <v>, and latest for stable)
         run: |
           image="$(jq -r .image dist/build-info-docker.json)"
           tags=("$VERSION")
@@ -146,7 +154,7 @@ jobs:
           path: dist/build-info-docker.json
           retention-days: 30
 
-  # index_only: the published per-platform images are copied to OCI in place and the index is recreated.
+  # index_only: the published per-platform images are kept as they are and the OCI index is recreated over them.
   reindex:
     needs: resolve
     if: ${{ inputs.index_only }}
@@ -160,6 +168,8 @@ jobs:
       VERSION: ${{ needs.resolve.outputs.version }}
       PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
       GH_TOKEN: ${{ github.token }}
+      AMD64_MANIFEST: ${{ inputs.amd64_manifest }}
+      ARM64_MANIFEST: ${{ inputs.arm64_manifest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -168,12 +178,12 @@ jobs:
           persist-credentials: false
       - name: The release's build-info-docker.json (as published; verify checks the config digests in it)
         run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p build-info-docker.json -D .
-      - name: Copy to OCI on GHCR, recreate the index (<v>, and latest for stable), check it
+      - name: Recreate the OCI index over the existing images (<v>, and latest for stable), check it
         run: |
           image="$(jq -r .image build-info-docker.json)"
           tags=("$VERSION")
           [ "$PRERELEASE" = true ] || tags+=(latest)
-          bash .github/ci/image/publish.sh reindex "$image" "$VERSION" "${tags[@]}"
+          bash .github/ci/image/publish.sh reindex build-info-docker.json "$image" "$VERSION" "${tags[@]}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-info-docker
