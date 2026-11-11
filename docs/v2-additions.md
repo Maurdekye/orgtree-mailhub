@@ -1117,3 +1117,26 @@ visits register an address and write to every org on the roster.
 The hub still has no TLS, and a page served over `https` may only call
 `https`: put the relay-only door behind something that adds it
 (`docs/OPERATIONS.md`, "Web apps").
+
+## The WebSocket stream (feature `stream`, v2.5.0)
+
+`GET /api/stream` upgrades to a WebSocket (subprotocol `orgtree-hub-stream.1`)
+that carries the long poll: a client sends `{"type":"sync"|"poll","id":N,
+"body":{...}}` (the HTTP body; for `poll` only `wait` is read) and gets
+`{"type":"answer","id":N,"status":S,"body":{...}}`, the same status and body the HTTP
+route would answer. `id` rises strictly; a request sent while an earlier one
+is parked replaces it (never answered). The first frame is `{"type":"hello",
+"v":1,"auth"?,"client"?}` (`auth` only when the upgrade carried no
+`X-Org-Auth`); the hub answers `welcome` with `slugs`, `ping_s`,
+`max_request`. Handshake refusals are HTTP answers: 405, 426, 400, 403
+(Origin not on `HUB_WEB_ORIGINS`), 503 (too many streams), 401 (no valid
+credentials, or a device-signed `dev1.` pair). Close codes: 1009 (client
+message over 64 KiB), 1012 (hub shutting down), 4400 (protocol error), 4401
+(credentials), 4408 (no hello in 10 s, idle 120 s, answer not read in 30 s),
+4429 (over 16 streams per address, or over 30 requests in 10 s). Every
+request authenticates again with the stored credentials, so a 401 answer
+leaves the stream open. `/healthz` lists `stream` unless `HUB_STREAM_MAX=0`.
+Push wakes and presence are unchanged: an address is online while a request
+is parked, on HTTP or the stream.
+Tests: `--features test-clock` (the test build shortens the timers with
+`HUB_STREAM_TIMERS_MS=hello,ping,pong,idle,write`; release builds ignore it).

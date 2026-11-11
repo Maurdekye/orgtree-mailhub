@@ -31,6 +31,22 @@
   R2.3); verified: hub/src/web.rs, api/mod.rs, config.rs;
   tests/web_origins.rs; docs/v2-additions.md, docs/OPERATIONS.md]
 
+- 2026-11-11: The stream (feature `stream`, 2.5.0, no schema change):
+  `GET /api/stream` carries the long poll over a WebSocket. `mail::poll_core`
+  and `sync::sync_core` are the one code for HTTP and the stream (the HTTP
+  routes are thin shells; keep it so: never copy their logic into
+  `api/stream.rs`). The hub sends only answers to requests (backpressure),
+  one request outstanding, a newer one supersedes. Credentials are checked at
+  every request; `dev1.` pairs are refused. The Origin rule is
+  `web::asker(..).may_upgrade()` (`HUB_WEB_ORIGINS`/runtime `web_origins`,
+  never `null`). Timers/limits are in `config::StreamTimers` and `api/stream.rs`
+  constants; tests shorten timers only under feature `test-clock`. Never log
+  the hello's `auth`, a header or a frame body. [decided: user 2026-11-11
+  09:06Z m1e16ee311dbe "Accept all, build it" via Orgtree docket
+  mail-hub-websocket-for-new-mail-clients-prefer-i; verified:
+  hub/src/api/stream.rs, mail.rs, sync.rs; tests/stream.rs;
+  docs/OPERATIONS.md, docs/v2-additions.md]
+
 - 2026-11-01: Translation (feature `translate`, 2.4.0, schema 13). Planned in
   the send transaction (`translate::plan`, after the row, before the push
   wake and the change logs); the provider is called only by the worker

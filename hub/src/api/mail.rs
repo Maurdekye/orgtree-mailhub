@@ -198,7 +198,11 @@ pub fn roster_json(
 /// Every credential a request proves, with the device that signed it when
 /// one did (G5). Read before the future starts, as `authed`.
 pub(super) fn authed_callers<'a>(hub: &'a Hub, req: &Req) -> impl std::future::Future<Output = ApiResult<Vec<auth::Caller>>> + Send + 'a {
-    let pairs = auth::pairs(req.auth_header());
+    authed_callers_of(hub, auth::pairs(req.auth_header()))
+}
+
+/// `authed_callers` for credentials already read (the stream keeps its own).
+pub(crate) fn authed_callers_of<'a>(hub: &'a Hub, pairs: Vec<auth::Pair>) -> impl std::future::Future<Output = ApiResult<Vec<auth::Caller>>> + Send + 'a {
     async move {
         if pairs.is_empty() {
             return Ok(Vec::new());
@@ -266,7 +270,11 @@ pub async fn mark_seen(hub: &Hub, c: &impl GenericClient, slugs: &[String]) -> A
 /// returned future starts, so the future does not borrow the request (whose
 /// body is not `Sync`).
 pub(super) fn authed<'a>(hub: &'a Hub, req: &Req) -> impl std::future::Future<Output = ApiResult<Vec<String>>> + Send + 'a {
-    let pairs = auth::pairs(req.auth_header());
+    authed_pairs(hub, auth::pairs(req.auth_header()))
+}
+
+/// `authed` for credentials already read (the stream keeps its own).
+pub(crate) fn authed_pairs<'a>(hub: &'a Hub, pairs: Vec<auth::Pair>) -> impl std::future::Future<Output = ApiResult<Vec<String>>> + Send + 'a {
     async move {
         if pairs.is_empty() {
             return Ok(Vec::new());
@@ -415,7 +423,13 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 pub async fn poll(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // query parameters are validated before the handler body, as in FastAPI
     let wait = req.query_float("wait", 25.0)?;
-    let slugs = authed(hub, req).await?;
+    poll_core(hub, auth::pairs(req.auth_header()), wait).await
+}
+
+/// `POST /api/poll` without its HTTP shell: the credentials and the wait,
+/// answered as the route answers (the stream calls this too, v2.5.0).
+pub(crate) async fn poll_core(hub: &Arc<Hub>, pairs: Vec<auth::Pair>, wait: f64) -> ApiResult {
+    let slugs = authed_pairs(hub, pairs).await?;
     if slugs.is_empty() {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials in X-Org-Auth");
     }

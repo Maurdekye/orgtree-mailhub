@@ -57,6 +57,8 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_PUBLIC_BIND` | `0.0.0.0` | **a security control the same way** — its routes are authenticated, but per the Trust model reaching it is still what admits a new registrant: under compose the host-side interface of the public listener's port mapping, outside Docker honored directly by the hub. Set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy, or a specific interface address to pin it to one network (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
 | `HUB_PUBLIC_HOST_PORT` | `7378` | compose only: the host PORT mapped to the public listener's internal 7371. A bare port — the interface comes from `HUB_PUBLIC_BIND` |
 | `HUB_PUBLIC_ADVERTISE` | unset | where clients reach the public listener from outside, when that is not where it listens: under compose this host's address and `HUB_PUBLIC_HOST_PORT` (e.g. `100.64.1.2:7378`), or a tunnel's URL. `/healthz` on the main port shows it as `door.advertise`, so Hubchat can put it in a phone's setup code (v2.0.2) |
+| `HUB_STREAM_MAX` | `1000` | WebSocket streams (`GET /api/stream`, v2.5.0) that may be open at once. `0` turns the stream off: `/healthz` stops listing `stream` and clients long-poll as before. Environment only: a change needs a restart. See [The WebSocket stream](#the-websocket-stream) |
+| `HUB_WEB_ORIGINS` | unset | web apps allowed to reach the hub from a browser: comma-separated exact origins (`https://chat.example.com`), or `*`; the runtime file's `web_origins` list wins. A WebSocket handshake that carries an `Origin` header is allowed only for a listed origin (the literal `null` never); native clients send none |
 | `HUB_CONTAINER_NAME` | `orgtree-mailhub` | compose only: the container's name. Container names are host-global (volumes are compose-project-prefixed, names are not), so a second instance on one host must override it |
 
 Two instances on one host need three distinct things: a separate compose
@@ -441,3 +443,40 @@ When a browser says the hub could not be reached although the address
 answers in a new tab, the web app's address is not on the list: the hub's
 log then shows a 405 for the path (the browser's preflight, refused). A
 listed page's preflights are not logged.
+
+## The WebSocket stream
+
+Since 2.5.0 `GET /api/stream` carries the long poll over one WebSocket:
+clients send `sync` or `poll` request frames and get one answer frame each,
+built by the same code as `POST /api/sync` and `POST /api/poll`. Clients read
+`/healthz` first and use the stream only when `features` lists `stream`; a
+hub without it, or a stream that cannot open, is long-polled as before.
+Sending, acks, receipts, history and files stay plain HTTP.
+
+- The hub pings every 25 s and drops a client silent for 60 s; a parked
+  request is answered after at most 55 s. A stream with no request for 120 s is
+  closed.
+- Limits: `HUB_STREAM_MAX` open streams (503 with `Retry-After: 30` beyond),
+  128 not yet welcomed, 16 welcomed per address, 30 requests per 10 s per
+  stream, 64 KiB per client message.
+- The secret travels in `X-Org-Auth` on the upgrade (native clients) or in the
+  first frame (browsers). It is never in the URL and never logged.
+- Logs: the handshake is one ordinary request line (`/api/stream`, 101 or the
+  refusal); every answered request logs its usual line plus `"via": "stream"`;
+  `{"stream": "open"}` and `{"stream": "close", "secs", "answers", "code",
+  "by"}` lines mark each stream. `/ui/data` shows `streams: {open, welcomed}`.
+- Reverse proxies must pass the upgrade for `/api/stream` and allow a read
+  timeout above 60 s. For nginx:
+
+  ```nginx
+  location /api/stream {
+      proxy_pass http://127.0.0.1:7370;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_read_timeout 75s;
+  }
+  ```
+
+  A proxy that strips upgrades answers 426 or another non-101; clients then
+  long-poll.

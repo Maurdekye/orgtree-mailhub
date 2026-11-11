@@ -39,7 +39,7 @@ pub async fn healthz(hub: &Arc<Hub>, on_door: bool) -> ApiResult {
         // its body and files together
         "max_message_bytes": limit,
         "version": crate::VERSION,
-        "features": FEATURES,
+        "features": features(hub),
         // the hub's clock in unix milliseconds, so a client on several hubs
         // can estimate each one's offset (lazy history orders by hub times)
         "now": clock::now().timestamp_millis(),
@@ -62,6 +62,16 @@ pub async fn healthz(hub: &Arc<Hub>, on_door: bool) -> ApiResult {
         o.insert("translation".into(), crate::translate::health(hub, &c).await?);
     }
     ok(health)
+}
+
+/// `FEATURES`, plus `stream` unless the operator turned it off
+/// (`HUB_STREAM_MAX=0`, v2.5.0).
+fn features(hub: &Hub) -> Vec<&'static str> {
+    let mut f = FEATURES.to_vec();
+    if hub.cfg.stream_max > 0 {
+        f.push("stream");
+    }
+    f
 }
 
 /// The protocol additions this hub serves (docs/v2-additions.md), so a
@@ -91,7 +101,8 @@ pub async fn ui_data(hub: &Arc<Hub>) -> ApiResult {
             o.insert("queued".into(), json!(counts.get(&slug).copied().unwrap_or(0)));
         }
     }
-    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "orgs": rows }))
+    let (open, welcomed) = hub.streams.counts();
+    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "orgs": rows, "streams": { "open": open, "welcomed": welcomed } }))
 }
 
 /// Newest first, `limit` clamped to 1..500, keyset-paged by

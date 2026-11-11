@@ -12,6 +12,7 @@ pub mod keys;
 pub mod mail;
 pub mod ops;
 pub mod pictures;
+pub mod stream;
 pub mod sync;
 pub mod transfers;
 pub mod typing;
@@ -60,6 +61,8 @@ pub struct Hub {
     pub push_dns_addresses: Arc<papaya::HashSet<String>>,
     /// The translation worker's nudge and pace (v2.4.0)
     pub translate: crate::translate::Shared,
+    /// the open WebSocket streams (v2.5.0)
+    pub streams: stream::Streams,
 }
 
 pub type Resp = Response<Body>;
@@ -161,7 +164,7 @@ pub struct Req {
 
 /// Marks a request the public listener let through (`dispatch_public`).
 #[derive(Clone, Copy)]
-struct ThroughDoor;
+pub(crate) struct ThroughDoor;
 
 impl Req {
     fn new(req: Request<Body>) -> Req {
@@ -404,6 +407,11 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
 /// The full app (port 7370): API, health and the operator UI.
 #[tracing::instrument(level = "debug", skip_all, fields(method = %req.method(), path = %req.uri().path()))]
 pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
+    // v2.5.0: the one WebSocket route, unless the operator turned it off
+    // (then an upgrade is refused as before)
+    if hub.cfg.stream_max > 0 && wire::decoded_path(req.uri().path()) == stream::PATH {
+        return stream::handshake(hub, req).await;
+    }
     if is_websocket(req.headers()) {
         return websocket_refused();
     }
@@ -448,10 +456,11 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
 /// all mail).
 #[tracing::instrument(level = "debug", skip_all, fields(listener = "public"))]
 pub async fn dispatch_public(hub: Arc<Hub>, mut req: Request<Body>) -> Resp {
-    if is_websocket(req.headers()) {
+    let path = wire::decoded_path(req.uri().path());
+    let stream_route = hub.cfg.stream_max > 0 && path == stream::PATH;
+    if is_websocket(req.headers()) && !stream_route {
         return websocket_refused();
     }
-    let path = wire::decoded_path(req.uri().path());
     if !(path.starts_with("/api/") || path == "/healthz") {
         let mut r = Response::new(Body::from("not found"));
         *r.status_mut() = StatusCode::NOT_FOUND;
@@ -465,7 +474,7 @@ pub async fn dispatch_public(hub: Arc<Hub>, mut req: Request<Body>) -> Resp {
 /// A WebSocket handshake, on either listener. v1 had no WebSocket route and
 /// its public wrapper closed any WebSocket scope, so the server refused the
 /// handshake — 403, plain text, before the app's request log ever saw it.
-fn is_websocket(h: &http::HeaderMap) -> bool {
+pub(crate) fn is_websocket(h: &http::HeaderMap) -> bool {
     h.get(header::UPGRADE).and_then(|v| v.to_str().ok()).map(|v| v.eq_ignore_ascii_case("websocket")).unwrap_or(false)
 }
 

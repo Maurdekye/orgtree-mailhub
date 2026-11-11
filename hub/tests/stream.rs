@@ -86,7 +86,10 @@ async fn send(hub: &Arc<Hub>, from: &Id, to: &str, id: &str, body: &str) {
 /// One raw HTTP exchange: status, the head's lowercased text, the body.
 async fn raw(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)]) -> (u16, String, String) {
     let mut s = TcpStream::connect(addr).await.unwrap();
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: hub\r\nConnection: close\r\n");
+    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: hub\r\n");
+    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("connection")) {
+        req.push_str("Connection: close\r\n");
+    }
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -308,7 +311,7 @@ async fn t4_hello_auth() {
 
     let mut ws = open(r.full, None).await;
     say(&mut ws, json!({ "type": "hello", "v": 1 })).await;
-    expect_close(&mut ws, 4401).await;
+    expect_close(&mut ws, 4400).await; // auth is required when the upgrade carried none
 
     let mut ws = open(r.full, None).await;
     expect_close(&mut ws, 4408).await; // no hello within the hello timer
@@ -324,7 +327,7 @@ async fn t4_hello_auth() {
     let mut ws = open(r.full, Some(&good)).await;
     say(&mut ws, json!({ "type": "poll", "id": 1, "body": {} })).await; // a request before the hello
     expect_close(&mut ws, 4400).await;
-    println!("  ok  hello auth: welcome, 4401 (bad, dev1, none), 4408 (no hello), 4400 (binary, bad JSON, no hello first)");
+    println!("  ok  hello auth: welcome, 4401 (bad, dev1), 4400 (no auth anywhere), 4408 (no hello), 4400 (binary, bad JSON, no hello first)");
 }
 
 // ------------------------------------------------------------------- T5
@@ -422,7 +425,7 @@ impl Driver {
 fn scrub(v: &mut Value) {
     match v {
         Value::Object(o) => {
-            for k in ["now", "ms", "cursor"] {
+            for k in ["now", "ms", "cursor", "typing_seq"] {
                 if o.contains_key(k) {
                     o.insert(k.into(), json!("<scrubbed>"));
                 }

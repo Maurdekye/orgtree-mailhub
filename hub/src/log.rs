@@ -96,6 +96,12 @@ fn capped(s: &str) -> String {
 }
 
 pub fn request_line(path: &str, slugs: &[String], status: u16, elapsed: Duration, refusal: Option<Refusal<'_>>) {
+    request_line_via(path, slugs, status, elapsed, refusal, None)
+}
+
+/// `request_line`, for a request the WebSocket stream carried: the same line
+/// plus `"via": "stream"` (HTTP's lines stay as they were, v2.5.0).
+pub fn request_line_via(path: &str, slugs: &[String], status: u16, elapsed: Duration, refusal: Option<Refusal<'_>>, via: Option<&str>) {
     let mut v = json!({
         "ts": clock::now_iso(),
         "path": path,
@@ -103,6 +109,9 @@ pub fn request_line(path: &str, slugs: &[String], status: u16, elapsed: Duration
         "status": status,
         "ms": py_round(elapsed.as_secs_f64() * 1000.0),
     });
+    if let Some(via) = via {
+        v["via"] = json!(via);
+    }
     if let Some(r) = refusal {
         if let Some(to) = r.to {
             v["to"] = json!(capped(to));

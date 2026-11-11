@@ -59,6 +59,33 @@ pub struct Config {
     /// where translations are asked for: Anthropic's Messages API. Only the
     /// test feature `translate-test` may move it (`HUB_TRANSLATE_URL`).
     pub translate_url: String,
+    /// `HUB_STREAM_MAX`: how many WebSocket streams may be open at once;
+    /// 0 turns the stream off (v2.5.0)
+    pub stream_max: usize,
+    /// the stream's timers (`HUB_STREAM_TIMERS_MS` moves them in tests only)
+    pub stream_timers: StreamTimers,
+}
+
+/// The WebSocket stream's timers (spec section 7.1).
+#[derive(Clone, Copy, Debug)]
+pub struct StreamTimers {
+    /// no hello this long after the 101: closed 4408
+    pub hello: std::time::Duration,
+    /// the hub pings this often
+    pub ping: std::time::Duration,
+    /// nothing at all from the client this long: dropped
+    pub pong: std::time::Duration,
+    /// a welcomed stream with no request this long: closed 4408
+    pub idle: std::time::Duration,
+    /// writing one answer may take this long
+    pub write: std::time::Duration,
+}
+
+impl Default for StreamTimers {
+    fn default() -> Self {
+        let s = std::time::Duration::from_secs;
+        StreamTimers { hello: s(10), ping: s(25), pong: s(60), idle: s(120), write: s(30) }
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -84,6 +111,7 @@ impl std::fmt::Debug for Config {
             .field("web_origins", &self.web_origins)
             .field("translate_key_file", &self.translate_key_file)
             .field("translate_url", &self.translate_url)
+            .field("stream_max", &self.stream_max)
             .finish()
     }
 }
@@ -180,6 +208,8 @@ impl Config {
                 Some(u) if cfg!(feature = "translate-test") && !u.is_empty() => u.to_string(),
                 _ => crate::translate::ANTHROPIC_URL.to_string(),
             },
+            stream_max: usize::try_from(int("HUB_STREAM_MAX", 1000)?.clamp(0, 1_000_000)).unwrap_or(1000),
+            stream_timers: stream_timers(get("HUB_STREAM_TIMERS_MS")),
         })
     }
 
@@ -206,6 +236,21 @@ impl Config {
     pub fn sqlite_path(&self) -> PathBuf {
         self.data_dir.join("hub.sqlite3")
     }
+}
+
+/// The stream's timers: the defaults, or in a test build the five
+/// milliseconds `HUB_STREAM_TIMERS_MS=hello,ping,pong,idle,write` give.
+fn stream_timers(test_override: Option<&str>) -> StreamTimers {
+    #[cfg(feature = "test-clock")]
+    if let Some(v) = test_override {
+        let ms: Vec<u64> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        if let [hello, ping, pong, idle, write] = ms[..] {
+            let m = std::time::Duration::from_millis;
+            return StreamTimers { hello: m(hello), ping: m(ping), pong: m(pong), idle: m(idle), write: m(write) };
+        }
+    }
+    let _ = test_override;
+    StreamTimers::default()
 }
 
 /// `socket.gethostname()`: the hub's name when `HUB_NAME` is unset.

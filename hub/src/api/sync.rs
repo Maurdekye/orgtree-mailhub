@@ -558,7 +558,14 @@ fn parse_start(v: Option<&Value>, cur: Cursor) -> ApiResult<bool> {
 pub async fn sync(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let wait_query = req.query_float("wait", 25.0)?;
     let body = req.json_object_strict().await?;
-    let callers = authed_callers(hub, req).await?;
+    sync_core(hub, crate::auth::pairs(req.auth_header()), wait_query, body).await
+}
+
+/// `POST /api/sync` without its HTTP shell: the credentials, the `wait`
+/// the query gave (the default for a body without one) and the body, answered
+/// as the route answers (the stream calls this too, v2.5.0).
+pub(crate) async fn sync_core(hub: &Arc<Hub>, pairs: Vec<crate::auth::Pair>, wait_query: f64, body: serde_json::Map<String, Value>) -> ApiResult {
+    let callers = super::mail::authed_callers_of(hub, pairs).await?;
     if callers.is_empty() {
         return refuse(StatusCode::UNAUTHORIZED, "no valid org credentials");
     }
