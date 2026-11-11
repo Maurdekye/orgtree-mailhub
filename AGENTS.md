@@ -1,5 +1,26 @@
 # Mail hub development invariants
 
+- 2026-11-11: Web Push for browsers (feature `webpush`, 2.5.1, schema 14,
+  Hubchat Web). `POST /api/push` with `kind: "webpush"` adds `vapid` (the
+  signing key the BROWSER made: a capability like `auth`, passed to the
+  driver only through `SecretParam`, never logged, listed or returned),
+  `navigate` and `preview`; no `kind` is UnifiedPush byte for byte as before
+  (tests/unifiedpush.rs is its proof: do not change it for a browser's
+  sake). A browser's push must show something: `push::notification` builds
+  it at send time from the unread mail after `notified_until` (a
+  `messages.n`) and sends NOTHING when there is none or the person's
+  status is `dnd`; never send a browser an empty or content-free push
+  (it can cost the subscription). It is held while ANY device of the
+  address is in use. `crate::webpush` words and signs (pure, unit-tested):
+  with `preview` false nothing of the mail, not even the sender's address,
+  may enter the payload. VAPID is signed with `p256` directly (aud = the
+  endpoint's origin with its port, exp 12 h, sub `HUB_PUSH_CONTACT`); no
+  `Topic` header. Tests: `--features push-test --test webpush`. [decided:
+  user 2026-11-11 via Orgtree docket
+  hubchat-web-self-hostable-container-serving-hubc (spec R4.1 to R4.5);
+  verified: hub/src/webpush.rs, push.rs, migrations/0014_webpush.sql;
+  tests/webpush.rs; docs/v2-additions.md, docs/OPERATIONS.md]
+
 - 2026-11-11: Every release from 2.5.0 on publishes the official container
   image, built by CI from the tag's commit with the root `Dockerfile`
   (`.github/workflows/release-image.yml`, on release published): linux/amd64 and

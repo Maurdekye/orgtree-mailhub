@@ -35,6 +35,9 @@ services:
       HUB_RETENTION_DAYS: ${HUB_RETENTION_DAYS:-}
       HUB_ORG_RETENTION_DAYS: ${HUB_ORG_RETENTION_DAYS:-}
       HUB_PUSH_ALLOW: ${HUB_PUSH_ALLOW:-}
+      # Web Push for browsers: who a push service may write to about this
+      # hub's pushes (mailto: or https://; empty: the project's address)
+      HUB_PUSH_CONTACT: ${HUB_PUSH_CONTACT:-}
       # Hubchat Web: the web pages a browser lets call this hub (origins,
       # comma-separated; empty: none)
       HUB_WEB_ORIGINS: ${HUB_WEB_ORIGINS:-}

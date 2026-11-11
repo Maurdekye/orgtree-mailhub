@@ -826,7 +826,7 @@ mail-hub-hubchat-automatic-translation-between-u; the user's answers
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), and `translate` (2.4.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), `translate` (2.4.0), and `webpush` (2.5.1). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 
@@ -1140,3 +1140,87 @@ Push wakes and presence are unchanged: an address is online while a request
 is parked, on HTTP or the stream.
 Tests: `--features test-clock` (the test build shortens the timers with
 `HUB_STREAM_TIMERS_MS=hello,ping,pong,idle,write`; release builds ignore it).
+
+## Web Push for browsers (feature `webpush`, v2.5.1, schema 14)
+
+A browser (Hubchat Web) cannot be woken to fetch its mail as an app can: a
+push to a browser must show a notification, every time. So a browser
+registers on the same route as an app, with three more things, and the hub
+sends it the notification itself.
+
+`POST /api/push`:
+
+```json
+{"kind": "webpush", "device_id": "...", "endpoint": "https://...", "p256dh": "...", "auth": "...",
+ "vapid": "<43 base64url characters: a P-256 private key>",
+ "navigate": "https://pc.example.ts.net/", "preview": true, "slug": "<optional>"}
+```
+
+- No `kind`, or `"unifiedpush"`: a UnifiedPush registration, exactly as
+  before (the three new members are ignored, as unknown members are).
+- `vapid` is a signing key the browser made for this one subscription: a
+  browser subscribes under a sender key, and several self-hosted hubs can
+  only all be that sender if the browser hands each the key. It lets its
+  holder send to this subscription, whose endpoint the hub holds anyway.
+  It is a capability like `auth`: stored, never logged, listed or returned.
+- `navigate` is the web app's own address, which a notification opens:
+  `https://`, at most 300 bytes, no credentials, query or fragment.
+- `preview` (default true): whether a notification may carry the sender
+  and the text.
+- `endpoint`, `p256dh`, `auth`, the device and the credentials: as for
+  UnifiedPush, with the same endpoint policy. 422 for a bad value.
+- The same subscription registered again changes `navigate` and `preview`
+  and nothing else. `DELETE /api/push` is unchanged.
+
+When mail arrives for the address, a wake is queued as for UnifiedPush
+(coalesced, 5 s apart, held up to 4 s for a translation, backing off on
+failure, 404 or 410 forgetting the subscription). For a browser:
+
+1. It is held while **any** device of the address reports itself in use
+   (`POST /api/devices/active`). An app decides that for itself; a browser
+   is not running, so the hub decides.
+2. When it would be sent, the hub takes the mail to the address that has
+   no `read` receipt, whose copy is not deleted, and that this subscription
+   has not announced yet. None (read on another device meanwhile), or the
+   person's status is Do not disturb: nothing is sent. A browser's push is
+   never empty.
+3. Otherwise one push announces them all, and they count as announced once
+   the push service accepts it. Mail from before the registration is never
+   announced.
+
+The push is encrypted to the browser as before (RFC 8291, `TTL: 86400`),
+with `Urgency: high` and `Authorization: vapid t=<token>, k=<public key>`
+(RFC 8292): a token signed with the registered key, `aud` the endpoint's
+origin, `exp` 12 hours on, `sub` the hub's `HUB_PUSH_CONTACT`. It has no
+`Topic`: a push that replaced an undelivered one would lose what that one
+announced. Its payload is this JSON, at most 2,000 bytes (the member names
+are WebKit's Declarative Web Push; a service worker reads the same):
+
+```json
+{"web_push": 8030,
+ "notification": {"title": "Ann Example", "body": "Are we still on for 3?",
+                  "navigate": "https://pc.example.ts.net/#/chat/ann.3f9c2a",
+                  "tag": "hc-ann.3f9c2a", "silent": false},
+ "app_badge": 3}
+```
+
+| Case | `title` | `body` |
+|---|---|---|
+| One message | the sender's name (its address when it has none) | the text |
+| Several from one sender | the sender's name | the newest text, then ` (+N more)` |
+| Several senders | `N new messages` | `From A and B`, or `From A, B and K others` (newest first) |
+| `preview` false | `Hubchat` | `New message` or `N new messages` |
+
+The text is the reader's translation when one arrived, otherwise the body
+as written (Markdown is not rendered; line breaks become spaces). A
+message with only files reads `Sent a file: <name>` or `Sent N files`.
+`title` is cut to 80 characters and `body` to 160, ending in `…`. With one
+sender `navigate` ends in `#/chat/<sender>` and `tag` is `hc-<sender>`;
+with several, the registered address alone and `hc-many`. With `preview`
+false the push carries nothing of the mail: the address alone, `hc-new`.
+`app_badge` is the address's unread count, at most 999. A count of new
+messages stops at 50.
+
+The push service (Apple's, Google's, Mozilla's) sees the endpoint, the
+time and the size of an encrypted payload, never the sender, the text or
+the count.

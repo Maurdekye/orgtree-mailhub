@@ -51,6 +51,7 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_ORG_RETENTION_DAYS` | unset | unset or empty: an address stays on the roster until it unregisters or the operator removes it (`orgtree-mailhub remove-address SLUG...`). A number: roster rows silent this long are pruned, except rows still holding queued mail (v1's default was 45); a pruned client re-registers itself on its next 401 |
 | `HUB_TRANSLATE_KEY_FILE` | unset | optional translation (v2.4.0): a file whose first line is the Anthropic API key the hub translates with; read at each call, never logged. Turn translation on in the runtime file's `translation` object. See [Translation](#translation) |
 | `HUB_PUSH_ALLOW` | empty | optional UnifiedPush (v2.1.0): private distributor hosts or CIDRs the hub may send wakes to, comma-separated exact entries (e.g. `ntfy.example.ts.net,100.64.5.6/32`); public HTTPS endpoints need no entry. Read on startup. See [UnifiedPush delivery](#unifiedpush-delivery) |
+| `HUB_PUSH_CONTACT` | the project's repository address | Web Push for browsers (v2.5.1): the contact a push service (Apple's, Google's, Mozilla's) is given with each push to a browser, should it want to reach whoever runs this hub: a `mailto:` or `https://` address. Read on startup; a bad value stops the start |
 | `HUB_WEB_ORIGINS` | empty | Hubchat Web (v2.5.0): the web pages a browser lets call this hub, as origins separated by commas (`https://chat.example.com,https://pc.example.ts.net`), or `*` for any page (only for a hub that is public anyway). Empty: none, and the hub answers exactly as before. The runtime file's `web_origins` array wins over it and changes without a restart. Never applies to the operator page. See [Web apps](#web-apps-hubchat-web) |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
 | `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker the hub honors it directly (an embedding desktop process sets `127.0.0.1`) |
@@ -355,6 +356,38 @@ fails until you do).
   (`mailhub-verify*`, loopback ports 7391/7392), drives the real wire
   protocol end to end including a restart-persistence pass, and removes
   everything it created.
+
+⚠ **Mail hub 2.5.1 adds schema 14 (Web Push for browsers), another one-way
+step.** Its first start on an older database adds five columns to
+`device_push` (`kind`, `vapid`, `navigate`, `preview`, `notified_until`);
+existing subscriptions stay UnifiedPush. From then on a hub without schema
+14 (2.5.0 and older) refuses the database ("the database schema is version
+14, newer than this hub understands"): going back means restoring a backup
+taken before the upgrade, losing what arrived since. Take the two-volume
+backup above before its first start.
+
+## Web Push for browsers
+
+From 2.5.1, for Hubchat Web. A browser that turns notifications on
+registers a push subscription with the hub
+([v2-additions.md](v2-additions.md#web-push-for-browsers-feature-webpush-v251-schema-14));
+until one does, nothing changes. The hub then sends notifications to the
+browser maker's push service, for example Apple's (`*.push.apple.com`), Google's
+(`fcm.googleapis.com`), Mozilla's (`updates.push.services.mozilla.com`).
+Allow outbound HTTPS to them. The endpoint rules below are the same as for
+UnifiedPush, and these services are public, so `HUB_PUSH_ALLOW` needs no
+entry for them.
+
+The notification travels encrypted from the hub to the browser: the push
+service sees only where it goes, when, and how large it is. Each
+subscription's signing key (`device_push.vapid`) is a secret in
+PostgreSQL, like the endpoint and `auth`. Set `HUB_PUSH_CONTACT` to an
+address of yours (`mailto:you@example.com`): a push service may write to
+it if this hub's pushes misbehave.
+
+Someone whose status is Do not disturb gets no notification. A device in
+use (any of the person's devices) holds a browser's notification until it
+is no longer in use.
 
 ## UnifiedPush delivery
 
