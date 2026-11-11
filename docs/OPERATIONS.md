@@ -51,6 +51,7 @@ All configuration is environment variables (compose reads `.env`; see
 | `HUB_ORG_RETENTION_DAYS` | unset | unset or empty: an address stays on the roster until it unregisters or the operator removes it (`orgtree-mailhub remove-address SLUG...`). A number: roster rows silent this long are pruned, except rows still holding queued mail (v1's default was 45); a pruned client re-registers itself on its next 401 |
 | `HUB_TRANSLATE_KEY_FILE` | unset | optional translation (v2.4.0): a file whose first line is the Anthropic API key the hub translates with; read at each call, never logged. Turn translation on in the runtime file's `translation` object. See [Translation](#translation) |
 | `HUB_PUSH_ALLOW` | empty | optional UnifiedPush (v2.1.0): private distributor hosts or CIDRs the hub may send wakes to, comma-separated exact entries (e.g. `ntfy.example.ts.net,100.64.5.6/32`); public HTTPS endpoints need no entry. Read on startup. See [UnifiedPush delivery](#unifiedpush-delivery) |
+| `HUB_WEB_ORIGINS` | empty | Hubchat Web (v2.5.0): the web pages a browser lets call this hub, as origins separated by commas (`https://chat.example.com,https://pc.example.ts.net`), or `*` for any page (only for a hub that is public anyway). Empty: none, and the hub answers exactly as before. The runtime file's `web_origins` array wins over it and changes without a restart. Never applies to the operator page. See [Web apps](#web-apps-hubchat-web) |
 | `HUB_PUBLIC` | unset | serve the API-only public listener on internal port 7371 (compose maps it to host `HUB_PUBLIC_HOST_PORT`, default 7378) |
 | `HUB_BIND` | `0.0.0.0` | **a security control, not a convenience knob** (see Trust model: reachability is authorization, so this binding is the admission boundary): which interface the FULL app binds. Under compose this doubles as the host-side port-mapping interface; outside Docker the hub honors it directly (an embedding desktop process sets `127.0.0.1`) |
 | `HUB_PUBLIC_BIND` | `0.0.0.0` | **a security control the same way** — its routes are authenticated, but per the Trust model reaching it is still what admits a new registrant: under compose the host-side interface of the public listener's port mapping, outside Docker honored directly by the hub. Set `127.0.0.1` to keep it loopback-only behind a tunnel or reverse proxy, or a specific interface address to pin it to one network (cross-org find 2026-09-16, neoja: before this existed, an IP written into `HUB_PUBLIC_HOST_PORT` interpolated into a valid mapping by accident — that form now fails `docker compose config` loudly) |
@@ -393,3 +394,50 @@ from one person to another is translated, unless `translate_agents` is true
 Past the month's limit, mail is delivered untranslated and its readers are
 told why. Orgtree's App settings > Mail hub > Hosting writes both files for
 the bundled hub.
+
+## Web apps (Hubchat Web)
+
+Hubchat Web is Hubchat in a browser, served by a container of its own. Its
+server only hands out the app: the browser itself calls this hub. Two
+things have to be true for that to work.
+
+**1. The hub lists the web app's address.** Set `HUB_WEB_ORIGINS` to the
+address people open the web app at, exactly as their browser shows it
+(scheme, host and port; no path), for example
+`HUB_WEB_ORIGINS=https://pc.example.ts.net`. Several are separated by
+commas. An embedding host sets `web_origins` in the runtime file instead
+(`{"max_attachment_bytes": ..., "web_origins": ["https://pc.example.ts.net"]}`),
+which wins and needs no restart. What the hub then answers is in
+`docs/v2-additions.md`, "Web apps".
+
+- List only web apps you run or trust: a listed page reaches the hub from
+  wherever its visitors' browsers are, and reaching the hub is what admits
+  a new address (Trust model above).
+- `*` allows any page. Use it only for a hub that is on the open internet
+  anyway. On a tailnet or a LAN it would let any website that someone on
+  that network visits register here and write to every org.
+- The operator page (`/`, `/ui/data`, `/ui/messages`) is never shared with
+  any page, whatever the list says. Keep the full port on loopback all the
+  same.
+
+**2. The hub is reached over HTTPS.** A page served over `https` may only
+call `https`, and the hub has no TLS of its own. Put the **relay-only
+door** (never the full port) behind something that adds it:
+
+- **Tailscale** (tailnet only): `tailscale serve --bg --https=8443
+  http://127.0.0.1:7378` gives `https://<machine>.<tailnet>.ts.net:8443`
+  with a certificate browsers and phones already trust. HTTPS has to be
+  turned on once in the tailnet's DNS settings; Tailscale then publishes
+  the machine's name in the public certificate log.
+- **A tunnel or reverse proxy** with a real certificate.
+  `expose-hub.ps1` gives the door a public `https://` address through a
+  Cloudflare quick tunnel.
+
+Whatever sits in front must pass the `Origin` request header through and
+leave the `Access-Control-*` and `Vary` answer headers alone. People then
+give the web app that `https://` address as their hub.
+
+When a browser says the hub could not be reached although the address
+answers in a new tab, the web app's address is not on the list: the hub's
+log then shows a 405 for the path (the browser's preflight, refused). A
+listed page's preflights are not logged.

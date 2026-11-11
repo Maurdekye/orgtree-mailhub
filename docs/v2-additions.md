@@ -1033,3 +1033,87 @@ use:
   counter's 15.6 ms resolution over the 11.5 s run. That puts it on the
   order of a millisecond per relay or less; it is an estimate, not a
   precise figure.
+
+## Web apps: which pages may call the hub (v2.5.0)
+
+Hubchat Web runs in a browser. A browser sends a page's request to the hub
+whatever the hub thinks of the page, but lets the page read the answer only
+when the hub names the page's **origin** (its address: scheme, host and
+port, such as `https://chat.example.com`). The hub's owner lists the pages
+that may:
+
+- `HUB_WEB_ORIGINS`: origins separated by commas, or `*` for any page.
+  Read at start. A value that is not a list of origins refuses to start.
+- The runtime file's `web_origins` (`HUB_RUNTIME_CONFIG_FILE`): an array of
+  origin strings, `["*"]` for any page. It is read at each request, so it
+  changes without a restart, and it wins over `HUB_WEB_ORIGINS` whenever
+  the file has it (`[]` allows nobody; absent or `null`: the environment's
+  list). A file that is not a JSON object, or a `web_origins` that is not
+  such an array, allows nobody: never more than the owner asked.
+- Unset or empty: no page may call, and the hub answers byte for byte as
+  it did before. No header is added, and `OPTIONS` is the 405 it always
+  was.
+
+An entry is `scheme://host[:port]` with `http` or `https` and nothing after
+the port (a closing `/` is fine): no path, query, fragment or credentials.
+It is compared as a browser writes an origin, in lower case and without a
+default port, so `HTTPS://Chat.Example.com:443/` is
+`https://chat.example.com`. At most 64 entries.
+
+**A listed page**, on `/api/*` and `/healthz`, on both listeners:
+
+- **Its preflight is answered.** `OPTIONS` with `Origin` and
+  `Access-Control-Request-Method` gets 204 with no body and
+
+  ```
+  Access-Control-Allow-Origin: <the page's origin, as it sent it>
+  Access-Control-Allow-Methods: GET, POST, PATCH, DELETE
+  Access-Control-Allow-Headers: X-Org-Auth, Content-Type, Range, If-Range
+  Access-Control-Max-Age: 86400
+  Vary: Origin
+  ```
+
+  A preflight is the browser asking, not the page: it carries no
+  credentials and needs none, reaches no route (so it answers 204 for a
+  path that would be 404) and writes no request line.
+- **Every other answer** to it, a refusal as much as a success, carries
+
+  ```
+  Access-Control-Allow-Origin: <the page's origin>
+  Access-Control-Expose-Headers: Content-Range, Content-Length, Content-Disposition, Accept-Ranges, ETag, Last-Modified, Date, Retry-After
+  Vary: Origin
+  ```
+
+- `*` names each asker itself, never a literal `*`.
+- Never `Access-Control-Allow-Credentials`: the hub uses no cookies. A page
+  signs in with `X-Org-Auth`, like every client.
+
+**Everybody else:**
+
+- **A page that is not listed** (and `Origin: null`, a page with no address
+  of its own, even with `*`): its request is handled as ever, and the
+  answer has no `Access-Control-*` header, so its browser does not let it
+  read the answer. Its preflight is the 405 that `OPTIONS` always was, so
+  a request with `X-Org-Auth` never leaves its browser. While a list
+  exists, these answers also say `Vary: Origin`.
+- **A request without `Origin`** (every client that is not a page):
+  exactly what it always got.
+- **The operator page is never shared.** `/`, `/ui/data` and
+  `/ui/messages` get no such header for any origin, `*` included: they
+  show all mail without sign-in, and naming a page there would publish
+  every message to it.
+- **A WebSocket upgrade** is refused as before. A browser applies none of
+  the above to an upgrade, so an endpoint that accepts one has to check
+  the `Origin` against this same list itself (`web::Asker::may_upgrade`):
+  a page must be listed; a client that sends no `Origin` is not a page.
+
+**What listing a page means.** Reaching this hub is what admits a new
+address (the trust model in `docs/OPERATIONS.md`). A listed page reaches
+the hub from wherever its visitors' browsers are, so list only web apps
+you run or trust. `*` is for a hub that is on the open internet anyway: on
+a private network it would let any website that someone on that network
+visits register an address and write to every org on the roster.
+
+The hub still has no TLS, and a page served over `https` may only call
+`https`: put the relay-only door behind something that adds it
+(`docs/OPERATIONS.md`, "Web apps").

@@ -14,6 +14,23 @@
   docket official-mail-hub-container-package-with-every-m; verified:
   .github/workflows/release-image.yml, build-image.yml]
 
+- 2026-11-11: Web apps (Hubchat Web, 2.5.0): `crate::web` answers one
+  question, is this `Origin` on the owner's list (`HUB_WEB_ORIGINS`, read at
+  start and refusing a bad value; the runtime file's `web_origins`, read at
+  each request, winning, and allowing nobody when invalid). CORS is applied
+  in `api::dispatch` only, to `/api/*` and `/healthz` (`web::shared_path`,
+  the door's own set) and NEVER to `/`, `/ui/data` or `/ui/messages`: the
+  operator page shows all mail without sign-in. No list, or no `Origin`
+  header: byte for byte as before (the differential run stays identical).
+  A listed page's preflight is answered before routing and is not a request
+  line; `*` names the asker, never `*`; `null` is never listed; never
+  `Access-Control-Allow-Credentials`. A browser applies no CORS to a
+  WebSocket upgrade: an endpoint that accepts one must ask
+  `web::asker(..).may_upgrade()` first. [decided: user 2026-11-11 via
+  Orgtree docket hubchat-web-self-hostable-container-serving-hubc (spec
+  R2.3); verified: hub/src/web.rs, api/mod.rs, config.rs;
+  tests/web_origins.rs; docs/v2-additions.md, docs/OPERATIONS.md]
+
 - 2026-11-01: Translation (feature `translate`, 2.4.0, schema 13). Planned in
   the send transaction (`translate::plan`, after the row, before the push
   wake and the change logs); the provider is called only by the worker

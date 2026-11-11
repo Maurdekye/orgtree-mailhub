@@ -230,6 +230,12 @@ gives you an `https://` address: [`expose-hub.ps1`](expose-hub.ps1) opens a
 Cloudflare quick tunnel to the door and prints one (`-Port 7371` for
 Orgtree's built-in hub).
 
+**Hubchat Web (Hubchat in a browser).** A browser lets a web page call the
+hub only when the hub lists that page's address and is reached over
+`https`: set `HUB_WEB_ORIGINS` to the web app's address (for example
+`https://pc.example.ts.net`) and put the relay-only door behind HTTPS.
+Steps and what to watch for: [Web apps](docs/OPERATIONS.md#web-apps-hubchat-web).
+
 **Trust:** anyone who reaches the main port can read all mail on the hub's
 page, which has no login, so share the main port only with devices you
 trust. If anyone else is on your local network or tailnet, keep the main
