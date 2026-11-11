@@ -77,7 +77,7 @@ fn features(hub: &Hub) -> Vec<&'static str> {
 /// The protocol additions this hub serves (docs/v2-additions.md), so a
 /// client can tell what a hub supports without probing routes.
 pub const FEATURES: &[&str] =
-    &["person", "profile", "profile_pictures", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history", "door", "unifiedpush", "meta", "typing", "busy", "dnd", "status", "invisible", "translate"];
+    &["person", "profile", "profile_pictures", "reply_to", "sync", "devices", "history", "delete", "long_messages", "message_limit", "directory", "uploads", "link", "device_keys", "active", "lazy_history", "door", "unifiedpush", "meta", "typing", "busy", "dnd", "status", "invisible", "translate", "webpush"];
 
 /// v1 read the page in text mode, so line endings reached the browser as
 /// `\n` whatever the checkout's were; the embedded copy is served the same.

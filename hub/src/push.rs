@@ -1,5 +1,12 @@
-//! Optional UnifiedPush: secret subscriptions, durable coalesced wakes and
-//! bounded outbound delivery. Nothing in the payload identifies any mail.
+//! Optional push: secret subscriptions, durable coalesced wakes and bounded
+//! outbound delivery.
+//!
+//! UnifiedPush (the apps): nothing in the payload identifies any mail; the
+//! app wakes and fetches. Web Push (a browser, v2.5.1, `kind` `webpush`): a
+//! browser must show something for every push, so the payload is the
+//! notification itself (`crate::webpush`), encrypted to the browser, signed
+//! with the key the browser registered, and sent only when there is unread
+//! mail it has not announced.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -14,7 +21,7 @@ use sha2::{Digest, Sha256};
 use web_push_native::{p256::PublicKey, Auth, WebPushBuilder};
 
 use crate::api::{ok, refuse, ApiResult, Hub, Req};
-use crate::{auth, clock, db};
+use crate::{auth, clock, db, webpush};
 
 #[cfg(all(feature = "push-test", not(debug_assertions)))]
 compile_error!("push-test permits local HTTP endpoints and must not be used in a release build");
@@ -88,6 +95,15 @@ struct Subscription {
     endpoint: String,
     p256dh: Vec<u8>,
     auth: Vec<u8>,
+    /// A browser's subscription (`kind` `webpush`); None is UnifiedPush.
+    web: Option<Web>,
+}
+
+/// Never derive Debug/Serialize: `vapid` signs this subscription's pushes.
+struct Web {
+    vapid: Vec<u8>,
+    navigate: String,
+    preview: bool,
 }
 
 /// tokio-postgres logs parameters at DEBUG even though our SQL wrapper does
@@ -264,14 +280,34 @@ fn subscription(body: &serde_json::Map<String, Value>) -> Result<Subscription, &
         .and_then(|s| URL_SAFE_NO_PAD.decode(s).ok())
         .filter(|v| v.len() == 16)
         .ok_or("auth must be a base64url 16-byte secret")?;
+    // No `kind`, or `unifiedpush`: as before, whatever else the body holds.
+    let web = match body.get("kind") {
+        None => None,
+        Some(Value::String(k)) if k == "unifiedpush" => None,
+        Some(Value::String(k)) if k == "webpush" => Some(Web {
+            vapid: webpush::vapid_key(body.get("vapid").and_then(Value::as_str).ok_or("vapid is required for kind webpush")?)?,
+            navigate: webpush::navigate(
+                body.get("navigate").and_then(Value::as_str).ok_or("navigate is required for kind webpush")?,
+                cfg!(feature = "push-test"),
+            )?,
+            preview: match body.get("preview") {
+                None => true,
+                Some(Value::Bool(on)) => *on,
+                Some(_) => return Err("preview must be true or false"),
+            },
+        }),
+        Some(_) => return Err("kind must be unifiedpush or webpush"),
+    };
     Ok(Subscription {
         endpoint: endpoint.to_string(),
         p256dh: key,
         auth,
+        web,
     })
 }
 
-/// POST /api/push {slug?, device_id, endpoint, p256dh, auth}, or
+/// POST /api/push {slug?, device_id, endpoint, p256dh, auth} and for a
+/// browser {kind: "webpush", vapid, navigate, preview?} besides, or
 /// DELETE /api/push?slug=...&device_id=... . Shared identity credentials
 /// retain their existing authority; device credentials act only for self.
 /// No body, endpoint, secret or result is instrumented here.
@@ -400,17 +436,25 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
         }
         db::execute(
             &tx,
-            "INSERT INTO device_push (slug, device_id, registration, endpoint, p256dh, auth, next_attempt, destination)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            // A browser's row starts at the newest message there is: mail
+            // from before the registration is not announced. The same
+            // subscription registered again keeps what it has announced.
+            "INSERT INTO device_push (slug, device_id, registration, endpoint, p256dh, auth, next_attempt, destination,
+                                      kind, vapid, navigate, preview, notified_until)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     CASE WHEN $9 = 'webpush' THEN (SELECT COALESCE(max(n), 0) FROM messages) END)
              ON CONFLICT (slug, device_id) DO UPDATE SET
-               registration = CASE WHEN (device_push.endpoint, device_push.p256dh, device_push.auth)
-                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth)
+               registration = CASE WHEN (device_push.endpoint, device_push.p256dh, device_push.auth, device_push.kind, device_push.vapid)
+                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth, EXCLUDED.kind, EXCLUDED.vapid)
                  THEN EXCLUDED.registration ELSE device_push.registration END,
                next_attempt = CASE WHEN device_push.next_attempt IS NOT NULL OR
-                 (device_push.endpoint, device_push.p256dh, device_push.auth)
-                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth)
+                 (device_push.endpoint, device_push.p256dh, device_push.auth, device_push.kind, device_push.vapid)
+                 IS DISTINCT FROM (EXCLUDED.endpoint, EXCLUDED.p256dh, EXCLUDED.auth, EXCLUDED.kind, EXCLUDED.vapid)
                  THEN GREATEST(EXCLUDED.next_attempt, device_push.last_attempt + interval '5 seconds') ELSE NULL END,
+               notified_until = CASE WHEN EXCLUDED.kind = 'webpush' AND device_push.kind = 'webpush'
+                 THEN device_push.notified_until ELSE EXCLUDED.notified_until END,
                endpoint = EXCLUDED.endpoint, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+               kind = EXCLUDED.kind, vapid = EXCLUDED.vapid, navigate = EXCLUDED.navigate, preview = EXCLUDED.preview,
                destination = EXCLUDED.destination, attempts = 0",
             &[
                 &slug,
@@ -421,6 +465,10 @@ async fn registration_inner(hub: &Arc<Hub>, req: &mut Req, remove: bool) -> ApiR
                 &SecretParam(&s.auth),
                 &clock::now(),
                 &hex::encode(Sha256::digest(endpoint_url(&s.endpoint).expect("validated endpoint").host_str().unwrap().trim_end_matches('.').as_bytes())),
+                &(if s.web.is_some() { "webpush" } else { "unifiedpush" }),
+                &SecretParam(s.web.as_ref().map(|w| &w.vapid)),
+                &s.web.as_ref().map(|w| &w.navigate),
+                &s.web.as_ref().is_none_or(|w| w.preview),
             ],
         )
         .await?;
@@ -470,6 +518,8 @@ struct Wake {
     attempts: i32,
     destination: String,
     subscription: Subscription,
+    /// A browser's row: the newest message it has announced (`messages.n`).
+    notified_until: Option<i64>,
 }
 
 /// Lease a small batch, then release the DB connection before any HTTP.
@@ -481,12 +531,17 @@ async fn claim(hub: &Hub, slots: usize, busy: &[String]) -> anyhow::Result<Vec<W
            FROM device_push p JOIN devices d USING (slug, device_id)
            WHERE p.next_attempt <= $1 AND d.revoked_at IS NULL
              AND (d.active_until IS NULL OR d.active_until <= $1) AND NOT (p.destination = ANY($3))
+             -- an app decides for itself whether another device is in use; a
+             -- browser cannot (it is not running), so its push is held here
+             AND (p.kind <> 'webpush' OR NOT EXISTS (SELECT 1 FROM devices o
+                    WHERE o.slug = p.slug AND o.revoked_at IS NULL AND o.active_until > $1))
            ORDER BY p.destination, p.next_attempt, p.slug, p.device_id),
          due AS (SELECT p.slug, p.device_id FROM device_push p JOIN candidates c USING (slug, device_id)
            ORDER BY c.next_attempt, p.slug, p.device_id LIMIT $2 FOR UPDATE OF p SKIP LOCKED)
          UPDATE device_push p SET next_attempt = $1::timestamptz + interval '60 seconds', last_attempt = $1
            FROM due WHERE p.slug = due.slug AND p.device_id = due.device_id
-         RETURNING p.slug, p.device_id, p.registration, p.pending, p.attempts, p.endpoint, p.p256dh, p.auth, p.destination",
+         RETURNING p.slug, p.device_id, p.registration, p.pending, p.attempts, p.endpoint, p.p256dh, p.auth, p.destination,
+                   p.vapid, p.navigate, p.preview, p.notified_until",
         &[&clock::now(), &(slots as i64), &busy],
     )
     .await?;
@@ -503,9 +558,64 @@ async fn claim(hub: &Hub, slots: usize, busy: &[String]) -> anyhow::Result<Vec<W
                 endpoint: r.get(5),
                 p256dh: r.get(6),
                 auth: r.get(7),
+                web: match (r.get::<_, Option<Vec<u8>>>(9), r.get::<_, Option<String>>(10)) {
+                    (Some(vapid), Some(navigate)) => Some(Web { vapid, navigate, preview: r.get(11) }),
+                    _ => None,
+                },
             },
+            notified_until: r.get(12),
         })
         .collect())
+}
+
+/// What a browser's push says now: the unread mail it has not announced,
+/// as one notification, and the newest of it. None: nothing to say (read
+/// on another device meanwhile, deleted, or the person's status is Do not
+/// disturb), and then nothing is sent: a browser's push cannot be silent.
+/// The connection is released before any HTTP.
+async fn notification(hub: &Hub, wake: &Wake, web: &Web) -> anyhow::Result<Option<(String, i64)>> {
+    let c = hub.db.get().await?;
+    let dnd = db::query_opt(&c, "SELECT 1 FROM identities WHERE slug = $1 AND status = 'dnd'", &[&wake.slug]).await?.is_some();
+    if dnd {
+        return Ok(None);
+    }
+    let rows = db::query(
+        &c,
+        "SELECT m.n, m.from_slug, COALESCE(NULLIF(i.org_name, ''), i.username, ''), COALESCE(t.body, m.body), m.attachments
+           FROM messages m
+           LEFT JOIN identities i ON i.slug = m.from_slug
+           LEFT JOIN message_translations t ON t.message_n = m.n AND t.status = 'translated'
+          WHERE m.to_slug = $1 AND m.from_slug <> $1 AND m.n > $2
+            AND m.read_at IS NULL AND m.recipient_deleted_at IS NULL
+          ORDER BY m.n DESC LIMIT 50",
+        &[&wake.slug, &wake.notified_until.unwrap_or(0)],
+    )
+    .await?;
+    let Some(newest) = rows.first().map(|r| r.get::<_, i64>(0)) else {
+        return Ok(None);
+    };
+    let unread: i64 = db::query_one(
+        &c,
+        "SELECT count(*) FROM (SELECT 1 FROM messages WHERE to_slug = $1 AND from_slug <> $1
+            AND read_at IS NULL AND recipient_deleted_at IS NULL LIMIT 1000) unread",
+        &[&wake.slug],
+    )
+    .await?
+    .get(0);
+    let notes: Vec<webpush::Note> = rows
+        .iter()
+        .map(|r| webpush::Note {
+            from: r.get(1),
+            name: r.get(2),
+            text: r.get(3),
+            files: r
+                .get::<_, Value>(4)
+                .as_array()
+                .map(|files| files.iter().filter_map(|f| f.get("name").and_then(Value::as_str).map(str::to_string)).collect())
+                .unwrap_or_default(),
+        })
+        .collect();
+    Ok(Some((webpush::payload(&notes, &web.navigate, web.preview, unread), newest)))
 }
 
 #[derive(Clone, Copy)]
@@ -514,9 +624,12 @@ enum Delivery {
     Gone,
     Retry,
     Deferred,
+    /// A browser's push with nothing to say: not sent, and the wake is done.
+    Nothing,
 }
 
-async fn deliver(s: &Subscription, hub: &Hub) -> Delivery {
+/// `notification`: a browser's push, the payload it carries.
+async fn deliver(s: &Subscription, hub: &Hub, notification: Option<&str>) -> Delivery {
     let request = async {
         let url = endpoint_url(&s.endpoint).ok()?;
         let addresses =
@@ -543,18 +656,23 @@ async fn deliver(s: &Subscription, hub: &Hub) -> Delivery {
             Auth::clone_from_slice(&s.auth),
         )
         .with_valid_duration(Duration::from_secs(86400))
-        .build(WAKE)
+        .build(notification.map_or(WAKE, str::as_bytes))
         .ok()?;
         let (parts, body) = encrypted.into_parts();
-        // No hub credentials, identifying headers or message content.
-        let response = client
-            .post(url)
-            .headers(parts.headers)
-            .header("Topic", "hubchat-wake")
-            .body(body)
-            .send()
-            .await
-            .ok()?;
+        // No hub credentials or identifying headers; message content only
+        // inside a browser's encrypted notification.
+        let request = client.post(url.clone()).headers(parts.headers);
+        let request = match (&s.web, notification) {
+            // Signed with the subscription's own key, as its push service
+            // requires. No Topic: a push that replaced an undelivered one
+            // would lose what that one announced.
+            (Some(web), Some(_)) => request
+                .header(http::header::AUTHORIZATION, webpush::authorization(&url, &web.vapid, &hub.cfg.push_contact, clock::now().timestamp())?)
+                .header("Urgency", "high"),
+            (None, None) => request.header("Topic", "hubchat-wake"),
+            _ => return None,
+        };
+        let response = request.body(body).send().await.ok()?;
         // Response bodies are deliberately never read or logged.
         Some(match response.status().as_u16() {
             200..=299 => Delivery::Accepted,
@@ -569,7 +687,20 @@ async fn deliver(s: &Subscription, hub: &Hub) -> Delivery {
         .unwrap_or(Delivery::Retry)
 }
 
-async fn finish(hub: &Hub, wake: &Wake, result: Delivery) -> anyhow::Result<()> {
+/// One claimed wake, from what it says to its record.
+async fn handle(hub: &Hub, wake: &Wake) -> anyhow::Result<()> {
+    let (result, announced) = match &wake.subscription.web {
+        None => (deliver(&wake.subscription, hub, None).await, None),
+        Some(web) => match notification(hub, wake, web).await? {
+            None => (Delivery::Nothing, None),
+            Some((payload, newest)) => (deliver(&wake.subscription, hub, Some(&payload)).await, Some(newest)),
+        },
+    };
+    finish(hub, wake, result, announced).await
+}
+
+/// `announced`: the newest message a browser's accepted push told of.
+async fn finish(hub: &Hub, wake: &Wake, result: Delivery, announced: Option<i64>) -> anyhow::Result<()> {
     let c = hub.db.get().await?;
     let now = clock::now();
     match result {
@@ -590,7 +721,18 @@ async fn finish(hub: &Hub, wake: &Wake, result: Delivery) -> anyhow::Result<()> 
         Delivery::Accepted => {
             db::execute(
                 &c,
-                "UPDATE device_push SET last_sent = $5, attempts = 0,
+                "UPDATE device_push SET last_sent = $5, attempts = 0, notified_until = COALESCE($6, notified_until),
+                   next_attempt = CASE WHEN pending = $4 THEN NULL ELSE $5::timestamptz + interval '5 seconds' END
+                 WHERE slug = $1 AND device_id = $2 AND registration = $3",
+                &[&wake.slug, &wake.device, &wake.registration, &wake.pending, &now, &announced],
+            )
+            .await?;
+        }
+        Delivery::Nothing => {
+            // Mail that came meanwhile bumped `pending`: look again then.
+            db::execute(
+                &c,
+                "UPDATE device_push SET attempts = 0,
                    next_attempt = CASE WHEN pending = $4 THEN NULL ELSE $5::timestamptz + interval '5 seconds' END
                  WHERE slug = $1 AND device_id = $2 AND registration = $3",
                 &[&wake.slug, &wake.device, &wake.registration, &wake.pending, &now],
@@ -616,10 +758,7 @@ pub async fn dispatch_due(hub: &Arc<Hub>) -> anyhow::Result<usize> {
     let wakes = claim(hub, CONCURRENCY, &[]).await?;
     let count = wakes.len();
     let results = stream::iter(wakes)
-        .map(|wake| async move {
-            let result = deliver(&wake.subscription, hub).await;
-            finish(hub, &wake, result).await
-        })
+        .map(|wake| async move { handle(hub, &wake).await })
         .buffer_unordered(CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
@@ -649,10 +788,7 @@ pub async fn run(hub: Arc<Hub>) {
                     for wake in wakes {
                         let destination = wake.destination.clone();
                         let hub = hub.clone();
-                        let task = pending.spawn(async move {
-                            let result = deliver(&wake.subscription, &hub).await;
-                            finish(&hub, &wake, result).await
-                        });
+                        let task = pending.spawn(async move { handle(&hub, &wake).await });
                         busy.insert(task.id(), destination);
                     }
                 }
