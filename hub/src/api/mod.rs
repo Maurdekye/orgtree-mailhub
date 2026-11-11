@@ -411,8 +411,16 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
     let slugs = crate::auth::logged_slugs(req.headers().get("x-org-auth"));
     let mut req = Req::new(req);
     let path = req.path.clone();
+    // Web apps (crate::web): what a page in a browser is owed on top of the
+    // ordinary answer. A listed page's preflight is the browser asking, not the
+    // page: it is answered here, reaches no route and is not a request line.
+    let web = crate::web::cors(&hub.cfg, &req.method, &path, &req.headers);
+    if let crate::web::Cors::Preflight(origin) = &web {
+        tracing::debug!("a listed web page's preflight answered");
+        return crate::web::preflight(origin);
+    }
     let mut refusal_detail: Option<String> = None;
-    let resp = match route(&req.method, &path) {
+    let mut resp = match route(&req.method, &path) {
         Some(Ok(r)) => match handle(&hub, r, &mut req).await {
             Ok(resp) => resp,
             Err(e) => {
@@ -430,6 +438,7 @@ pub async fn dispatch(hub: Arc<Hub>, req: Request<Body>) -> Resp {
     let status = resp.status();
     let refusal = status.is_client_error().then_some(crate::log::Refusal { to: req.refusal_to.as_deref(), detail: refusal_detail.as_deref() });
     crate::log::request_line(&path, &slugs, status.as_u16(), t0.elapsed(), refusal);
+    web.mark(resp.headers_mut());
     resp
 }
 

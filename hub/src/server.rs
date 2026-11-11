@@ -83,6 +83,11 @@ pub async fn serve(cfg: Config) -> Result<()> {
     let public_listener = bind_door(&hub).await?;
     log::line(&json!({ "ts": clock::now_iso(), "hub": hub.cfg.hub_name, "retention_days": hub.cfg.retention_days }));
     tracing::info!(bind = %hub.cfg.bind, port = hub.cfg.port, public = hub.cfg.public, "mail hub listening");
+    // Hubchat Web: say at start which pages may call (the runtime file can change it later)
+    match crate::web::origins(&hub.cfg) {
+        crate::web::Origins::None => {}
+        list => tracing::info!(origins = ?list, "web pages on this list may call the hub from a browser"),
+    }
     tokio::spawn(sweep::sweep_loop(hub.clone()));
     tokio::spawn(api::sync::presence_loop(hub.clone()));
     let push_task = tokio::spawn(crate::push::run(hub.clone()));

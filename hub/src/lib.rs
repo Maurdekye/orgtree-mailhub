@@ -32,6 +32,7 @@ pub mod server;
 pub mod sweep;
 pub mod translate;
 pub mod typing;
+pub mod web;
 pub mod wire;
 
 pub use api::Hub;

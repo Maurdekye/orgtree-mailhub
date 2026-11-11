@@ -48,6 +48,10 @@ pub struct Config {
     pub import_sqlite: bool,
     /// Explicit operator permission for private distributor hosts/networks.
     pub push_allow: Vec<crate::push::Allowed>,
+    /// `HUB_WEB_ORIGINS`: the web pages a browser lets call this hub (Hubchat
+    /// Web). The runtime file's `web_origins` wins over it: read the list as it
+    /// stands through `crate::web::origins`, never from here.
+    pub web_origins: crate::web::Origins,
     /// `HUB_TRANSLATE_KEY_FILE`: the translation provider's API key (its
     /// first line), read at each use; the key itself is never held, logged or
     /// shown (v2.4.0)
@@ -77,6 +81,7 @@ impl std::fmt::Debug for Config {
             .field("verbose", &self.verbose)
             .field("import_sqlite", &self.import_sqlite)
             .field("push_allow", &self.push_allow)
+            .field("web_origins", &self.web_origins)
             .field("translate_key_file", &self.translate_key_file)
             .field("translate_url", &self.translate_url)
             .finish()
@@ -169,6 +174,7 @@ impl Config {
             verbose: flag("HUB_LOG_VERBOSE", false),
             import_sqlite: flag("HUB_IMPORT_SQLITE", true),
             push_allow: crate::push::parse_allowlist(get("HUB_PUSH_ALLOW").unwrap_or(""))?,
+            web_origins: crate::web::from_env(get("HUB_WEB_ORIGINS").unwrap_or(""))?,
             translate_key_file: get("HUB_TRANSLATE_KEY_FILE").filter(|v| !v.is_empty()).map(PathBuf::from),
             translate_url: match get("HUB_TRANSLATE_URL") {
                 Some(u) if cfg!(feature = "translate-test") && !u.is_empty() => u.to_string(),
