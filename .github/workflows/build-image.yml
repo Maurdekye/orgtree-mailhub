@@ -117,5 +117,5 @@ jobs:
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orgtree-mailhub"
           short="${GITHUB_SHA::7}"
-          bash .github/ci/image/publish.sh dist "$image" "ci-test-$short" "ci-test-$short-index"
+          bash .github/ci/image/publish.sh push dist "$image" "ci-test-$short" "ci-test-$short-index"
 

@@ -16,6 +16,9 @@
 # The tag must match hub/Cargo.toml's version. Nothing runs for a draft: it
 # starts when the release is published. Re-run or backfill a published release:
 #   gh workflow run release-image.yml -R Maurdekye/orgtree-mailhub -f tag=v2.5.0
+# index_only=true (for a release published before the OCI index): builds, attaches and uploads nothing; the
+# existing <v>-amd64 and <v>-arm64 are copied to OCI on GHCR, the index is recreated with its annotations, checked,
+# and verified. Dispatch it from the branch that holds .github/ci/image/publish.sh.
 name: release-image
 
 on:
@@ -27,6 +30,10 @@ on:
         description: Published tag whose image to build, attach and push, e.g. v2.5.0
         type: string
         required: true
+      index_only:
+        description: Only recreate the GHCR OCI index (and its annotations) from the existing per-platform images; no build, attach or upload
+        type: boolean
+        default: false
 
 permissions: {contents: read}
 
@@ -62,12 +69,14 @@ jobs:
 
   build:
     needs: resolve
+    if: ${{ !inputs.index_only }}
     uses: ./.github/workflows/build-image.yml
     with:
       ref: ${{ needs.resolve.outputs.sha }}
 
   publish:
     needs: [resolve, build]
+    if: ${{ !inputs.index_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -82,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ github.sha }}   # the workflow's own commit: .github/ci is its own, not the release's
           sparse-checkout: .github/ci
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -129,7 +138,7 @@ jobs:
           tags=("$VERSION")
           # latest follows stable releases only
           [ "$PRERELEASE" = true ] || tags+=(latest)
-          bash .github/ci/image/publish.sh dist "$image" "$VERSION" "${tags[@]}"
+          bash .github/ci/image/publish.sh push dist "$image" "$VERSION" "${tags[@]}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -137,9 +146,44 @@ jobs:
           path: dist/build-info-docker.json
           retention-days: 30
 
+  # index_only: the published per-platform images are copied to OCI in place and the index is recreated.
+  reindex:
+    needs: resolve
+    if: ${{ inputs.index_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/ci
+          persist-credentials: false
+      - name: The release's build-info-docker.json (as published; verify checks the config digests in it)
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p build-info-docker.json -D .
+      - name: Copy to OCI on GHCR, recreate the index (<v>, and latest for stable), check it
+        run: |
+          image="$(jq -r .image build-info-docker.json)"
+          tags=("$VERSION")
+          [ "$PRERELEASE" = true ] || tags+=(latest)
+          bash .github/ci/image/publish.sh reindex "$image" "$VERSION" "${tags[@]}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-info-docker
+          path: build-info-docker.json
+          retention-days: 30
+
   # The post-publish check, on each platform's own runner.
   verify:
-    needs: [resolve, publish]
+    needs: [resolve, publish, reindex]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && (needs.publish.result == 'success' || needs.reindex.result == 'success') }}
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: ${{ github.sha }}   # the workflow's own commit: .github/ci is its own, not the release's
           sparse-checkout: .github/ci
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

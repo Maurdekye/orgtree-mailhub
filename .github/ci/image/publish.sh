@@ -1,33 +1,51 @@
 #!/usr/bin/env bash
-# Pushes the two built images to GHCR as OCI images and puts one OCI image index over them, then checks it:
-#   publish.sh <dist dir> <image> <platform tag prefix> <index tag>...
-# <dist dir> is the build-image.yml artifacts (image-<arch>.json and the docker-save files). The images go up as
-# <image>:<prefix>-amd64 and -arm64, in OCI format (skopeo copies the saved files: a plain `docker push` of a loaded
-# image sends Docker v2 manifests, and an index over those can only be a Docker manifest list, which carries no
-# annotations, so GHCR's package page showed no description). Every <index tag> then points at one
-# application/vnd.oci.image.index.v1+json whose annotations (description, source, url, documentation, licenses)
-# are the image's own labels. The step fails unless the pushed index says so. Needs GH_TOKEN and GITHUB_ACTOR.
-# release-image.yml (<v>-amd64, <v>-arm64; <v>, latest) and build-image.yml's ci-test run (ci-test-<sha>-*) both run it.
+# Puts one OCI image index over the two per-platform images on GHCR and checks it. Two modes share that part:
+#   publish.sh push    <dist dir> <image> <platform tag prefix> <index tag>...
+#   publish.sh reindex <image> <platform tag prefix> <index tag>...
+# push: <dist dir> is the build-image.yml artifacts (image-<arch>.json and the docker-save files). The images go up
+# as <image>:<prefix>-amd64 and -arm64, in OCI format (skopeo copies the saved files: a plain `docker push` of a
+# loaded image sends Docker v2 manifests, and an index over those can only be a Docker manifest list, which carries
+# no annotations, so GHCR's package page showed no description).
+# reindex (release-image.yml's index_only dispatch, for an already published release): nothing is built or
+# uploaded. The EXISTING <image>:<prefix>-amd64 and -arm64 are copied registry to registry to OCI (skopeo; the
+# config blob, so the config digest, is kept) and the labels are read from the existing image's config.
+# Both then point every <index tag> at one application/vnd.oci.image.index.v1+json whose annotations (description,
+# source, url, documentation, licenses) are the image's own labels, and fail unless the pushed index says so.
+# Needs GH_TOKEN and GITHUB_ACTOR. release-image.yml (<v>-amd64, <v>-arm64; <v>, latest) and build-image.yml's
+# ci-test run (ci-test-<sha>-*) both run it.
 set -euo pipefail
-dist=$1 image=$2 prefix=$3; shift 3
-[ "$#" -gt 0 ] || { echo "::error::no index tag"; exit 1; }
-index_tags=("$@")
+mode=${1:-}; shift || true
 fail() { echo "::error::$*"; exit 1; }
-
 command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
 echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+creds="$GITHUB_ACTOR:$GH_TOKEN"
 
-for a in amd64 arm64; do
-  f="$dist/$(jq -r .file "$dist/image-$a.json")"
-  docker load -i "$f"
-  skopeo copy --format oci --dest-creds "$GITHUB_ACTOR:$GH_TOKEN" "docker-archive:$f" "docker://$image:$prefix-$a"
-done
+case "$mode" in
+  push)
+    dist=$1 image=$2 prefix=$3; shift 3
+    for a in amd64 arm64; do
+      f="$dist/$(jq -r .file "$dist/image-$a.json")"
+      docker load -i "$f"
+      skopeo copy --format oci --dest-creds "$creds" "docker-archive:$f" "docker://$image:$prefix-$a"
+    done
+    labels="$(docker image inspect -f '{{json .Config.Labels}}' "$(jq -r .tag "$dist/image-amd64.json")")"
+    ;;
+  reindex)
+    image=$1 prefix=$2; shift 2
+    for a in amd64 arm64; do
+      skopeo copy --format oci --src-creds "$creds" --dest-creds "$creds" "docker://$image:$prefix-$a" "docker://$image:$prefix-$a"
+    done
+    labels="$(skopeo inspect --config --creds "$creds" "docker://$image:$prefix-amd64" | jq -c '.config.Labels')"
+    ;;
+  *) fail "usage: publish.sh push <dist> <image> <prefix> <tag>... | reindex <image> <prefix> <tag>..." ;;
+esac
+[ "$#" -gt 0 ] || fail "no index tag"
+index_tags=("$@")
 
 # GHCR's package page shows an index annotation; take them from the image's labels
 ann=()
-src="$(jq -r .tag "$dist/image-amd64.json")"
 for k in description source url documentation licenses; do
-  val="$(docker image inspect -f "{{index .Config.Labels \"org.opencontainers.image.$k\"}}" "$src")"
+  val="$(jq -r --arg k "org.opencontainers.image.$k" '.[$k] // empty' <<<"$labels")"
   [ -z "$val" ] || ann+=(--annotation "index:org.opencontainers.image.$k=$val")
 done
 tags=(); for t in "${index_tags[@]}"; do tags+=(-t "$image:$t"); done
