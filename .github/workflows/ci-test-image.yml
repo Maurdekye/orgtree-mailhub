@@ -1,0 +1,43 @@
+# A push to ci-test/mailhub-image: the build and smoke of build-image.yml (both platforms), then the release's
+# publish logic (.github/ci/image/publish.sh) on throwaway tags ci-test-<sha7>-amd64, -arm64 and -index, which never
+# touch a real tag, and a check that the pushed index is an OCI index with a description.
+# This is its own workflow so that release-image.yml, which calls build-image.yml, never has to grant packages: write
+# to the build (a called workflow cannot ask for more than its caller, even for a job that is skipped).
+name: ci-test-image
+
+on:
+  push:
+    branches: ['ci-test/mailhub-image']
+
+permissions: {contents: read}
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      ref: ${{ github.sha }}
+
+  publish-test:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write     # ghcr.io/<owner>/orgtree-mailhub:ci-test-*
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: docker-image-*
+          path: dist
+          merge-multiple: true
+      - name: Publish to throwaway tags and check the index
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orgtree-mailhub"
+          short="${GITHUB_SHA::7}"
+          bash .github/ci/image/publish.sh push dist "$image" "ci-test-$short" "ci-test-$short-index"
+

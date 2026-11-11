@@ -6,9 +6,8 @@
 #                     ghcr.io/<owner>/orgtree-mailhub:<v>-<arch>
 #   image-<arch>.json  the file's SHA-256 and the image's config digest
 # It never writes anywhere: release-image.yml attaches and pushes.
-# A push to ci-test/mailhub-image runs it alone, as a dry run; its `publish-test` job then runs the release's
-# publish logic (.github/ci/image/publish.sh) against throwaway tags ci-test-<sha7>-amd64, -arm64 and -index, which
-# never touch a real tag, and checks that the pushed index is an OCI index with a description.
+# A push to ci-test/mailhub-image runs it as a dry run through ci-test-image.yml, which also tests the publish
+# logic on throwaway tags. It stays write-free: a reusable workflow cannot ask for more permission than its caller.
 name: build-image
 
 on:
@@ -17,8 +16,6 @@ on:
       ref: {type: string, required: true}
     outputs:
       version: {value: '${{ jobs.image.outputs.version }}'}
-  push:
-    branches: ['ci-test/mailhub-image']
 
 permissions: {contents: read}
 
@@ -92,30 +89,3 @@ jobs:
           path: smoke-logs/
           if-no-files-found: ignore
           retention-days: 7
-
-  # A push to ci-test/mailhub-image only: the release's publish logic on throwaway tags.
-  publish-test:
-    if: github.event_name == 'push'
-    needs: image
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      packages: write     # ghcr.io/<owner>/orgtree-mailhub:ci-test-*
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: docker-image-*
-          path: dist
-          merge-multiple: true
-      - name: Publish to throwaway tags and check the index
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orgtree-mailhub"
-          short="${GITHUB_SHA::7}"
-          bash .github/ci/image/publish.sh push dist "$image" "ci-test-$short" "ci-test-$short-index"
-

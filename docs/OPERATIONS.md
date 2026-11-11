@@ -310,8 +310,8 @@ native GitHub runner (`build-image.yml`), and smokes each image
 Watch it with `gh run list -R Maurdekye/orgtree-mailhub -w release-image`. To
 re-run it, or to add the image to a published release that lacks it:
 `gh workflow run release-image.yml -R Maurdekye/orgtree-mailhub -f tag=v<version>`.
-A push to the branch `ci-test/mailhub-image` runs `build-image.yml` alone (build
-and smoke, both platforms), then its `publish-test` job runs the release's publish
+A push to the branch `ci-test/mailhub-image` runs `ci-test-image.yml`: `build-image.yml` (build
+and smoke, both platforms), then a `publish-test` job that runs the release's publish
 logic (`.github/ci/image/publish.sh`) on throwaway tags `ci-test-<sha7>-amd64`,
 `-arm64` and `-index` (no real tag is touched) and checks that the index is an OCI
 index (`application/vnd.oci.image.index.v1+json`) with a description annotation.
