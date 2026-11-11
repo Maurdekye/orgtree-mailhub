@@ -313,6 +313,17 @@ async fn t4_hello_auth() {
     say(&mut ws, json!({ "type": "hello", "v": 1 })).await;
     expect_close(&mut ws, 4400).await; // auth is required when the upgrade carried none
 
+    // spec 5.1 (amended, mailhub-opus 2026-11-11): a string `auth` that holds no valid pair is 4401
+    // (empty, unparseable, unknown slug, too long); only a missing or non-string `auth` is 4400
+    for bad in [json!(""), json!("   "), json!("garbage"), json!("a".repeat(9000))] {
+        let mut ws = open(r.full, None).await;
+        say(&mut ws, json!({ "type": "hello", "v": 1, "auth": bad })).await;
+        expect_close(&mut ws, 4401).await;
+    }
+    let mut ws = open(r.full, None).await;
+    say(&mut ws, json!({ "type": "hello", "v": 1, "auth": 7 })).await;
+    expect_close(&mut ws, 4400).await; // not a string: a malformed hello
+
     let mut ws = open(r.full, None).await;
     expect_close(&mut ws, 4408).await; // no hello within the hello timer
 
