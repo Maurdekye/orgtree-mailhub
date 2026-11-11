@@ -59,3 +59,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# the stream's tests (tests/stream.rs) speak the protocol from a real client;
+# the same release axum's `ws` feature brings in
+tokio-tungstenite = "0.26"
