@@ -1,0 +1,169 @@
+# Every published mail hub release gets its official container image
+# (docs/OPERATIONS.md, "Releases"):
+#   - the release's commit is built and smoked for linux/amd64 and linux/arm64
+#     (build-image.yml);
+#   - the release gets orgtree-mailhub-<v>-docker-<arch>.tar.gz (`docker load`)
+#     and build-info-docker.json, and their lines are added to SHA256SUMS
+#     (the hubtool lines already there are kept byte for byte);
+#   - those same images go to ghcr.io/<owner>/orgtree-mailhub: <v>-amd64,
+#     <v>-arm64, the two-platform <v>, and latest for a stable release only
+#     (never for a prerelease), with the run's own GITHUB_TOKEN;
+#   - then, on each platform, the published <v> is pulled (anonymously when
+#     the package is public), checked to be the release's image by config
+#     digest, started on PostgreSQL 18, and /healthz must answer its version.
+# The tag must match hub/Cargo.toml's version. Nothing runs for a draft: it
+# starts when the release is published. Re-run or backfill a published release:
+#   gh workflow run release-image.yml -R Maurdekye/orgtree-mailhub -f tag=v2.5.0
+name: release-image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published tag whose image to build, attach and push, e.g. v2.5.0
+        type: string
+        required: true
+
+permissions: {contents: read}
+
+concurrency:
+  group: release-image-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      sha: ${{ steps.r.outputs.sha }}
+      version: ${{ steps.r.outputs.version }}
+      prerelease: ${{ steps.r.outputs.prerelease }}
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: The release, its commit and version
+        id: r
+        run: |
+          json="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,tagName)"
+          [ "$(jq -r .isDraft <<<"$json")" = false ] || { echo "::error::$TAG is a draft: publish it first"; exit 1; }
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+          version="$(gh api "repos/$GITHUB_REPOSITORY/contents/hub/Cargo.toml?ref=$sha" --jq .content | base64 -d \
+            | tr -d '\r' | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n1)"
+          [ "v$version" = "$TAG" ] || { echo "::error::$TAG is not hub/Cargo.toml's version ($version) at $sha"; exit 1; }
+          prerelease="$(jq -r .isPrerelease <<<"$json")"
+          { echo "tag=$TAG"; echo "sha=$sha"; echo "version=$version"; echo "prerelease=$prerelease"; } >> "$GITHUB_OUTPUT"
+          echo "$TAG = $sha, version $version, prerelease $prerelease"
+
+  build:
+    needs: resolve
+    uses: ./.github/workflows/build-image.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write     # the release's assets
+      packages: write     # ghcr.io/<owner>/orgtree-mailhub
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: docker-image-*
+          path: dist
+          merge-multiple: true
+
+      - name: build-info-docker.json
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orgtree-mailhub"
+          for a in amd64 arm64; do
+            f="dist/$(jq -r .file "dist/image-$a.json")"
+            [ "$f" = "dist/orgtree-mailhub-$VERSION-docker-$a.tar.gz" ] || { echo "::error::unexpected $a file $f"; exit 1; }
+            [ "$(jq -r .sha256 "dist/image-$a.json")" = "$(sha256sum "$f" | cut -d' ' -f1)" ] \
+              || { echo "::error::the $a image file is not the one built"; exit 1; }
+          done
+          jq -n --arg v "$VERSION" --arg c "$SHA" --arg i "$image" \
+            --slurpfile a dist/image-amd64.json --slurpfile b dist/image-arm64.json \
+            '{version: $v, commit: $c, image: $i, platforms: {amd64: ($a[0] | del(.arch)), arm64: ($b[0] | del(.arch))}}' \
+            > dist/build-info-docker.json
+          cat dist/build-info-docker.json
+
+      - name: Attach to the release, and their lines to SHA256SUMS
+        run: |
+          files=("orgtree-mailhub-$VERSION-docker-amd64.tar.gz" "orgtree-mailhub-$VERSION-docker-arm64.tar.gz" build-info-docker.json)
+          mkdir -p sums
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p SHA256SUMS -D sums
+          else
+            : > sums/SHA256SUMS
+          fi
+          # every other line stays as it is; a re-run replaces only this workflow's own lines
+          pattern="  (orgtree-mailhub-${VERSION//./[.]}-docker-(amd64|arm64)[.]tar[.]gz|build-info-docker[.]json)\$"
+          { grep -Ev "$pattern" sums/SHA256SUMS || true; (cd dist && sha256sum "${files[@]}"); } > sums/new
+          mv sums/new sums/SHA256SUMS
+          cat sums/SHA256SUMS
+          (cd dist && gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}")
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber sums/SHA256SUMS
+
+      - name: Push to GHCR (<v>-amd64, <v>-arm64, <v>, latest for stable)
+        run: |
+          image="$(jq -r .image dist/build-info-docker.json)"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for a in amd64 arm64; do
+            docker load -i "dist/orgtree-mailhub-$VERSION-docker-$a.tar.gz"
+            docker push "$image:$VERSION-$a"
+          done
+          tags=(-t "$image:$VERSION")
+          # latest follows stable releases only
+          [ "$PRERELEASE" = true ] || tags+=(-t "$image:latest")
+          docker buildx imagetools create "${tags[@]}" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+          docker buildx imagetools inspect "$image:$VERSION"
+          docker logout ghcr.io
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-info-docker
+          path: dist/build-info-docker.json
+          retention-days: 30
+
+  # The post-publish check, on each platform's own runner.
+  verify:
+    needs: [resolve, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read      # used only while the package is still private
+    env:
+      ARCH: ${{ matrix.arch }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          sparse-checkout: .github/ci
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-info-docker
+      - name: Pull, check, start, /healthz
+        run: bash .github/ci/image/verify-published.sh build-info-docker.json "$ARCH" "$PRERELEASE"

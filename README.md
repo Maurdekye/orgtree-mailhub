@@ -123,6 +123,14 @@ cp .env.example .env      # then set HUB_DB_PASSWORD (required) and HUB_NAME
 docker compose up -d --build
 ```
 
+Or run the official image of a release instead of building it (amd64 and arm64,
+from 2.5.0; see [docs/container-image.md](docs/container-image.md), which also
+covers switching an existing hub over):
+
+```sh
+docker compose -f compose.yaml -f compose.release.yaml up -d
+```
+
 - Port **7370**. The hub's records live in its own PostgreSQL service (volume
   `orgtree-hub-db`, never published on a host port); attachment blobs live in
   the named volume `orgtree-hub-data`. A v1 deployment upgrades in place: the

@@ -1,0 +1,13 @@
+# Run the OFFICIAL mail hub image instead of building it from this checkout
+# (docs/container-image.md). Layer it over compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.release.yaml pull
+#   docker compose -f compose.yaml -f compose.release.yaml up -d
+#
+# HUB_VERSION in .env picks the release (e.g. 2.5.0); unset, it follows
+# `latest`, the newest stable release. Everything else (.env, ports, volumes,
+# the postgres service, container names) is compose.yaml's, unchanged.
+services:
+  mailhub:
+    image: ghcr.io/maurdekye/orgtree-mailhub:${HUB_VERSION:-latest}
+    build: !reset null

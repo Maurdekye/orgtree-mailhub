@@ -1,5 +1,19 @@
 # Mail hub development invariants
 
+- 2026-11-11: Every release from 2.5.0 on publishes the official container
+  image, built by CI from the tag's commit with the root `Dockerfile`
+  (`.github/workflows/release-image.yml`, on release published): linux/amd64 and
+  linux/arm64 on native runners, smoked on PostgreSQL 18; the `docker save`
+  files and `build-info-docker.json` on the release with their lines appended to
+  `SHA256SUMS`; `ghcr.io/maurdekye/orgtree-mailhub:<v>` (+ `latest` for stable
+  only) pushed with `GITHUB_TOKEN` only; then a pull-and-/healthz check per
+  platform. The tag must equal `hub/Cargo.toml`'s version. Upload the hubtool
+  assets before publishing. Do not drop the image from a release or add
+  secrets for it. Recipe: docs/OPERATIONS.md, Releases; users:
+  docs/container-image.md. [decided: user 2026-11-11 m1e16ee311dbe via Orgtree
+  docket official-mail-hub-container-package-with-every-m; verified:
+  .github/workflows/release-image.yml, build-image.yml]
+
 - 2026-11-01: Translation (feature `translate`, 2.4.0, schema 13). Planned in
   the send transaction (`translate::plan`, after the row, before the push
   wake and the change logs); the provider is called only by the worker

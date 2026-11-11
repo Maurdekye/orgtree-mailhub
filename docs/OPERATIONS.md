@@ -271,7 +271,56 @@ tests/requirements.txt`).
   control session without it that the CLI refuses (it spends model usage);
   `--stub-clients` where neither CLI is installed.
 
-## Releases: the one-line installer's assets
+## Releases
+
+Every release, from 2.5.0 on, carries the one-line installer's assets and the
+official container image. The recipe, once the release commit is tagged
+`v<version>` and `hub/Cargo.toml` says `<version>`:
+
+```sh
+python tools/hubtool-assets.py dist v<version>          # hubtool.py, both installers, SHA256SUMS
+gh release create v<version> --draft --title "Mail hub <version>" --notes-file <notes> dist/*
+# review the draft, then publish it (with the user's OK):
+gh release edit v<version> --draft=false [--prerelease]
+```
+
+Publishing starts `.github/workflows/release-image.yml` (nothing runs for a
+draft). It checks that the tag is `hub/Cargo.toml`'s version, builds the tag's
+commit with the `Dockerfile` for linux/amd64 and linux/arm64, each on its own
+native GitHub runner (`build-image.yml`), and smokes each image
+(`.github/ci/image/smoke.sh`: a fresh PostgreSQL 18 and volume, healthy,
+`/healthz` ok with the version, `docker stop` exits 0). Then it:
+
+- attaches `orgtree-mailhub-<v>-docker-amd64.tar.gz`, `-arm64.tar.gz` and
+  `build-info-docker.json` to the release and appends their lines to
+  `SHA256SUMS` (the hubtool lines stay as they are; a re-run replaces only its own
+  lines);
+- pushes `ghcr.io/maurdekye/orgtree-mailhub:<v>-amd64` and `:<v>-arm64`, the
+  two-platform `:<v>`, and `:latest` for a stable release only (never for a
+  prerelease), with the run's own `GITHUB_TOKEN` (`packages: write`; no other
+  secret or account);
+- verifies, on each platform's runner (`.github/ci/image/verify-published.sh`):
+  pulls `:<v>` anonymously, checks that `:<v>` (and `:latest`) carry the
+  release's image by the config digest in `build-info-docker.json`, and runs the
+  smoke on the pulled image. Its summary says whether the anonymous pull worked.
+
+Watch it with `gh run list -R Maurdekye/orgtree-mailhub -w release-image`. To
+re-run it, or to add the image to a published release that lacks it:
+`gh workflow run release-image.yml -R Maurdekye/orgtree-mailhub -f tag=v<version>`.
+A push to the branch `ci-test/mailhub-image` runs `build-image.yml` alone (build
+and smoke, both platforms, nothing published).
+
+**The GHCR package's visibility.** GitHub creates a package private on its first
+push, and a workflow token cannot change that. After the first push (2.5.0) the
+owner sets it public once: the repository's Packages, `orgtree-mailhub`, Package
+settings, Change visibility, Public. The image's `org.opencontainers.image.source`
+label links the package to this repository, so later pushes with the run's token
+keep working. Until then the verify job warns and pulls with its token.
+
+Users' side: [container-image.md](container-image.md), including switching from
+a locally built hub.
+
+### The one-line installer's assets
 
 The README's "Connect an agent session" commands download
 `install-hubtool.ps1` / `install-hubtool.sh` from the LATEST GitHub release,
@@ -284,6 +333,11 @@ python tools/hubtool-assets.py --check        # the installers name hubtool.py
 python tools/hubtool-assets.py dist <tag>     # the assets as committed at <tag>
 gh release upload <tag> dist/*                # hubtool.py, both installers, SHA256SUMS
 ```
+
+Upload them before publishing (the recipe above does it at `gh release create`):
+`release-image.yml` appends its lines to the `SHA256SUMS` it finds, and a later
+upload of the hubtool `SHA256SUMS` would drop them (`gh release upload` refuses to
+overwrite unless `--clobber`; if you had to, re-run `release-image.yml`).
 
 After changing `hubtool.py`, run `python tools/hubtool-assets.py --stamp`
 and commit the two installers with it (`tests/test_install_hubtool.py`

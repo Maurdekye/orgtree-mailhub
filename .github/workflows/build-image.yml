@@ -1,0 +1,92 @@
+# Builds the mail hub's Docker image from one commit, for linux/amd64 and
+# linux/arm64 (each on its own native runner: no emulation), smokes each on a
+# throwaway PostgreSQL 18 (.github/ci/image/smoke.sh) and keeps, as the
+# artifact docker-image-<arch>:
+#   orgtree-mailhub-<v>-docker-<arch>.tar.gz  `docker save` of
+#                     ghcr.io/<owner>/orgtree-mailhub:<v>-<arch>
+#   image-<arch>.json  the file's SHA-256 and the image's config digest
+# It never writes anywhere: release-image.yml attaches and pushes.
+# A push to ci-test/mailhub-image runs it alone, as a dry run.
+name: build-image
+
+on:
+  workflow_call:
+    inputs:
+      ref: {type: string, required: true}
+    outputs:
+      version: {value: '${{ jobs.image.outputs.version }}'}
+  push:
+    branches: ['ci-test/mailhub-image']
+
+permissions: {contents: read}
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      COMMIT: ${{ inputs.ref || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Version (hub/Cargo.toml)
+        id: version
+        run: |
+          v="$(tr -d '\r' < hub/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n1)"
+          [ -n "$v" ] || { echo "::error::no version in hub/Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orgtree-mailhub" >> "$GITHUB_ENV"
+
+      - name: Build (Dockerfile)
+        run: |
+          docker buildx build --load --platform "linux/$ARCH" --provenance=false --sbom=false \
+            --build-arg CARGO_BUILD_JOBS=4 \
+            --build-arg HUB_IMAGE_VERSION="$VERSION" --build-arg HUB_IMAGE_REVISION="$COMMIT" \
+            -t "$IMAGE:$VERSION-$ARCH" .
+          docker image inspect -f '{{.Os}}/{{.Architecture}} {{.Id}}' "$IMAGE:$VERSION-$ARCH"
+          [ "$(docker image inspect -f '{{.Architecture}}' "$IMAGE:$VERSION-$ARCH")" = "$ARCH" ] \
+            || { echo "::error::the image is not $ARCH"; exit 1; }
+
+      - name: Smoke - PostgreSQL 18, a fresh volume
+        run: bash .github/ci/image/smoke.sh "$IMAGE:$VERSION-$ARCH" "$VERSION" "smoke-logs/$ARCH"
+
+      - name: Save
+        run: |
+          mkdir -p dist
+          f="orgtree-mailhub-$VERSION-docker-$ARCH.tar.gz"
+          docker save "$IMAGE:$VERSION-$ARCH" | gzip -n > "dist/$f"
+          # the config digest is the image's identity through save, load, push and pull
+          config="$(tar -xzOf "dist/$f" manifest.json | jq -r '.[0].Config' | sed 's#^blobs/sha256/#sha256:#; s#\.json$##')"
+          case "$config" in sha256:*) ;; *) config="sha256:$config";; esac
+          jq -n --arg arch "$ARCH" --arg file "$f" --arg sha "$(sha256sum "dist/$f" | cut -d' ' -f1)" \
+            --arg config "$config" --arg tag "$IMAGE:$VERSION-$ARCH" \
+            '{arch: $arch, file: $file, sha256: $sha, config_digest: $config, tag: $tag}' > "dist/image-$ARCH.json"
+          cat "dist/image-$ARCH.json"; ls -la dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-image-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: smoke-logs-${{ matrix.arch }}
+          path: smoke-logs/
+          if-no-files-found: ignore
+          retention-days: 7
