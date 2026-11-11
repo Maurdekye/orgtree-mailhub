@@ -18,11 +18,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 # Set by the release workflow (.github/workflows/build-image.yml); a local
 # `docker compose build` leaves them empty. image.source links the GHCR
-# package ghcr.io/maurdekye/orgtree-mailhub to this repository.
+# package ghcr.io/maurdekye/orgtree-mailhub to this repository. GHCR shows the
+# description (at most 512 characters) as the package page's text, with no
+# README; release-image.yml copies it onto the multi-platform index too.
 ARG HUB_IMAGE_VERSION=
 ARG HUB_IMAGE_REVISION=
 LABEL org.opencontainers.image.title="orgtree-mailhub" \
-      org.opencontainers.image.description="The orgtree mail hub: org-to-org mail across machines (Rust + PostgreSQL)" \
+      org.opencontainers.image.description="The standalone mail hub: one server that carries mail between Orgtree orgs and Hubchat on different machines (Rust, with PostgreSQL). Optional: the Orgtree desktop app uses the hub built into it, or any hub it can reach; this image runs a hub on its own server. Needs PostgreSQL (the repo's compose.yaml runs one). Tags <version> and latest (stable releases), linux/amd64 and arm64. Docs: https://github.com/Maurdekye/orgtree-mailhub/blob/main/docs/container-image.md" \
+      org.opencontainers.image.url="https://github.com/Maurdekye/orgtree-mailhub" \
+      org.opencontainers.image.documentation="https://github.com/Maurdekye/orgtree-mailhub/blob/main/docs/container-image.md" \
       org.opencontainers.image.source="https://github.com/Maurdekye/orgtree-mailhub" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${HUB_IMAGE_VERSION}" \

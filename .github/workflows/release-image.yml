@@ -127,7 +127,14 @@ jobs:
           tags=(-t "$image:$VERSION")
           # latest follows stable releases only
           [ "$PRERELEASE" = true ] || tags+=(-t "$image:latest")
-          docker buildx imagetools create "${tags[@]}" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+          # GHCR's package page shows the last pushed tag's description; for the
+          # two-platform index that is an index annotation, copied from the image's labels
+          ann=()
+          for k in description source url documentation licenses; do
+            val="$(docker image inspect -f "{{index .Config.Labels \"org.opencontainers.image.$k\"}}" "$image:$VERSION-amd64")"
+            [ -z "$val" ] || ann+=(--annotation "index:org.opencontainers.image.$k=$val")
+          done
+          docker buildx imagetools create "${tags[@]}" "${ann[@]}" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
           docker buildx imagetools inspect "$image:$VERSION"
           docker logout ghcr.io
 
