@@ -261,11 +261,13 @@ model](#trust-model--read-this-before-hosting).
   access to everyone's correspondence — that is the operator's view, ruled
   deliberately for a closed collaborative network.
 - **TLS**: not built in. On a closed network plain HTTP is the ruled default;
-  if you want TLS inside the network, put a Caddy sidecar in front:
+  if you want TLS inside the network, put a Caddy sidecar in front of the
+  relay-only door (`HUB_PUBLIC=1`; port 7371 inside the compose network),
+  never of the main port 7370, whose page shows all mail without a login:
 
   ```
   hub.internal {
-      reverse_proxy mailhub:7370
+      reverse_proxy mailhub:7371
   }
   ```
 

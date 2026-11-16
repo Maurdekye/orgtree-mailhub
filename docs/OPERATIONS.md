@@ -151,7 +151,8 @@ is not served there). `expose-hub.ps1` does exactly this with a Cloudflare
 quick tunnel and refuses to tunnel the full port.
 
 TLS is not built in: on a closed network plain HTTP is the ruled default.
-If you want TLS, put a reverse proxy (e.g. Caddy) in front — see README.
+If you want TLS, put a reverse proxy (e.g. Caddy) in front of the public
+listener, never of the full port — see README.
 
 ## Backup and restore
 
@@ -505,11 +506,12 @@ Sending, acks, receipts, history and files stay plain HTTP.
   `{"stream": "open"}` and `{"stream": "close", "secs", "answers", "code",
   "by"}` lines mark each stream. `/ui/data` shows `streams: {open, welcomed}`.
 - Reverse proxies must pass the upgrade for `/api/stream` and allow a read
-  timeout above 60 s. For nginx:
+  timeout above 60 s. For nginx, in front of the public listener (host port
+  7378 under compose; never the full port 7370, see Trust model):
 
   ```nginx
   location /api/stream {
-      proxy_pass http://127.0.0.1:7370;
+      proxy_pass http://127.0.0.1:7378;
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
