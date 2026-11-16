@@ -4,7 +4,7 @@
 #   docker compose -f compose.yaml -f compose.release.yaml pull
 #   docker compose -f compose.yaml -f compose.release.yaml up -d
 #
-# HUB_VERSION in .env picks the release (e.g. 2.5.0); unset, it follows
+# HUB_VERSION in .env picks the release (e.g. 2.5.1); unset, it follows
 # `latest`, the newest stable release. Everything else (.env, ports, volumes,
 # the postgres service, container names) is compose.yaml's, unchanged.
 services:

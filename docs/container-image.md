@@ -55,7 +55,7 @@ PostgreSQL service exactly as they are):
 
 ```sh
 cp .env.example .env      # first time only: set HUB_DB_PASSWORD (required) and HUB_NAME
-echo HUB_VERSION=2.5.0 >> .env   # optional: pin a release; unset follows latest
+echo HUB_VERSION=2.5.1 >> .env   # optional: pin a release; unset follows latest
 docker compose -f compose.yaml -f compose.release.yaml pull
 docker compose -f compose.yaml -f compose.release.yaml up -d
 ```
@@ -63,7 +63,7 @@ docker compose -f compose.yaml -f compose.release.yaml up -d
 Offline, from the release's files:
 
 ```sh
-v=2.5.0
+v=2.5.1
 curl -LO https://github.com/Maurdekye/orgtree-mailhub/releases/download/v$v/orgtree-mailhub-$v-docker-amd64.tar.gz
 curl -LO https://github.com/Maurdekye/orgtree-mailhub/releases/download/v$v/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
@@ -78,7 +78,7 @@ then set `HUB_VERSION=$v` in `.env` and run the `up -d` line above (skip `pull`)
 through `docker load`, push and pull:
 
 ```sh
-docker buildx imagetools inspect --raw ghcr.io/maurdekye/orgtree-mailhub:2.5.0   # the index: one manifest per platform
+docker buildx imagetools inspect --raw ghcr.io/maurdekye/orgtree-mailhub:2.5.1   # the index: one manifest per platform
 docker buildx imagetools inspect --raw ghcr.io/maurdekye/orgtree-mailhub@<manifest digest> | jq -r .config.digest
 curl -s http://127.0.0.1:7370/healthz | jq -r .version
 ```
