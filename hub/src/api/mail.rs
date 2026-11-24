@@ -397,6 +397,16 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if changed {
         hub.presence.roster_changed();
     }
+    // v2.6.0: blocks belong to their owner. A previous owner's go; this
+    // owner's (set before it left) count again.
+    let stale = db::execute(&c, "DELETE FROM blocks WHERE blocker = $1 AND blocker_fp <> $2", &[&slug, &fp]).await?;
+    let before = hub.blocks.of(&slug);
+    let now_blocks = hub.blocks.reload(&c, &slug).await?;
+    if stale > 0 || *before != now_blocks {
+        let mut woke: Vec<&str> = vec![slug.as_str()];
+        woke.extend(before.iter().chain(now_blocks.iter()).map(String::as_str));
+        hub.presence.wake_sync(woke);
+    }
     // v2.3.0: a person goes busy for want of a device in use
     if let Some(r) = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&slug]).await? {
         hub.presence.set_person(&slug, r.get::<_, String>(0) == "person");
@@ -424,6 +434,10 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     tx.commit().await?;
     for s in &slugs {
         hub.presence.forget(s);
+        // v2.6.0: its blocks stop counting while it is gone
+        let had = hub.blocks.of(s);
+        hub.blocks.forget(s);
+        hub.presence.wake_sync(had.iter().map(String::as_str));
     }
     if !gone.is_empty() {
         hub.presence.roster_changed();
@@ -693,6 +707,12 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // IGNORE never used up a message number, and neither does this
     let known = db::query_opt(&tx, "SELECT 1 FROM messages WHERE id = $1", &[&mid]).await?.is_some();
     if !known {
+        // v2.6.0: blocking. Asked under the recipient's row lock, which a
+        // block's write takes too, so a block that committed first is seen;
+        // a retry of mail accepted before it stays accepted (above).
+        if let Some(body) = crate::blocks::refusal(&tx, &frm, &to).await? {
+            return Err(ApiError::Body(StatusCode::FORBIDDEN, body));
+        }
         // G8: the limit bounds one message, its body and files together
         let Ok(limit) = crate::blobs::attachment_limit(&hub.cfg) else {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "attachment limit configuration is invalid");

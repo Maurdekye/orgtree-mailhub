@@ -6,6 +6,7 @@
 //! for unknown routes, and a 307 to the slash-twin of a path that only
 //! differs by its trailing slash.
 
+pub mod blocks;
 pub mod files;
 pub mod history;
 pub mod keys;
@@ -61,6 +62,8 @@ pub struct Hub {
     pub push_dns_addresses: Arc<papaya::HashSet<String>>,
     /// The translation worker's nudge and pace (v2.4.0)
     pub translate: crate::translate::Shared,
+    /// who blocks whom, as the database says (v2.6.0; `crate::blocks`)
+    pub blocks: crate::blocks::Blocks,
     /// the open WebSocket streams (v2.5.0)
     pub streams: stream::Streams,
 }
@@ -268,6 +271,8 @@ enum Route {
     SignOut,
     IdentityGet,
     IdentitySet,
+    BlocksGet,
+    BlocksSet,
     Conversations,
     Directory,
     History,
@@ -312,6 +317,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         }),
         "/api/devices" => return get_or_post(Devices, Enrol),
         "/api/identity" => return get_or_post(IdentityGet, IdentitySet),
+        "/api/blocks" => return get_or_post(BlocksGet, BlocksSet),
         _ => {}
     }
     // POST here is the active signal; DELETE still signs out a device that
@@ -539,6 +545,8 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         }
         Route::IdentityGet => keys::get_identity(hub, req).await,
         Route::IdentitySet => keys::set_identity(hub, req).await,
+        Route::BlocksGet => blocks::list(hub, req).await,
+        Route::BlocksSet => blocks::set(hub, req).await,
         Route::Conversations => history::conversations(hub, req).await,
         Route::Directory => mail::directory(hub, req).await,
         Route::History => history::history(hub, req).await,

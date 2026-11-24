@@ -45,6 +45,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (13, "translation", include_str!("../migrations/0013_translation.sql")),
     (14, "Web Push", include_str!("../migrations/0014_webpush.sql")),
     (15, "last active", include_str!("../migrations/0015_last_active.sql")),
+    (16, "blocks", include_str!("../migrations/0016_blocks.sql")),
 ];
 
 /// Gives messages that have no change-log entry one (schema 3 does it for

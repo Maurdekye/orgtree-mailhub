@@ -193,9 +193,15 @@ impl Cursor {
 /// the sets busy and Do not disturb (v2.3.0), so a change in any is news;
 /// and the status its own address chose (v2.3.0), so a choice made on one
 /// of its devices is news to the others. v2.6.0: and the set active now.
-fn presence_print(sets: &Sets, status: Status, me: &str) -> u64 {
+fn presence_print(sets: &Sets, status: Status, me: &str, blocks: &crate::blocks::Blocks) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (&sets.online, &sets.busy, &sets.dnd, status.as_str()).hash(&mut h);
+    // v2.6.0: whom it blocks and who blocks it, left out while both are
+    // empty (an address that never blocked prints as 2.5 did)
+    let (mine, by) = (blocks.of(me), blocks.by(me));
+    if !mine.is_empty() || !by.is_empty() {
+        ("blocks", &*mine, &*by).hash(&mut h);
+    }
     // left out while empty, so a hub with nobody else active prints as 2.5
     // did; the asker's own use is no news to its devices
     let others = others_active(sets, me);
@@ -213,7 +219,12 @@ fn others_active<'a>(sets: &'a Sets, me: &str) -> Vec<&'a String> {
 /// The sets an answer carries beside each other: `online`, `busy`, `dnd`
 /// and (v2.6.0) `active_now` (not `active`: that is the asker's own
 /// devices in use), never the asker itself.
-fn put_sets(out: &mut Value, sets: Sets, me: &str) {
+fn put_sets(out: &mut Value, sets: Sets, me: &str, blocks: &crate::blocks::Blocks) {
+    // v2.6.0: whom this address blocks (oldest first), and who blocks it
+    // (user 2026-11-24 19:06Z: the blocked party is told at once); never
+    // anyone else's
+    out["blocks"] = json!(*blocks.of(me));
+    out["blocked_by"] = json!(*blocks.by(me));
     out["online"] = json!(sets.online);
     // v2.3.0: those of them that are busy, always with `online`, and
     // those that show Do not disturb (a part of busy while online)
@@ -470,7 +481,7 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
     let sets = hub.presence.now_sets();
     let status = hub.presence.status(slug);
-    let print = presence_print(&sets, status, slug);
+    let print = presence_print(&sets, status, slug, &hub.blocks);
     // in every answer, read now: a device deciding whether to notify about
     // the mail in this answer sees who is in use as of this answer
     let active = active_others(&c, slug, device).await?;
@@ -496,7 +507,7 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
         "now": clock::now().timestamp_millis(),
     });
     if b.reset || cur.online != Some(print) {
-        put_sets(&mut out, sets, slug);
+        put_sets(&mut out, sets, slug, &hub.blocks);
     }
     if b.reset {
         out["reset"] = json!(true);
@@ -529,7 +540,7 @@ fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
-        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&sets, status, slug))),
+        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&sets, status, slug, &hub.blocks))),
         "changes": [],
         "roster": [],
         "roster_removed": [],
@@ -540,7 +551,7 @@ fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64
         "typing_only": true,
     });
     if cur.online.is_none() {
-        put_sets(&mut out, sets, slug);
+        put_sets(&mut out, sets, slug, &hub.blocks);
     }
     typing_rows(hub, slug, seen, &mut out);
     ok(out)
@@ -652,7 +663,7 @@ pub(crate) async fn sync_core(hub: &Arc<Hub>, pairs: Vec<crate::auth::Pair>, wai
                 in_use
                     && (hub.presence.soft_roster() != soft
                         || cur.online.is_some_and(|p| {
-                            p != presence_print(&hub.presence.now_sets(), hub.presence.status(&slug), &slug)
+                            p != presence_print(&hub.presence.now_sets(), hub.presence.status(&slug), &slug, &hub.blocks)
                         }))
             };
             // a heartbeat for a device in use that asked for them (typing,

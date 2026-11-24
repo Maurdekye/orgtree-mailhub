@@ -31,6 +31,12 @@ pub async fn typing(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let slugs: Vec<String> = callers.iter().map(|c| c.slug.clone()).collect();
     let from = one_address(&slugs, body.get("slug"))?;
     let to = recipients(body.get("to"))?;
+    // v2.6.0: a heartbeat between a blocked address and its blocker is
+    // answered as any other and never relayed
+    let to: Vec<String> = to.into_iter().filter(|t| !hub.blocks.stops(&from, t)).collect();
+    if to.is_empty() {
+        return ok(json!({ "ok": true, "counted": 0 }));
+    }
     let counted = match hub.typing.beat(&from, &to, Instant::now()) {
         Ok(c) => c,
         Err(TooMany) => return refuse(StatusCode::TOO_MANY_REQUESTS, "this address is typing to too many addresses at once"),
