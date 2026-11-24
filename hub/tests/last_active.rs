@@ -539,6 +539,19 @@ async fn only_an_org_says_it_and_its_clock_is_corrected() {
         "active_at": iso(real + chrono::Duration::seconds(3500)), "now": iso(real + chrono::Duration::seconds(3600)) })).await;
     let t = at(&a["active_at"]);
     assert!((t - (real - chrono::Duration::seconds(100))).num_seconds().abs() <= 3, "ahead: moved back by the difference ({t})");
+    // within 2 s the difference is latency: stored exactly as sent, and a
+    // refresh of the same time changes nothing (no row bump, no wake)
+    let sql = sql_client(&url).await;
+    let a = say(&hub, &acme, json!({ "busy": false, "active": false,
+        "active_at": "2026-11-24T11:00:00.000Z", "now": iso(Utc::now() - chrono::Duration::milliseconds(1500)) })).await;
+    assert_eq!(a["active_at"], json!("2026-11-24T11:00:00.000Z"));
+    let seq_sql = "SELECT roster_seq FROM identities WHERE slug = $1";
+    let before: i64 = sql.query_one(seq_sql, &[&acme.0]).await.unwrap().get(0);
+    let a = say(&hub, &acme, json!({ "busy": false, "active": true,
+        "active_at": "2026-11-24T11:00:00.000Z", "now": iso(Utc::now() + chrono::Duration::milliseconds(1500)) })).await;
+    assert_eq!(a["active_at"], json!("2026-11-24T11:00:00.000Z"));
+    assert_eq!(sql.query_one(seq_sql, &[&acme.0]).await.unwrap().get::<_, i64>(0), before, "the same time said again (a turn start, a refresh): the row is not bumped");
+    println!("  ok  within 2 s of the hub's clock: stored exactly, and saying it again leaves the row alone");
     let r = post(&hub, &acme, "/api/presence", json!({ "busy": false, "now": "soon" })).await;
     assert_eq!((r.code(), r.json()["detail"].clone()), (422, json!("now must be a time (RFC 3339)")), "{}", r.text());
     println!("  ok  an org's active_at is moved onto the hub's clock by its now (behind and ahead); a bad now is refused");
