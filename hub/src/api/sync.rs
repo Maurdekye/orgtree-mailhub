@@ -889,7 +889,9 @@ pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 /// again when it (re)connects. v2.6.0: `active?` (it is active now: an
 /// Orgtree org while an agent in charge of its org mailbox is mid-turn; in
 /// memory, as busy) and `active_at?` (when it was last active; kept in
-/// `identities.active_at`; left out keeps it), each echoed only when sent.
+/// `identities.active_at`; left out keeps it; it never goes back: a time
+/// older than the stored one, or null, changes nothing), each echoed, as the
+/// hub read it, only when sent.
 /// The credentials and `slug` of a poll; no device.
 #[tracing::instrument(level = "debug", skip_all, ret(level = "debug"), err(level = "debug", Debug))]
 pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
@@ -910,7 +912,7 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "dnd must be true or false"),
     };
     // v2.6.0: whether it is active now (false when left out), and when it
-    // was last active (left out: as stored; null: not known)
+    // was last active (left out or null: as stored)
     let active = match body.get("active") {
         Some(Value::Bool(b)) => *b,
         None | Some(Value::Null) => false,
@@ -950,12 +952,17 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let org = kind.is_empty() || kind == "org";
     let (active, active_at) = if org { (active, active_at) } else { (false, None) };
     if let Some(at) = active_at {
-        // a new time sends its roster row again, and wakes the syncs for it
+        // a later time sends its roster row again, and wakes the syncs for
+        // it. An org's time never goes back (@coordinator-opus 2026-11-24
+        // 13:47Z): the hub keeps the later of the stored time (perhaps when
+        // it saw the org go offline mid-turn) and the one said; null or an
+        // older one changes nothing
         let tx = c.transaction().await?;
         roster_lock(&tx).await?;
         let moved = db::execute(
             &tx,
-            "UPDATE identities SET active_at = $2, roster_seq = nextval('roster_seq') WHERE slug = $1 AND active_at IS DISTINCT FROM $2",
+            "UPDATE identities SET active_at = $2, roster_seq = nextval('roster_seq')
+              WHERE slug = $1 AND $2::timestamptz IS NOT NULL AND (active_at IS NULL OR active_at < $2)",
             &[&slug, &at],
         )
         .await?;

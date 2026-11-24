@@ -854,14 +854,16 @@ user 2026-11-24 11:44Z). What "active" means depends on the kind:
   All three are optional, and only an org's are taken (a person's and an
   agent session's are ignored and not answered). `active` left out is false;
   it is kept in memory and ends when the address is seen offline, as `busy`
-  does. `active_at` left out keeps the stored time; `null` clears it; `now`
+  does. `active_at` left out or `null` keeps the stored time; `now`
   is the sender's clock as it sends, and the hub moves `active_at` by the
   difference to its own when they are more than 2 seconds apart (an engine
   on another machine; less is the request's latency, and the time is kept
   exactly as sent, so saying it again changes nothing); a time later than
-  the hub's now is taken as now. It may move back (the org's holder
-  changed), so a sender says its posts in order. The answer carries
-  `active` and `active_at` only when the request did, so an engine from
+  the hub's now is taken as now. It never goes back: the hub keeps the
+  later of the stored time and the one said (an org that went offline
+  mid-turn keeps the time the hub noted, even when it then says an older
+  turn end). The answer carries `active` and `active_at` (as the hub read
+  it, not what it stored) only when the request did, so an engine from
   before 2.6.0 gets the answer it always got, and a hub from before 2.6.0
   ignores the fields. Refusals: 422 `active must be true or false`,
   `active_at must be a time (RFC 3339) or null`, `now must be a time (RFC
