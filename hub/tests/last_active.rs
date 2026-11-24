@@ -294,15 +294,14 @@ async fn an_org_is_active_while_it_says_so_and_says_when_it_last_was() {
     assert_eq!((row["active"].clone(), row["active_at"].clone()), (json!(false), json!("2026-11-24T11:00:00.000Z")), "{row}");
     println!("  ok  the turn ended: out of active, active_at exactly as the org said");
 
-    // what it says may move back (its holder changed), but never past now
-    say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": "2026-11-24T09:00:00.000Z" })).await;
-    assert_eq!(roster_row(&hub, &wes, &acme.0).await["active_at"], json!("2026-11-24T09:00:00.000Z"));
-    let a = say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": "2999-01-01T00:00:00.000Z" })).await;
-    assert!(at(&a["active_at"]) <= Utc::now(), "a time in the future is taken as now: {a}");
-    assert!(at(&roster_row(&hub, &wes, &acme.0).await["active_at"]) <= Utc::now());
+    // an org's time never goes back (@coordinator-opus 2026-11-24 13:47Z): an
+    // older time or null changes nothing; the answer says what the hub read
+    let a = say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": "2026-11-24T09:00:00.000Z" })).await;
+    assert_eq!(a["active_at"], json!("2026-11-24T09:00:00.000Z"), "{a}");
+    assert_eq!(roster_row(&hub, &wes, &acme.0).await["active_at"], json!("2026-11-24T11:00:00.000Z"));
     say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": null })).await;
-    assert_eq!(roster_row(&hub, &wes, &acme.0).await["active_at"], Value::Null);
-    println!("  ok  active_at may move back, is never later than now, and null clears it");
+    assert_eq!(roster_row(&hub, &wes, &acme.0).await["active_at"], json!("2026-11-24T11:00:00.000Z"));
+    println!("  ok  an org's active_at never moves back, and null leaves it");
 
     // leaving `active_at` out keeps the stored one
     say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z" })).await;
@@ -349,6 +348,18 @@ async fn an_org_is_active_while_it_says_so_and_says_when_it_last_was() {
     let _again = park_poll(&hub, &acme);
     w.sees_active(&hub, &acme, false).await;
     println!("  ok  back online: not active until it says so again");
+
+    // it says its last real turn end, older than when the hub saw it go: the
+    // hub keeps the later (R3, @coordinator-opus 2026-11-24 13:47Z)
+    say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z" })).await;
+    assert_eq!(at(&roster_row(&hub, &wes, &acme.0).await["active_at"]), t, "the time the hub noted stays");
+    println!("  ok  back online saying an older end: the time the hub noted stays");
+
+    // never past now
+    let a = say(&hub, &acme, json!({ "busy": false, "active": false, "active_at": "2999-01-01T00:00:00.000Z" })).await;
+    assert!(at(&a["active_at"]) <= Utc::now(), "a time in the future is taken as now: {a}");
+    assert!(at(&roster_row(&hub, &wes, &acme.0).await["active_at"]) <= Utc::now());
+    println!("  ok  a time in the future is taken as now");
 }
 
 #[tokio::test]
@@ -527,29 +538,34 @@ async fn only_an_org_says_it_and_its_clock_is_corrected() {
     }
     println!("  ok  an agent session or a person saying active/active_at: ignored");
 
-    // the engine's clock a minute behind the hub's: its times read a minute later
+    // an hour ahead: moved back by the hour, not merely clamped to now (times
+    // only move on here: an org's never goes back)
     let real = Utc::now();
     let iso = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    let a = say(&hub, &acme, json!({ "busy": false, "active": false,
-        "active_at": iso(real - chrono::Duration::seconds(120)), "now": iso(real - chrono::Duration::seconds(60)) })).await;
-    let t = at(&a["active_at"]);
-    assert!((t - (real - chrono::Duration::seconds(60))).num_seconds().abs() <= 3, "behind: moved on by the difference ({t})");
-    // an hour ahead: moved back by the hour, not merely clamped to now
     let a = say(&hub, &acme, json!({ "busy": false, "active": false,
         "active_at": iso(real + chrono::Duration::seconds(3500)), "now": iso(real + chrono::Duration::seconds(3600)) })).await;
     let t = at(&a["active_at"]);
     assert!((t - (real - chrono::Duration::seconds(100))).num_seconds().abs() <= 3, "ahead: moved back by the difference ({t})");
+    assert_eq!(at(&roster_row(&hub, &wes, &acme.0).await["active_at"]), t);
+    // the engine's clock a minute behind the hub's: its times read a minute later
+    let a = say(&hub, &acme, json!({ "busy": false, "active": false,
+        "active_at": iso(real - chrono::Duration::seconds(120)), "now": iso(real - chrono::Duration::seconds(60)) })).await;
+    let t = at(&a["active_at"]);
+    assert!((t - (real - chrono::Duration::seconds(60))).num_seconds().abs() <= 3, "behind: moved on by the difference ({t})");
+    assert_eq!(at(&roster_row(&hub, &wes, &acme.0).await["active_at"]), t);
     // within 2 s the difference is latency: stored exactly as sent, and a
     // refresh of the same time changes nothing (no row bump, no wake)
     let sql = sql_client(&url).await;
+    let exact = iso(real - chrono::Duration::seconds(30));
     let a = say(&hub, &acme, json!({ "busy": false, "active": false,
-        "active_at": "2026-11-24T11:00:00.000Z", "now": iso(Utc::now() - chrono::Duration::milliseconds(1500)) })).await;
-    assert_eq!(a["active_at"], json!("2026-11-24T11:00:00.000Z"));
+        "active_at": exact, "now": iso(Utc::now() - chrono::Duration::milliseconds(1500)) })).await;
+    assert_eq!(a["active_at"], json!(exact));
+    assert_eq!(roster_row(&hub, &wes, &acme.0).await["active_at"], json!(exact));
     let seq_sql = "SELECT roster_seq FROM identities WHERE slug = $1";
     let before: i64 = sql.query_one(seq_sql, &[&acme.0]).await.unwrap().get(0);
     let a = say(&hub, &acme, json!({ "busy": false, "active": true,
-        "active_at": "2026-11-24T11:00:00.000Z", "now": iso(Utc::now() + chrono::Duration::milliseconds(1500)) })).await;
-    assert_eq!(a["active_at"], json!("2026-11-24T11:00:00.000Z"));
+        "active_at": exact, "now": iso(Utc::now() + chrono::Duration::milliseconds(1500)) })).await;
+    assert_eq!(a["active_at"], json!(exact));
     assert_eq!(sql.query_one(seq_sql, &[&acme.0]).await.unwrap().get::<_, i64>(0), before, "the same time said again (a turn start, a refresh): the row is not bumped");
     println!("  ok  within 2 s of the hub's clock: stored exactly, and saying it again leaves the row alone");
     let r = post(&hub, &acme, "/api/presence", json!({ "busy": false, "now": "soon" })).await;
