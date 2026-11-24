@@ -730,6 +730,9 @@ async fn nobody_can_tell_invisible_from_offline() {
     let sql = sql_client(&url).await;
     let at = chrono::DateTime::parse_from_rfc3339(held.as_str().unwrap()).unwrap().with_timezone(&chrono::Utc);
     sql.execute("UPDATE identities SET status = 'auto', status_since = NULL, last_seen = $2 WHERE slug = $1", &[&pat.0, &at]).await.unwrap();
+    // v2.6.0: and last active when they really were (here: as they went Invisible)
+    let held_active = a_wes["roster"]["active_at"].as_str().map(|t| chrono::DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&chrono::Utc));
+    sql.execute("UPDATE identities SET active_at = $2 WHERE slug = $1", &[&pat.0, &held_active]).await.unwrap();
     hub.presence.set_status(&pat.0, Status::Auto);
     w.sees(&hub, &pat, "offline").await;
     let b_wes = everything_about(&hub, &wes, Some("wes-fresh-b"), &pat).await;

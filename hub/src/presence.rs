@@ -42,6 +42,14 @@
 //! their own calls still keep them online underneath (`online_at`: their
 //! parked syncs, the hour's rule, declared flags), so it changes nothing for
 //! their own devices but the word `invisible` in their own answers.
+//!
+//! v2.6.0: active (Orgtree docket hubchat-last-seen-time-for-orgs-people-and-indep,
+//! user 2026-11-24). An address online can be active now: a person while one
+//! of their devices is in use, an org while it says so (`POST /api/presence
+//! {active}`: one of the agents in charge of its org mailbox is mid-turn).
+//! Shown as online is (never an Invisible person), and an org's say ends
+//! when it is seen offline, as busy does. When it was last active is kept in
+//! the database (`identities.active_at`), not here.
 
 #[cfg(all(feature = "test-clock", not(debug_assertions)))]
 compile_error!("test-clock moves the presence clock and must not be used in a release build");
@@ -150,6 +158,9 @@ pub struct Slot {
     /// it said it does not want to be disturbed (`POST /api/presence`);
     /// ends when it is seen offline
     declared_dnd: AtomicBool,
+    /// it said it is active now (`POST /api/presence {active}`, v2.6.0);
+    /// ends when it is seen offline
+    declared_active: AtomicBool,
     /// a person (`identities.kind`): busy for want of a device in use
     person: AtomicBool,
     /// a person's chosen status (`Status as u8`; `POST /api/status`), kept
@@ -176,6 +187,7 @@ impl Slot {
             typing: Notify::new(),
             declared_busy: AtomicBool::new(false),
             declared_dnd: AtomicBool::new(false),
+            declared_active: AtomicBool::new(false),
             person: AtomicBool::new(false),
             status: AtomicU8::new(Status::Auto as u8),
             fronts: Mutex::new(HashMap::new()),
@@ -193,6 +205,10 @@ pub struct Presence {
     online: Notify,
     /// every waiting link take: a payload was left
     link: Notify,
+    /// addresses seen offline while they said they were active (v2.6.0):
+    /// they were last active then; the presence loop takes them
+    /// (`take_gone_active`) and keeps that time
+    gone_active: Mutex<Vec<String>>,
 }
 
 impl Default for Presence {
@@ -203,6 +219,7 @@ impl Default for Presence {
             roster: Notify::new(),
             online: Notify::new(),
             link: Notify::new(),
+            gone_active: Mutex::new(Vec::new()),
         }
     }
 }
@@ -293,6 +310,21 @@ impl Presence {
     /// (`POST /api/presence`).
     pub fn declare_dnd(&self, slug: &str, dnd: bool) {
         self.slot(slug).declared_dnd.store(dnd, Ordering::Release);
+    }
+
+    /// Online, and active now (v2.6.0; `Slot::active_if_online`).
+    pub fn active(&self, slug: &str) -> bool {
+        let map = self.slots.pin();
+        map.get(slug).is_some_and(|s| {
+            let now = self.now_ms();
+            s.shown_at(now) && s.active_if_online(now)
+        })
+    }
+
+    /// The address says it is active now, or no longer (`POST /api/presence
+    /// {active}`, v2.6.0).
+    pub fn declare_active(&self, slug: &str, active: bool) {
+        self.slot(slug).declared_active.store(active, Ordering::Release);
     }
 
     /// Whether the address is a person (`identities.kind`): only a person is
@@ -420,18 +452,19 @@ impl Presence {
 
     /// Every address online now, sorted.
     pub fn online_now(&self) -> Vec<String> {
-        self.now_sets().0
+        self.now_sets().online
     }
 
-    /// Every address online now, and those of them that are busy and that are
-    /// on Do not disturb (v2.3.0), all sorted, from one reading of the clock:
+    /// Every address online now, and those of them that are busy, that are
+    /// on Do not disturb (v2.3.0) and that are active now (v2.6.0), all
+    /// sorted, from one reading of the clock:
     /// as everyone is told them, so an Invisible person is in none.
-    /// An address seen offline here stops being busy and DND by its own say:
+    /// An address seen offline here stops being busy, DND and active by its own say:
     /// one that comes back says them again. A person's chosen status stays,
     /// and shows again when they are back.
-    pub fn now_sets(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub fn now_sets(&self) -> Sets {
         let now = self.now_ms();
-        let (mut on, mut busy, mut dnd) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut on, mut busy, mut dnd, mut active) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (k, s) in self.slots.pin().iter() {
             if s.online_at(now) {
                 if !s.shown_at(now) {
@@ -444,6 +477,9 @@ impl Presence {
                 if s.dnd_if_online() {
                     dnd.push(k.clone());
                 }
+                if s.active_if_online(now) {
+                    active.push(k.clone());
+                }
             } else {
                 if s.declared_busy.load(Ordering::Acquire) {
                     s.declared_busy.store(false, Ordering::Release);
@@ -451,12 +487,22 @@ impl Presence {
                 if s.declared_dnd.load(Ordering::Acquire) {
                     s.declared_dnd.store(false, Ordering::Release);
                 }
+                if s.declared_active.swap(false, Ordering::AcqRel) {
+                    self.gone_active.lock().unwrap_or_else(|e| e.into_inner()).push(k.clone());
+                }
             }
         }
         on.sort_unstable();
         busy.sort_unstable();
         dnd.sort_unstable();
-        (on, busy, dnd)
+        active.sort_unstable();
+        Sets { online: on, busy, dnd, active }
+    }
+
+    /// The addresses seen offline while they said they were active, since
+    /// the last call (v2.6.0; `now_sets` notes them, whoever called it).
+    pub fn take_gone_active(&self) -> Vec<String> {
+        std::mem::take(&mut *self.gone_active.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// A sync's wake-ups: its address's syncs, the roster, the set online
@@ -524,6 +570,16 @@ impl Slot {
         self.declared_dnd.load(Ordering::Acquire) || self.chosen() == Status::Dnd
     }
 
+    /// Active now, if online (v2.6.0): a person one of whose devices is in
+    /// use (its lease runs past now), or an address that said so.
+    fn active_if_online(&self, now_ms: u64) -> bool {
+        if self.declared_active.load(Ordering::Acquire) {
+            return true;
+        }
+        self.person.load(Ordering::Acquire)
+            && self.fronts.lock().unwrap_or_else(|e| e.into_inner()).values().any(|&until| until > now_ms as i64)
+    }
+
     /// The status it chose, if a person; anyone else is on Automatic.
     fn chosen(&self) -> Status {
         if !self.person.load(Ordering::Acquire) {
@@ -560,6 +616,19 @@ fn enabled(n: &Notify) -> std::pin::Pin<Box<tokio::sync::futures::Notified<'_>>>
     let mut w = Box::pin(n.notified());
     w.as_mut().enable();
     w
+}
+
+/// The sets everyone is told, from one reading of the clock
+/// (`Presence::now_sets`), each sorted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sets {
+    pub online: Vec<String>,
+    /// of them, busy (v2.3.0)
+    pub busy: Vec<String>,
+    /// of them, Do not disturb (v2.3.0; all in `busy` too)
+    pub dnd: Vec<String>,
+    /// of them, active now (v2.6.0)
+    pub active: Vec<String>,
 }
 
 pub struct SyncListener<'a> {

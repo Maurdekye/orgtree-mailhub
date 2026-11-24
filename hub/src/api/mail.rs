@@ -154,12 +154,23 @@ macro_rules! shown_seen {
 }
 pub const SHOWN_SEEN: &str = shown_seen!();
 
+/// The `active_at` everyone is shown (v2.6.0). An Invisible person's is
+/// held as it is: written as they chose Invisible when they were active
+/// then (`sync::status`), and nothing writes it while they stay Invisible.
+macro_rules! shown_active {
+    () => {
+        "identities.active_at"
+    };
+}
+pub const SHOWN_ACTIVE: &str = shown_active!();
+
 const ROSTER_COLS: &str = concat!("slug, org_name, username, blurb, ", shown_seen!(), ", kind,
-    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint, language");
+    (SELECT v - 'data' FROM hub_meta WHERE k = 'profile_picture:' || identities.slug || ':' || identities.fingerprint AND identities.kind IN ('person','org')), fingerprint, language, ",
+    shown_active!());
 
 /// One roster row as v1 sent it (presence from this process).
 pub fn roster_entry(hub: &Hub, r: &tokio_postgres::Row) -> Value {
-    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6), r.get(7), r.get(8))
+    roster_json(hub, &r.get::<_, String>(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6), r.get(7), r.get(8), r.get(9))
 }
 
 pub fn roster_json(
@@ -173,6 +184,7 @@ pub fn roster_json(
     picture: Option<Value>,
     fingerprint: String,
     language: Option<String>,
+    active_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Value {
     let mut value = json!({
         "slug": slug,
@@ -186,6 +198,11 @@ pub fn roster_json(
         "dnd": hub.presence.dnd(slug),
         "last_seen": last_seen.map(clock::iso),
         "kind": if kind.is_empty() { "org".to_string() } else { kind },
+        // v2.6.0: active now (a person's device in use, an org mid-turn), and
+        // when it was last active (a person's device use, an org's last
+        // finished turn, an agent session's last message sent), or null
+        "active": hub.presence.active(slug),
+        "active_at": active_at.map(clock::iso),
     });
     if let Some(picture) = picture { value["picture"] = picture; }
     // v2.4.0: the language a person reads in, for others to see (user
@@ -735,11 +752,38 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if fresh {
         hub.presence.wake([to.as_str()]);
         hub.presence.wake_sync([frm.as_str()]);
+        // v2.6.0: an agent session was last active when it last sent
+        sent_by_session(hub, &frm, received).await?;
     }
     if translating {
         hub.translate.wake.notify_one();
     }
     ok(json!({ "id": mid, "received_at": clock::iso(received), "duplicate": !fresh }))
+}
+
+/// An agent session (kind `chat`) sent a message at `at`: that is when it
+/// was last active (v2.6.0). Its roster row goes out again and the syncs
+/// wake for it. Anyone else's sends leave theirs alone.
+async fn sent_by_session(hub: &Hub, frm: &str, at: chrono::DateTime<chrono::Utc>) -> ApiResult<()> {
+    let mut c = hub.db.get().await?;
+    let kind: Option<String> = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&frm]).await?.map(|r| r.get(0));
+    if kind.as_deref() != Some("chat") {
+        return Ok(());
+    }
+    let tx = c.transaction().await?;
+    sync::roster_lock(&tx).await?;
+    let moved = db::execute(
+        &tx,
+        "UPDATE identities SET active_at = $2, roster_seq = nextval('roster_seq')
+          WHERE slug = $1 AND kind = 'chat' AND (active_at IS NULL OR active_at < $2)",
+        &[&frm, &at],
+    )
+    .await?;
+    tx.commit().await?;
+    if moved > 0 {
+        hub.presence.roster_changed();
+    }
+    Ok(())
 }
 
 /// A body too long for its row (G6): in a file under blobs/, an attachments
