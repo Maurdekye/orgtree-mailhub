@@ -917,11 +917,17 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "active must be true or false"),
     };
     // the sender's clock now, beside its `active_at`: the hub moves the time
-    // by the difference to its own clock (an engine on another machine)
+    // by the difference to its own clock (an engine on another machine).
+    // Within `SKEW_IGNORED` the difference is the request's own latency, not
+    // a clock apart: the time is stored as sent, so saying it again changes
+    // nothing (no row bump, no wake)
     let skew = match body.get("now") {
         None | Some(Value::Null) => chrono::Duration::zero(),
         Some(Value::String(t)) => match clock::parse(t) {
-            Some(t) => clock::now() - t,
+            Some(t) => {
+                let d = clock::now() - t;
+                if d.abs() > SKEW_IGNORED { d } else { chrono::Duration::zero() }
+            }
             None => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "now must be a time (RFC 3339)"),
         },
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "now must be a time (RFC 3339)"),
@@ -972,6 +978,11 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     ok(out)
 }
+
+/// How far apart an org's clock (`POST /api/presence {now}`) and the hub's
+/// may be before the hub corrects its `active_at` (v2.6.0; @coordinator-opus
+/// 2026-11-24 13:16Z): less is the request's latency.
+pub const SKEW_IGNORED: chrono::Duration = chrono::Duration::seconds(2);
 
 /// `POST /api/status {status, slug?}` (v2.3.0): a person chooses how they
 /// show: `auto` (the hub's rules: online, and busy an hour after their last

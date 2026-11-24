@@ -856,7 +856,9 @@ user 2026-11-24 11:44Z). What "active" means depends on the kind:
   it is kept in memory and ends when the address is seen offline, as `busy`
   does. `active_at` left out keeps the stored time; `null` clears it; `now`
   is the sender's clock as it sends, and the hub moves `active_at` by the
-  difference to its own (an engine on another machine); a time later than
+  difference to its own when they are more than 2 seconds apart (an engine
+  on another machine; less is the request's latency, and the time is kept
+  exactly as sent, so saying it again changes nothing); a time later than
   the hub's now is taken as now. It may move back (the org's holder
   changed), so a sender says its posts in order. The answer carries
   `active` and `active_at` only when the request did, so an engine from
