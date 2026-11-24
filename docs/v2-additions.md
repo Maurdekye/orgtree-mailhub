@@ -819,6 +819,56 @@ mail-hub-hubchat-automatic-translation-between-u; the user's answers
   lets `HUB_TRANSLATE_URL` point at plain HTTP; release builds refuse it). No
   real key is used by any test.
 
+## Last active: "last seen" per kind (feature `last_active`, v2.6.0, schema 15)
+
+Hubchat shows when each contact was last active ("active now", "last seen
+5 min ago"; Orgtree docket hubchat-last-seen-time-for-orgs-people-and-indep,
+user 2026-11-24 11:44Z). What "active" means depends on the kind:
+
+| Kind | Active now | `active_at` (last active) |
+| --- | --- | --- |
+| person | one of their devices is in use (`POST /api/devices/active`, see "Active devices") | when one last was: each `true` and `false` writes it, and a lease that runs out writes the moment the hub sees it end |
+| org | it says so: `POST /api/presence {active: true}` (Orgtree: one of the agents in charge of its org mailbox is mid-turn) | what it says, `active_at` (Orgtree: when those agents last finished a turn); now, if it goes offline while active |
+| agent session (`chat`) | never | its last message sent, to anyone |
+
+- **On the wire.** Every roster row carries `"active": true|false` and
+  `"active_at": "<time>"|null` (null: never active, or not known, as for an
+  org whose engine never says it). Every sync answer that carries `online`
+  also carries `active_now`, those of them active now (not `active`, which
+  stays the asker's own other devices in use); it is a part of `online`,
+  like `busy`, and the presence print covers it, so a device in use hears a
+  change at once. The roster row of an address that stops being active is
+  sent again (the presence loop marks it, as for going offline), and so is
+  an org's or an agent session's when its `active_at` moves. The old
+  `last_seen` (the last call) is unchanged.
+- **An org says it** with the fields `active` and `active_at` on
+  `POST /api/presence`:
+
+```
+{"busy": false, "dnd": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z"}
+→ 200 {"slug": "...", "busy": false, "dnd": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z"}
+```
+
+  Both are optional. `active` left out is false; it is kept in memory and
+  ends when the address is seen offline, as `busy` does. `active_at` left out
+  keeps the stored time; `null` clears it; a time later than the hub's now
+  is taken as now. It may move back (the org's holder changed). The answer
+  carries each of the two only when the request did, so an engine from
+  before 2.6.0 gets the answer it always got, and a hub from before 2.6.0
+  ignores the two fields. Refusals: 422 `active must be true or false`,
+  `active_at must be a time (RFC 3339) or null`.
+- **Invisible** (schema 12): an Invisible person is never in `active_now`, and
+  their rows' `active_at` is held at the moment they chose it
+  (`status_since`), as `last_seen` is; their real one keeps moving and shows
+  again when they choose another status.
+- **Who sees it**: everyone the roster reaches, as with presence; there is
+  no separate setting (Invisible hides it).
+- **Schema 15** adds `identities.active_at`, filled at the upgrade from what
+  the hub already has: people from `devices.active_until` (never later than
+  now), agent sessions from their last message sent; orgs start null until
+  their engine says it. `/healthz` lists the feature `last_active`; a client
+  tells a hub without it by that, never by a missing field.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`

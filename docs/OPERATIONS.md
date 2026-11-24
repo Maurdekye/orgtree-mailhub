@@ -367,6 +367,14 @@ existing subscriptions stay UnifiedPush. From then on a hub without schema
 taken before the upgrade, losing what arrived since. Take the two-volume
 backup above before its first start.
 
+⚠ **Mail hub 2.6.0 adds schema 15 (last active), another one-way step.** Its
+first start on an older database adds `identities.active_at` and fills it
+from the devices and messages already there. From then on a hub without
+schema 15 (2.5.1 and older) refuses the database ("the database schema is
+version 15, newer than this hub understands"): going back means restoring a
+backup taken before the upgrade, losing what arrived since. Take the
+two-volume backup above before its first start.
+
 ## Web Push for browsers
 
 From 2.5.1, for Hubchat Web. A browser that turns notifications on

@@ -1,5 +1,16 @@
 # Mail hub development invariants
 
+- 2026-11-24: Last active (feature `last_active`, 2.6.0, schema 15;
+  docs/v2-additions.md "Last active"). `identities.active_at` + the sync
+  `active_now` set (NOT `active`: that key is the asker's own devices in
+  use) (part of `online`, in the presence print only while
+  non-empty). Persons: written by `/api/devices/active` and by
+  `presence_loop` when they leave `active_now`; orgs: what `/api/presence`
+  says, or now when they go offline mid-turn; `chat`: each fresh send.
+  Rows show `SHOWN_ACTIVE` (Invisible held at `status_since`). The
+  `/api/presence` answer echoes `active`/`active_at` only when sent
+  (tests/busy.rs pins the old answer). Proof: tests/last_active.rs.
+
 - 2026-11-11: Web Push for browsers (feature `webpush`, 2.5.1, schema 14,
   Hubchat Web). `POST /api/push` with `kind: "webpush"` adds `vapid` (the
   signing key the BROWSER made: a capability like `auth`, passed to the
