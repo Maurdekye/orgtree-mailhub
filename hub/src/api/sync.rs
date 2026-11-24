@@ -630,6 +630,8 @@ pub(crate) async fn sync_core(hub: &Arc<Hub>, pairs: Vec<crate::auth::Pair>, wai
         let mut stop = false;
         loop {
             let mut listener = hub.presence.sync_listener(&slot);
+            // v2.6.0: soft roster changes so far (read before the check)
+            let soft = hub.presence.soft_roster();
             let batch = sync_check(hub, &slug, cur).await?;
             let in_use = {
                 let c = hub.db.get().await?;
@@ -644,11 +646,14 @@ pub(crate) async fn sync_core(hub: &Arc<Hub>, pairs: Vec<crate::auth::Pair>, wai
             // a pocket is not woken for it)
             // (v2.3.0: or the set busy, or Do not disturb, or the status its
             // address chose)
+            // (v2.6.0: or a roster row marked with no wake of its own, a
+            // last active time: `soft_roster_changed`)
             let online_news = || {
                 in_use
-                    && cur.online.is_some_and(|p| {
-                        p != presence_print(&hub.presence.now_sets(), hub.presence.status(&slug), &slug)
-                    })
+                    && (hub.presence.soft_roster() != soft
+                        || cur.online.is_some_and(|p| {
+                            p != presence_print(&hub.presence.now_sets(), hub.presence.status(&slug), &slug)
+                        }))
             };
             // a heartbeat for a device in use that asked for them (typing,
             // 2026-10-13): a fresh one it was not told yet
@@ -720,7 +725,9 @@ pub async fn presence_loop(hub: Arc<Hub>) {
         let now = hub.presence.now_sets();
         // an org seen offline while it said it was active, even between two
         // looks (`now_sets` notes it whoever called it)
-        let dropped = hub.presence.take_gone_active();
+        let mut dropped = hub.presence.take_gone_active();
+        // one already back online has said, or will say, its own time
+        dropped.retain(|s| now.online.binary_search(s).is_err());
         if now != last || !dropped.is_empty() {
             let gone: Vec<String> = last.online.iter().filter(|s| now.online.binary_search(s).is_err()).cloned().collect();
             let idle: Vec<String> = last.active.iter().filter(|s| now.active.binary_search(s).is_err()).cloned().collect();
@@ -746,16 +753,18 @@ pub async fn presence_loop(hub: Arc<Hub>) {
 }
 
 /// These addresses stopped being active now (v2.6.0) and were last active
-/// now: of `idle` (out of the set since the last look), the people (not one
-/// who went Invisible: theirs was written as they chose it, and holds);
-/// and every one of `dropped` (seen offline while it said it was active:
-/// an org gone mid-turn). An org whose turn ended said its own time.
+/// now: of `idle` (out of the set since the last look), the people (a lease
+/// that ran out, a device put down, or one who chose Invisible while in use:
+/// their time is this look's, as it would be had they gone offline, never
+/// the moment they chose; nothing writes it while they stay Invisible); and
+/// every org of `dropped` (seen offline while it said it was active, and not
+/// back). An org whose turn ended said its own time.
 async fn active_ended(hub: &Hub, idle: &[String], dropped: &[String]) -> anyhow::Result<()> {
     let c = hub.db.get().await?;
     db::execute(
         &c,
         "UPDATE identities SET active_at = $3
-          WHERE (slug = ANY($1) AND kind = 'person' AND status <> 'invisible') OR slug = ANY($2)",
+          WHERE (slug = ANY($1) AND kind = 'person') OR (slug = ANY($2) AND kind NOT IN ('person', 'chat'))",
         &[&idle, &dropped, &clock::now()],
     )
     .await?;
@@ -847,6 +856,8 @@ pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     seen_device(&c, &slug, &device, None).await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
+    // v2.6.0: a `false` from a device that was not in use is no visit
+    let was_in_use = device_in_use(&c, &slug, &device).await?;
     let now = clock::now();
     let until = on.then(|| now + chrono::Duration::from_std(ACTIVE_FOR).unwrap_or_default());
     // v2.3.0: a device put down keeps when it stopped (in the past, so not
@@ -857,7 +868,9 @@ pub async fn active(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // v2.6.0: in use now, or stopped now: a person's last active (their
     // roster row goes out again when they leave the set active); held
     // while they are Invisible
-    db::execute(&c, "UPDATE identities SET active_at = $2 WHERE slug = $1 AND kind = 'person' AND status <> 'invisible'", &[&slug, &now]).await?;
+    if on || was_in_use {
+        db::execute(&c, "UPDATE identities SET active_at = $2 WHERE slug = $1 AND kind = 'person' AND status <> 'invisible'", &[&slug, &now]).await?;
+    }
     // its parked sync, if any, reads again whether it is in use: in use, it
     // answers for a change in the set online it was not woken for (v2.0.2);
     // no longer in use, it stops being woken for them (v2.0.3)
@@ -903,18 +916,33 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         None | Some(Value::Null) => false,
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "active must be true or false"),
     };
+    // the sender's clock now, beside its `active_at`: the hub moves the time
+    // by the difference to its own clock (an engine on another machine)
+    let skew = match body.get("now") {
+        None | Some(Value::Null) => chrono::Duration::zero(),
+        Some(Value::String(t)) => match clock::parse(t) {
+            Some(t) => clock::now() - t,
+            None => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "now must be a time (RFC 3339)"),
+        },
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "now must be a time (RFC 3339)"),
+    };
     let active_at = match body.get("active_at") {
         None => None,
         Some(Value::Null) => Some(None),
-        // never later than now (another machine's clock)
+        // on the hub's clock, and never later than its now
         Some(Value::String(t)) => match clock::parse(t) {
-            Some(t) => Some(Some(t.min(clock::now()))),
+            Some(t) => Some(Some((t + skew).min(clock::now()))),
             None => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "active_at must be a time (RFC 3339) or null"),
         },
         Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "active_at must be a time (RFC 3339) or null"),
     };
     let mut c = hub.db.get().await?;
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
+    // only an org says these two (a person's come from their devices, an
+    // agent session's from its sends): anyone else's are ignored
+    let kind: String = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&slug]).await?.map(|r| r.get(0)).unwrap_or_default();
+    let org = kind.is_empty() || kind == "org";
+    let (active, active_at) = if org { (active, active_at) } else { (false, None) };
     if let Some(at) = active_at {
         // a new time sends its roster row again, and wakes the syncs for it
         let tx = c.transaction().await?;
@@ -926,8 +954,9 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         )
         .await?;
         tx.commit().await?;
+        // devices in use hear it at once; the rest with their next answer
         if moved > 0 {
-            hub.presence.roster_changed();
+            hub.presence.soft_roster_changed();
         }
     }
     hub.presence.declare_busy(&slug, busy);
@@ -935,7 +964,7 @@ pub async fn presence(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     hub.presence.declare_active(&slug, active);
     let mut out = json!({ "slug": slug, "busy": busy, "dnd": dnd });
     // the v2.6.0 fields are answered only to a caller that sent them
-    if body.contains_key("active") {
+    if org && body.contains_key("active") {
         out["active"] = json!(active);
     }
     if let Some(at) = active_at {
@@ -975,18 +1004,17 @@ pub async fn status(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         return refuse(StatusCode::UNPROCESSABLE_ENTITY, "status must be auto, online, busy, dnd or invisible");
     };
     let c = hub.db.get().await?;
-    // v2.6.0: active now as they go Invisible: their `active_at` is now; it
-    // then stays put while they are Invisible (nothing writes it)
-    let active_now = status == Status::Invisible && hub.presence.active(&slug);
     // Invisible holds the `last_seen` others see at this moment (kept when
-    // already Invisible); any other status clears it
+    // already Invisible); any other status clears it. v2.6.0: one in use
+    // as they choose it leaves the set active, and the presence loop's next
+    // look writes their `active_at` (`active_ended`), as for going offline;
+    // then nothing writes it while they stay Invisible
     let kept = db::execute(
         &c,
         "UPDATE identities SET status = $2,
-                status_since = CASE WHEN $2 <> 'invisible' THEN NULL WHEN status = 'invisible' THEN status_since ELSE $3 END,
-                active_at = CASE WHEN $4 AND status <> 'invisible' THEN $3 ELSE active_at END
+                status_since = CASE WHEN $2 <> 'invisible' THEN NULL WHEN status = 'invisible' THEN status_since ELSE $3 END
           WHERE slug = $1 AND kind = 'person'",
-        &[&slug, &status.as_str(), &clock::now(), &active_now],
+        &[&slug, &status.as_str(), &clock::now()],
     )
     .await?;
     if kept == 0 {

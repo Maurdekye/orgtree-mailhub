@@ -155,8 +155,8 @@ macro_rules! shown_seen {
 pub const SHOWN_SEEN: &str = shown_seen!();
 
 /// The `active_at` everyone is shown (v2.6.0). An Invisible person's is
-/// held as it is: written as they chose Invisible when they were active
-/// then (`sync::status`), and nothing writes it while they stay Invisible.
+/// held as it is: nothing writes it while they stay Invisible
+/// (`sync::active_ended`).
 macro_rules! shown_active {
     () => {
         "identities.active_at"
@@ -752,8 +752,11 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if fresh {
         hub.presence.wake([to.as_str()]);
         hub.presence.wake_sync([frm.as_str()]);
-        // v2.6.0: an agent session was last active when it last sent
-        sent_by_session(hub, &frm, received).await?;
+        // v2.6.0: an agent session was last active when it last sent (the
+        // message is stored: a failure here is logged, the send stands)
+        if let Err(e) = sent_by_session(hub, &frm, received).await {
+            tracing::warn!(error = ?e, "could not keep when an agent session was last active");
+        }
     }
     if translating {
         hub.translate.wake.notify_one();
@@ -762,8 +765,9 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
 }
 
 /// An agent session (kind `chat`) sent a message at `at`: that is when it
-/// was last active (v2.6.0). Its roster row goes out again and the syncs
-/// wake for it. Anyone else's sends leave theirs alone.
+/// was last active (v2.6.0). Its roster row goes out again: devices in use
+/// hear it at once, the rest with their next answer (no wake for a phone in
+/// a pocket). Anyone else's sends leave theirs alone.
 async fn sent_by_session(hub: &Hub, frm: &str, at: chrono::DateTime<chrono::Utc>) -> ApiResult<()> {
     let mut c = hub.db.get().await?;
     let kind: Option<String> = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&frm]).await?.map(|r| r.get(0));
@@ -781,7 +785,7 @@ async fn sent_by_session(hub: &Hub, frm: &str, at: chrono::DateTime<chrono::Utc>
     .await?;
     tx.commit().await?;
     if moved > 0 {
-        hub.presence.roster_changed();
+        hub.presence.soft_roster_changed();
     }
     Ok(())
 }

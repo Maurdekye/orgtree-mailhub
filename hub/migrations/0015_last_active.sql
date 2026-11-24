@@ -12,13 +12,18 @@
 ALTER TABLE identities ADD COLUMN active_at timestamptz;
 
 -- a person: the latest moment one of their devices was in use, never later
--- than now (a device in use holds a lease that ends in the future)
-UPDATE identities i SET active_at = d.at
+-- than now (a device in use holds a lease that ends in the future); an
+-- Invisible person's never later than when they chose it (their devices'
+-- use went on: it must not show). Each row filled moves to the head of the
+-- roster's change log, so devices that already hold a roster cursor get it.
+UPDATE identities i
+   SET active_at = CASE WHEN i.status = 'invisible' THEN LEAST(d.at, i.status_since) ELSE d.at END,
+       roster_seq = nextval('roster_seq')
   FROM (SELECT slug, LEAST(max(active_until), now()) AS at FROM devices
          WHERE active_until IS NOT NULL AND revoked_at IS NULL GROUP BY slug) d
- WHERE i.slug = d.slug AND i.kind = 'person';
+ WHERE i.slug = d.slug AND i.kind = 'person' AND (i.status <> 'invisible' OR i.status_since IS NOT NULL);
 
 -- an agent session: its last message sent to anyone
-UPDATE identities i SET active_at = m.at
+UPDATE identities i SET active_at = m.at, roster_seq = nextval('roster_seq')
   FROM (SELECT from_slug AS slug, max(received_at) AS at FROM messages GROUP BY from_slug) m
  WHERE i.slug = m.slug AND i.kind = 'chat';

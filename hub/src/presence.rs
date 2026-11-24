@@ -209,6 +209,11 @@ pub struct Presence {
     /// they were last active then; the presence loop takes them
     /// (`take_gone_active`) and keeps that time
     gone_active: Mutex<Vec<String>>,
+    /// roster rows marked changed with no wake of their own (v2.6.0: a last
+    /// active time moved): counted, so a parked sync of a device in use
+    /// answers for it (`soft_roster_changed`) and a phone in a pocket is not
+    /// woken
+    soft_roster: AtomicU64,
 }
 
 impl Default for Presence {
@@ -220,6 +225,7 @@ impl Default for Presence {
             online: Notify::new(),
             link: Notify::new(),
             gone_active: Mutex::new(Vec::new()),
+            soft_roster: AtomicU64::new(0),
         }
     }
 }
@@ -410,6 +416,20 @@ impl Presence {
     /// The roster changed: wake every parked sync.
     pub fn roster_changed(&self) {
         self.roster.notify_waiters();
+    }
+
+    /// A roster row was marked changed with no wake of its own (v2.6.0: an
+    /// org's or an agent session's last active time moved): a parked sync of
+    /// a device in use answers for it, as for a change in the sets; the rest
+    /// get it with their next answer.
+    pub fn soft_roster_changed(&self) {
+        self.soft_roster.fetch_add(1, Ordering::AcqRel);
+        self.online.notify_waiters();
+    }
+
+    /// How many soft roster changes there have been (`soft_roster_changed`).
+    pub fn soft_roster(&self) -> u64 {
+        self.soft_roster.load(Ordering::Acquire)
     }
 
     /// The set online changed: wake every parked sync (only a device in use
