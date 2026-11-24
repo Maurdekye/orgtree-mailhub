@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use mailhub::api::sync::presence_loop;
-use mailhub::presence::HANG_UP_GRACE;
+use mailhub::api::sync::ACTIVE_FOR;
+use mailhub::presence::{HANG_UP_GRACE, PRESENCE_WINDOW};
 use mailhub::Hub;
 use serde_json::{json, Value};
 use support::*;
@@ -146,6 +147,40 @@ async fn roster_row(hub: &Arc<Hub>, viewer: &Id, slug: &str) -> Value {
     r["roster"].as_array().unwrap().iter().find(|e| e["slug"] == json!(slug)).cloned().unwrap_or_else(|| panic!("no {slug} in {r}"))
 }
 
+/// The row once its `active_at` is no longer `was` (the presence loop writes
+/// it within a second of what a sync already shows), for up to 3 s.
+async fn row_moved(hub: &Arc<Hub>, viewer: &Id, slug: &str, was: &Value) -> Value {
+    let t0 = Instant::now();
+    loop {
+        let row = roster_row(hub, viewer, slug).await;
+        if &row["active_at"] != was || t0.elapsed() > Duration::from_secs(3) {
+            return row;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Sync `device` until it is caught up; its cursor.
+async fn caught_up(hub: &Arc<Hub>, who: &Id, device: &str) -> Value {
+    let mut cursor = Value::Null;
+    loop {
+        let mut body = json!({ "device_id": device, "wait": 0 });
+        if !cursor.is_null() {
+            body["cursor"] = cursor.clone();
+        }
+        let a = post(hub, who, "/api/sync", body).await.json();
+        cursor = a["cursor"].clone();
+        if a["more"] != json!(true) {
+            return cursor;
+        }
+    }
+}
+
+fn park_sync(hub: &Arc<Hub>, who: &Id, device: &str, cursor: &Value, wait: u64) -> JoinHandle<Value> {
+    let (h, w, body) = (hub.clone(), who.clone(), json!({ "device_id": device, "cursor": cursor, "wait": wait }));
+    tokio::spawn(async move { Call::new("POST", "/api/sync").auth(pair(&w.0, &w.1)).json(body).send(&h).await.json() })
+}
+
 fn data_dir(name: &str) -> std::path::PathBuf {
     let data = std::env::temp_dir().join(format!("orgtree-hub-{name}-{}", token_hex16()));
     std::fs::create_dir_all(&data).unwrap();
@@ -189,13 +224,17 @@ async fn a_person_is_active_while_a_device_is_in_use() {
     assert!(before <= t && t <= after, "active_at {t} not when the device was put down ({before}..{after})");
     println!("  ok  put down: out of active, active_at = when it stopped (the roster row is sent again)");
 
-    // Invisible: never active, active_at held at the moment chosen
+    // Invisible: never active; active_at written by the presence loop's next
+    // look (as for going offline), then held
     in_use(&hub, &pat, "pat-phone", true).await;
     w.sees_active(&hub, &pat, true).await;
+    let in_use_at = roster_row(&hub, &wes, &pat.0).await["active_at"].clone();
     let r = post(&hub, &pat, "/api/status", json!({ "status": "invisible" })).await;
     assert_eq!(r.code(), 200, "{}", r.text());
     w.sees_active(&hub, &pat, false).await;
-    let held = roster_row(&hub, &wes, &pat.0).await["active_at"].clone();
+    let row = row_moved(&hub, &wes, &pat.0, &in_use_at).await;
+    let held = row["active_at"].clone();
+    assert_ne!(held, row["last_seen"], "no exact tie with the held last_seen (a custom client could tell Invisible by it): {row}");
     tokio::time::sleep(Duration::from_millis(1100)).await;
     in_use(&hub, &pat, "pat-phone", false).await;
     in_use(&hub, &pat, "pat-phone", true).await;
@@ -286,9 +325,11 @@ async fn an_org_is_active_while_it_says_so_and_says_when_it_last_was() {
     w.sees_active(&hub, &acme, true).await;
     let before = Utc::now() - chrono::Duration::seconds(1);
     acme_poll.abort();
-    // the hang-up lands when the aborted task is dropped
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    hub.presence.advance(HANG_UP_GRACE + Duration::from_secs(1));
+    // the hang-up lands when the aborted task is dropped: wait for it
+    let _ = acme_poll.await;
+    // past the grace after a hang-up, and past the window after its last
+    // call (should the poll have answered before the abort)
+    hub.presence.advance(HANG_UP_GRACE + PRESENCE_WINDOW + Duration::from_secs(1));
     w.sees_offline(&hub, &acme).await;
     // the presence loop writes it as it sees the org go (a sync may see the
     // set first): wait up to 3 s for the row
@@ -371,4 +412,199 @@ async fn a_sync_carries_changed_active_at_rows() {
     let row = a["roster"].as_array().unwrap().iter().find(|e| e["slug"] == json!(acme.0)).cloned();
     assert_eq!(row.map(|r| r["active_at"].clone()), Some(json!("2026-11-24T11:00:00.000Z")), "{a}");
     println!("  ok  a new active_at sends the org's roster row again to synced devices");
+}
+
+#[tokio::test]
+async fn a_lease_that_runs_out_ends_the_visit() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubseenlapse").await;
+    let data = data_dir("seen-lapse");
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let pat = register(&hub, "pat", "person").await;
+    let wes = register(&hub, "wes", "person").await;
+    let mut w = Watcher::new(&wes);
+    let _pat_poll = park_poll(&hub, &pat);
+
+    // Hubchat crashed in use: no `false` ever comes
+    in_use(&hub, &pat, "pat-phone", true).await;
+    w.sees_active(&hub, &pat, true).await;
+    // the presence loop looks once a second (a real lease lasts 90 s)
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let sql = sql_client(&url).await;
+    sql.execute("UPDATE identities SET active_at = now() - interval '1 hour' WHERE slug = $1", &[&pat.0]).await.unwrap();
+    let was = roster_row(&hub, &wes, &pat.0).await["active_at"].clone();
+    let before = Utc::now() - chrono::Duration::seconds(1);
+    hub.presence.advance(ACTIVE_FOR + Duration::from_secs(1));
+    w.sees_active(&hub, &pat, false).await;
+    let row = row_moved(&hub, &wes, &pat.0, &was).await;
+    let after = Utc::now() + chrono::Duration::seconds(1);
+    let t = at(&row["active_at"]);
+    assert!(before <= t && t <= after, "the lease ran out: active_at {t} is when the hub saw it end ({before}..{after})");
+    println!("  ok  a lease that runs out (no false): out of active_now, active_at = when the hub saw it end");
+
+    // a `false` from a device that was never in use is no visit
+    let r = post(&hub, &wes, "/api/devices/active", json!({ "device_id": "wes-tablet", "active": false })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(roster_row(&hub, &pat, &wes.0).await["active_at"], Value::Null);
+    println!("  ok  a put-down from a device that was not in use leaves active_at alone");
+}
+
+#[tokio::test]
+async fn only_devices_in_use_hear_a_moved_time() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubseensoft").await;
+    let data = data_dir("seen-soft");
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let bot = register(&hub, "bot", "chat").await;
+    let other = register(&hub, "other", "person").await;
+    let wes = register(&hub, "wes", "person").await;
+    let desk = caught_up(&hub, &wes, "wes-desk").await;
+    let phone = caught_up(&hub, &wes, "wes-phone").await;
+    in_use(&hub, &wes, "wes-desk", true).await;
+    let desk_sync = park_sync(&hub, &wes, "wes-desk", &desk, 8);
+    let phone_sync = park_sync(&hub, &wes, "wes-phone", &phone, 8);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!desk_sync.is_finished() && !phone_sync.is_finished(), "both parked");
+
+    let r = post(&hub, &bot, "/api/send", json!({ "to": other.0, "body": "hello" })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let a = tokio::time::timeout(Duration::from_secs(3), desk_sync).await.expect("the desk (in use) answers at once").unwrap();
+    let row = a["roster"].as_array().unwrap().iter().find(|e| e["slug"] == json!(bot.0)).cloned();
+    assert!(row.is_some_and(|r| !r["active_at"].is_null()), "the desk is sent the session's new time: {a}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!phone_sync.is_finished(), "a phone in a pocket is not woken by a session's send to someone else");
+    println!("  ok  a session's send: a device in use hears its new time at once; a parked phone not in use sleeps on");
+    let a = phone_sync.await.unwrap();
+    assert!(a["roster"].as_array().unwrap().iter().any(|e| e["slug"] == json!(bot.0)), "and gets it with its next answer: {a}");
+    println!("  ok  the phone gets it with its next answer");
+}
+
+#[tokio::test]
+async fn the_times_hold_across_a_restart() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubseenrestart").await;
+    let data = data_dir("seen-restart");
+    let first = hub(&url, &data, &[]).await;
+    let acme = register(&first, "acme", "org").await;
+    let pat = register(&first, "pat", "person").await;
+    let wes = register(&first, "wes", "person").await;
+    say(&first, &acme, json!({ "busy": false, "active": true, "active_at": "2026-11-24T11:00:00.000Z" })).await;
+    in_use(&first, &pat, "pat-phone", true).await;
+    in_use(&first, &pat, "pat-phone", false).await;
+    let pat_at = roster_row(&first, &wes, &pat.0).await["active_at"].clone();
+    assert!(!pat_at.is_null());
+    first.shutdown.cancel();
+    drop(first);
+
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let row = roster_row(&hub, &wes, &acme.0).await;
+    assert_eq!((row["active"].clone(), row["active_at"].clone()), (json!(false), json!("2026-11-24T11:00:00.000Z")), "{row}");
+    assert_eq!(roster_row(&hub, &wes, &pat.0).await["active_at"], pat_at);
+    println!("  ok  after a restart: times kept, an org's active ended (it says it again on reconnect)");
+}
+
+#[tokio::test]
+async fn only_an_org_says_it_and_its_clock_is_corrected() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubseenkinds").await;
+    let data = data_dir("seen-kinds");
+    let hub = hub(&url, &data, &[]).await;
+    tokio::spawn(presence_loop(hub.clone()));
+    let acme = register(&hub, "acme", "org").await;
+    let bot = register(&hub, "bot", "chat").await;
+    let pat = register(&hub, "pat", "person").await;
+    let wes = register(&hub, "wes", "person").await;
+    let mut w = Watcher::new(&wes);
+    let (_b, _p) = (park_poll(&hub, &bot), park_poll(&hub, &pat));
+    for who in [&bot, &pat] {
+        let a = say(&hub, who, json!({ "busy": false, "active": true, "active_at": "2026-11-24T11:00:00.000Z" })).await;
+        assert_eq!(a, json!({ "slug": who.0, "busy": false, "dnd": false }), "not taken, not answered");
+        w.sees_active(&hub, who, false).await;
+        assert_eq!(roster_row(&hub, &wes, &who.0).await["active_at"], Value::Null);
+    }
+    println!("  ok  an agent session or a person saying active/active_at: ignored");
+
+    // the engine's clock a minute behind the hub's: its times read a minute later
+    let real = Utc::now();
+    let iso = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let a = say(&hub, &acme, json!({ "busy": false, "active": false,
+        "active_at": iso(real - chrono::Duration::seconds(120)), "now": iso(real - chrono::Duration::seconds(60)) })).await;
+    let t = at(&a["active_at"]);
+    assert!((t - (real - chrono::Duration::seconds(60))).num_seconds().abs() <= 3, "behind: moved on by the difference ({t})");
+    // an hour ahead: moved back by the hour, not merely clamped to now
+    let a = say(&hub, &acme, json!({ "busy": false, "active": false,
+        "active_at": iso(real + chrono::Duration::seconds(3500)), "now": iso(real + chrono::Duration::seconds(3600)) })).await;
+    let t = at(&a["active_at"]);
+    assert!((t - (real - chrono::Duration::seconds(100))).num_seconds().abs() <= 3, "ahead: moved back by the difference ({t})");
+    let r = post(&hub, &acme, "/api/presence", json!({ "busy": false, "now": "soon" })).await;
+    assert_eq!((r.code(), r.json()["detail"].clone()), (422, json!("now must be a time (RFC 3339)")), "{}", r.text());
+    println!("  ok  an org's active_at is moved onto the hub's clock by its now (behind and ahead); a bad now is refused");
+}
+
+#[tokio::test]
+async fn the_upgrade_fills_last_active_from_what_the_hub_has() {
+    let pg = TestPg::start();
+    let url = pg.fresh_db("hubseenbackfill").await;
+    let data = data_dir("seen-backfill");
+    let first = hub(&url, &data, &[]).await;
+    let pat = register(&first, "pat", "person").await;
+    let ivy = register(&first, "ivy", "person").await;
+    let wes = register(&first, "wes", "person").await;
+    let bot = register(&first, "bot", "chat").await;
+    let acme = register(&first, "acme", "org").await;
+    for who in [&pat, &ivy] {
+        in_use(&first, who, "phone", true).await;
+        in_use(&first, who, "phone", false).await;
+    }
+    let r = post(&first, &ivy, "/api/status", json!({ "status": "invisible" })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let r = post(&first, &bot, "/api/send", json!({ "to": wes.0, "body": "hello" })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let sent = at(&r.json()["received_at"]);
+    first.shutdown.cancel();
+    drop(first);
+
+    // the database as a 2.5.1 hub left it: Ivy went Invisible an hour ago and
+    // kept using the app since; schema 14, no active_at
+    let sql = sql_client(&url).await;
+    sql.batch_execute(&format!(
+        "UPDATE identities SET status_since = now() - interval '1 hour' WHERE slug = '{ivy}';
+         UPDATE devices SET active_until = now() - interval '2 minutes' WHERE slug IN ('{ivy}', '{pat}');
+         ALTER TABLE identities DROP COLUMN active_at;
+         UPDATE hub_meta SET v = to_jsonb(14) WHERE k = 'schema_version';",
+        ivy = ivy.0, pat = pat.0
+    ))
+    .await
+    .unwrap();
+    let seq: i64 = sql.query_one("SELECT max(roster_seq) FROM identities", &[]).await.unwrap().get(0);
+    let ivy_since: DateTime<Utc> = sql.query_one("SELECT status_since FROM identities WHERE slug = $1", &[&ivy.0]).await.unwrap().get(0);
+    let pat_until: DateTime<Utc> = sql.query_one("SELECT active_until FROM devices WHERE slug = $1", &[&pat.0]).await.unwrap().get(0);
+
+    let hub = hub(&url, &data, &[]).await;
+    let row = |slug: String| {
+        let hub = hub.clone();
+        let wes = wes.clone();
+        async move { roster_row(&hub, &wes, &slug).await }
+    };
+    let ms = |a: DateTime<Utc>, b: DateTime<Utc>| (a - b).num_milliseconds().abs();
+    assert!(ms(at(&row(pat.0.clone()).await["active_at"]), pat_until) <= 1, "a person: their devices' last use");
+    assert!(ms(at(&row(ivy.0.clone()).await["active_at"]), ivy_since) <= 1, "an Invisible person: never later than when they chose it");
+    assert!(ms(at(&row(bot.0.clone()).await["active_at"]), sent) <= 1, "an agent session: its last message sent");
+    assert_eq!(row(acme.0.clone()).await["active_at"], Value::Null, "an org: until its engine says it");
+    assert_eq!(row(wes.0.clone()).await["active_at"], Value::Null, "a person with no device ever in use: none");
+    println!("  ok  schema 15 fills active_at: people from their devices (Invisible held), sessions from their sends");
+    let moved: Vec<String> = sql
+        .query("SELECT slug FROM identities WHERE roster_seq > $1 ORDER BY slug", &[&seq])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let mut want = vec![pat.0.clone(), ivy.0.clone(), bot.0.clone()];
+    want.sort();
+    assert_eq!(moved, want, "each row filled is sent again to devices that hold a roster cursor");
+    println!("  ok  the rows it fills move to the head of the roster's change log");
 }
