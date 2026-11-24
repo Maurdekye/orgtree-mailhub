@@ -916,6 +916,11 @@ GET  /api/blocks?slug=
   whenever either changes. Both are folded into the cursor's presence print,
   so a device in use hears at once and the rest with their next answer.
   Nobody is told anyone else's blocks.
+- **Polls too.** A `/api/poll` answer carries `"blocking": {"<slug>": {"blocks":
+  [...], "blocked_by": [...]}}` for each polling address that blocks anyone or
+  is blocked (Orgtree polls). It is left out when there is none, so such an
+  answer is as before. A change is not a wake: the next answer carries it
+  (at most the poll's `wait` later).
 - **Owner.** A block belongs to its owner: the blocker's address and its
   secret's fingerprint. While the address is unregistered its blocks do not
   count; the same owner registering again gets them back; a new owner of a

@@ -318,3 +318,29 @@ async fn an_address_may_block_at_most_the_limit() {
     assert_eq!(block(&hub, &ann, "one.more", true).await.code(), 200, "a freed place");
     println!("  ok  {} blocks at most", mailhub::blocks::MAX_BLOCKS);
 }
+
+#[tokio::test]
+async fn an_orgs_poll_carries_whom_it_blocks_and_who_blocks_it() {
+    let (_pg, hub, _url) = test_hub("hubblockpoll").await;
+    let org = register(&hub, "org", "org").await;
+    let other = register(&hub, "acme", "org").await;
+    let ann = register(&hub, "ann", "person").await;
+    let poll = |who: Id| {
+        let h = hub.clone();
+        async move { Call::new("POST", "/api/poll?wait=0").auth(pair(&who.0, &who.1)).send(&h).await.json() }
+    };
+    let p = poll(org.clone()).await;
+    assert!(p.get("blocking").is_none(), "nothing blocked: the answer is as before: {p}");
+    assert_eq!(block(&hub, &org, &ann.0, true).await.code(), 200);
+    assert_eq!(block(&hub, &ann, &org.0, true).await.code(), 200);
+    let p = poll(org.clone()).await;
+    assert_eq!(p["blocking"][&org.0], json!({ "blocks": [ann.0], "blocked_by": [ann.0] }), "{p}");
+    // a poll for several orgs lists each one that has any, only its own
+    let both = Call::new("POST", "/api/poll?wait=0").auth(format!("{} {}", pair(&org.0, &org.1), pair(&other.0, &other.1))).send(&hub).await.json();
+    assert!(both["blocking"].get(&other.0).is_none(), "{both}");
+    assert_eq!(both["blocking"][&org.0]["blocks"], json!([ann.0]));
+    assert_eq!(block(&hub, &org, &ann.0, false).await.code(), 200);
+    assert_eq!(block(&hub, &ann, &org.0, false).await.code(), 200);
+    assert!(poll(org.clone()).await.get("blocking").is_none());
+    println!("  ok  an org's poll carries blocks and blocked_by, left out when none");
+}

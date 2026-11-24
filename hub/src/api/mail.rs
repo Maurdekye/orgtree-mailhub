@@ -546,7 +546,22 @@ async fn poll_answer(hub: &Hub, slugs: &[String], messages: Vec<Value>, receipts
     let c = hub.db.get().await?;
     mark_seen(hub, &c, slugs).await?;
     let roster = roster(hub, &c).await?;
-    ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "messages": messages, "receipts": receipts, "roster": roster }))
+    let mut out = json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "messages": messages, "receipts": receipts, "roster": roster });
+    // v2.6.0: for each polling address that blocks anyone or is blocked,
+    // whom it blocks and who blocks it (Orgtree polls; the user's 19:06Z
+    // "Show it in their DM" holds for orgs too). Left out when there is
+    // none, so such an answer is as before.
+    let mut blocking = serde_json::Map::new();
+    for s in slugs {
+        let (mine, by) = (hub.blocks.of(s), hub.blocks.by(s));
+        if !mine.is_empty() || !by.is_empty() {
+            blocking.insert(s.clone(), json!({ "blocks": *mine, "blocked_by": *by }));
+        }
+    }
+    if !blocking.is_empty() {
+        out["blocking"] = Value::Object(blocking);
+    }
+    ok(out)
 }
 
 // ----------------------------------------------------------------------- ack
