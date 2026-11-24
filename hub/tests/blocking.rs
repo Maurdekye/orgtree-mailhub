@@ -305,7 +305,7 @@ async fn an_address_may_block_at_most_the_limit() {
     let n = mailhub::blocks::MAX_BLOCKS as i64 - 1;
     c.execute(
         "INSERT INTO blocks (blocker, blocker_fp, blocked)
-         SELECT $1, i.fingerprint, 'x' || g FROM identities i, generate_series(1, $2) g WHERE i.slug = $1",
+         SELECT $1, i.fingerprint, 'x' || g FROM identities i, generate_series(1, $2::bigint) g WHERE i.slug = $1",
         &[&ann.0, &n],
     )
     .await

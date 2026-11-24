@@ -375,6 +375,9 @@ version 15, newer than this hub understands"): going back means restoring a
 backup taken before the upgrade, losing what arrived since. Take the
 two-volume backup above before its first start.
 
+Mail hub 2.6.0 also adds schema 16 (blocks) in the same first start: a table
+of who blocks whom, empty at first. Going back is the same restore.
+
 ## Web Push for browsers
 
 From 2.5.1, for Hubchat Web. A browser that turns notifications on

@@ -884,6 +884,46 @@ user 2026-11-24 11:44Z). What "active" means depends on the kind:
   devices that already hold a roster cursor are sent them. `/healthz` lists the feature `last_active`; a client
   tells a hub without it by that, never by a missing field.
 
+## Blocking (feature `blocking`, v2.6.0, schema 16)
+
+An address blocks another, and the hub enforces it, so a modified client
+cannot get around it (user 2026-11-24, Orgtree docket
+blocking-contacts-on-the-hub-hubchat-1-4-0-orgtr).
+
+```
+POST /api/blocks {"address": "<slug>", "blocked": true|false, "slug"?}
+GET  /api/blocks?slug=
+→ 200 {"blocked": ["<slug>", ...]}      (oldest first)
+```
+
+- Any identity kind may block or be blocked. Idempotent. An address the hub
+  does not know may be blocked ahead of time. 422 for itself, a malformed
+  address, a missing or non-boolean `blocked`, or a 10,001st block.
+- **Sends.** Inside the send transaction, under the recipient's row lock (which
+  a block's write takes too), a send from a blocked address to its blocker is
+  refused: `403 {"detail": "you have been blocked by @<to> and cannot message
+  them", "blocked_by": "<to>"}`. Blocking is two-way (user 19:06Z): the
+  blocker's own send to the one it blocks is refused too, `403 {"detail":
+  "you blocked @<to>; unblock them to message them", "blocking": "<to>"}`.
+  Nothing is stored, no push is queued, nothing is translated. A retry of
+  mail the hub accepted before the block stays accepted; mail accepted
+  before it is delivered and kept as usual.
+- **Typing.** A heartbeat between the two is answered as any other and never
+  relayed.
+- **Both sides are told.** Sync answers carry `blocks` (whom this address
+  blocks, oldest first) and `blocked_by` (who blocks it, so its DM can say
+  so before it tries; user 19:06Z) beside `online`: in the first answer and
+  whenever either changes. Both are folded into the cursor's presence print,
+  so a device in use hears at once and the rest with their next answer.
+  Nobody is told anyone else's blocks.
+- **Owner.** A block belongs to its owner: the blocker's address and its
+  secret's fingerprint. While the address is unregistered its blocks do not
+  count; the same owner registering again gets them back; a new owner of a
+  freed address inherits none (registering deletes a previous owner's rows).
+- Presence is not hidden from a blocked address (user 19:06Z, Q3).
+- `/healthz` lists `blocking`. Schema 16 is one-way: a hub without it refuses
+  the database.
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`
@@ -891,7 +931,7 @@ user 2026-11-24 11:44Z). What "active" means depends on the kind:
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), `translate` (2.4.0), and `webpush` (2.5.1). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), `translate` (2.4.0), `webpush` (2.5.1), and `last_active` and `blocking` (2.6.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 

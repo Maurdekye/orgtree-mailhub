@@ -1,5 +1,23 @@
 # Mail hub development invariants
 
+- 2026-11-24: Blocking (feature `blocking`, 2.6.0, schema 16;
+  docs/v2-additions.md "Blocking"). The DATABASE decides sends:
+  `blocks::refusal` runs inside `send`'s transaction after the recipient's
+  `FOR UPDATE` and after the retried-id shortcut; `/api/blocks` takes the
+  blocker's row lock too, so the two are ordered. The memory mirror
+  (`hub.blocks`, loaded in `server::prepare`, changed only by this process's
+  writes, register, unregister and the idle prune) serves only heartbeats and
+  the sync print: keep it so. Blocks count only while their owner (address +
+  `blocker_fp`) holds the address; registering deletes another owner's rows.
+  Two-way is ONE switch, `blocks::TWO_WAY` (user 19:06Z Q2: two-way). The
+  403 words are the user's ("you have been blocked by @<to> and cannot
+  message them"); the blocked side also gets `blocked_by` in its sync (user
+  19:06Z Q4). A test that fakes an older schema must drop `blocks` too.
+  [decided: user 2026-11-24 18:56Z m020bbd1926c3, 19:06Z m61f5367a61e7 via
+  Orgtree docket blocking-contacts-on-the-hub-hubchat-1-4-0-orgtr; verified:
+  hub/src/blocks.rs, api/blocks.rs, api/mail.rs, api/sync.rs, api/typing.rs,
+  migrations/0016_blocks.sql; tests/blocking.rs]
+
 - 2026-11-24: Last active (feature `last_active`, 2.6.0, schema 15;
   docs/v2-additions.md "Last active"). `identities.active_at` + the sync
   `active_now` set (NOT `active`: that key is the asker's own devices in
