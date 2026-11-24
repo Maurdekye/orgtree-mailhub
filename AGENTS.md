@@ -5,9 +5,11 @@
   `active_now` set (NOT `active`: that key is the asker's own devices in
   use) (part of `online`, in the presence print only while
   non-empty). Persons: written by `/api/devices/active` and by
-  `presence_loop` when they leave `active_now`; orgs: what `/api/presence`
-  says, or now when they go offline mid-turn; `chat`: each fresh send.
-  Rows show `SHOWN_ACTIVE` (Invisible held at `status_since`). The
+  `presence_loop` when they leave `active_now` (never while Invisible);
+  orgs: what `/api/presence` says (orgs only; skew-corrected by its `now`),
+  or now when they go offline mid-turn and stay gone; `chat`: each fresh
+  send. A moved time marks the row WITHOUT `roster_changed()`:
+  `soft_roster_changed()` (only devices in use answer). The
   `/api/presence` answer echoes `active`/`active_at` only when sent
   (tests/busy.rs pins the old answer). Proof: tests/last_active.rs.
 

@@ -827,8 +827,8 @@ user 2026-11-24 11:44Z). What "active" means depends on the kind:
 
 | Kind | Active now | `active_at` (last active) |
 | --- | --- | --- |
-| person | one of their devices is in use (`POST /api/devices/active`, see "Active devices") | when one last was: each `true` and `false` writes it, and a lease that runs out writes the moment the hub sees it end |
-| org | it says so: `POST /api/presence {active: true}` (Orgtree: one of the agents in charge of its org mailbox is mid-turn) | what it says, `active_at` (Orgtree: when those agents last finished a turn); now, if it goes offline while active |
+| person | one of their devices is in use (`POST /api/devices/active`, see "Active devices") | when one last was: each `true` writes it, a `false` from a device that was in use, and a lease that runs out the moment the hub sees it end |
+| org | it says so: `POST /api/presence {active: true}` (Orgtree: one of the agents in charge of its org mailbox is mid-turn) | what it says, `active_at` (Orgtree: when those agents last finished a turn), moved onto the hub's clock by its `now`; now, if it goes offline while active and is not back by the presence loop's next look |
 | agent session (`chat`) | never | its last message sent, to anyone |
 
 - **On the wire.** Every roster row carries `"active": true|false` and
@@ -839,34 +839,45 @@ user 2026-11-24 11:44Z). What "active" means depends on the kind:
   like `busy`, and the presence print covers it, so a device in use hears a
   change at once. The roster row of an address that stops being active is
   sent again (the presence loop marks it, as for going offline), and so is
-  an org's or an agent session's when its `active_at` moves. The old
-  `last_seen` (the last call) is unchanged.
+  an org's or an agent session's when its `active_at` moves: with no wake of
+  its own, so a device in use answers at once and the rest (a phone in a
+  pocket) get it with their next answer. The old `last_seen` (the last
+  call) is unchanged.
 - **An org says it** with the fields `active` and `active_at` on
   `POST /api/presence`:
 
 ```
-{"busy": false, "dnd": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z"}
+{"busy": false, "dnd": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z", "now": "2026-11-24T11:02:00.000Z"}
 → 200 {"slug": "...", "busy": false, "dnd": false, "active": false, "active_at": "2026-11-24T11:00:00.000Z"}
 ```
 
-  Both are optional. `active` left out is false; it is kept in memory and
-  ends when the address is seen offline, as `busy` does. `active_at` left out
-  keeps the stored time; `null` clears it; a time later than the hub's now
-  is taken as now. It may move back (the org's holder changed). The answer
-  carries each of the two only when the request did, so an engine from
+  All three are optional, and only an org's are taken (a person's and an
+  agent session's are ignored and not answered). `active` left out is false;
+  it is kept in memory and ends when the address is seen offline, as `busy`
+  does. `active_at` left out keeps the stored time; `null` clears it; `now`
+  is the sender's clock as it sends, and the hub moves `active_at` by the
+  difference to its own (an engine on another machine); a time later than
+  the hub's now is taken as now. It may move back (the org's holder
+  changed), so a sender says its posts in order. The answer carries
+  `active` and `active_at` only when the request did, so an engine from
   before 2.6.0 gets the answer it always got, and a hub from before 2.6.0
-  ignores the two fields. Refusals: 422 `active must be true or false`,
-  `active_at must be a time (RFC 3339) or null`.
+  ignores the fields. Refusals: 422 `active must be true or false`,
+  `active_at must be a time (RFC 3339) or null`, `now must be a time (RFC
+  3339)`.
 - **Invisible** (schema 12): an Invisible person is never in `active_now`, and
-  their rows' `active_at` is held at the moment they chose it
-  (`status_since`), as `last_seen` is; their real one keeps moving and shows
-  again when they choose another status.
+  nothing writes their `active_at` while they stay Invisible. One in use as
+  they choose it leaves the set, and the presence loop's next look writes
+  the time, exactly as for going offline (never the very moment they chose,
+  which would tie it to their held `last_seen`). After they leave Invisible
+  the held time stays until their next use.
 - **Who sees it**: everyone the roster reaches, as with presence; there is
   no separate setting (Invisible hides it).
 - **Schema 15** adds `identities.active_at`, filled at the upgrade from what
   the hub already has: people from `devices.active_until` (never later than
-  now), agent sessions from their last message sent; orgs start null until
-  their engine says it. `/healthz` lists the feature `last_active`; a client
+  now; an Invisible person's never later than when they chose it), agent
+  sessions from their last message sent; orgs start null until their engine
+  says it. The filled rows move to the head of the roster's change log, so
+  devices that already hold a roster cursor are sent them. `/healthz` lists the feature `last_active`; a client
   tells a hub without it by that, never by a missing field.
 
 ## Telling what a hub supports
