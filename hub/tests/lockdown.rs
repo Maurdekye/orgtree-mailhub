@@ -142,7 +142,6 @@ async fn a_lockdown_is_set_read_changed_and_lifted() {
     let many: Vec<String> = (0..1001).map(|i| format!("x{i}")).collect();
     for (bad, what) in [(json!({ "on": true, "allow": [org.0] }), "itself"),
                         (json!({ "on": true, "allow": ["Not A Slug"] }), "a malformed address"),
-                        (json!({ "on": true, "allow": ["not.here.yet"] }), "an address not registered here (review B1)"),
                         (json!({ "on": true, "allow": [{ "address": ann.0, "owner": "0".repeat(64) }] }), "an owner token that does not match (B3)"),
                         (json!({ "on": true, "allow": "x" }), "allow that is not a list"),
                         (json!({ "on": true, "allow": many }), "over the cap"),
@@ -154,7 +153,12 @@ async fn a_lockdown_is_set_read_changed_and_lifted() {
     }
     assert_eq!(Call::new("GET", "/api/lockdown").send(&hub).await.code(), 401);
     assert_eq!(Call::new("POST", "/api/lockdown").json(json!({ "on": false })).send(&hub).await.code(), 401);
-    println!("  ok  refusals: itself, malformed, unregistered, wrong owner, not a list, cap, flags, no credentials");
+    println!("  ok  refusals: itself, malformed, wrong owner, not a list, cap, flags, no credentials");
+    // an address not registered yet may be listed (user 14:08Z, answer 7: the
+    // list names addresses); `counts` says whether it is registered now
+    let r = lock(&hub, &org, &["not.here.yet"]).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(r.json()["allow"][0]["counts"], json!(false), "{}", r.text());
 
     let r = unlock(&hub, &org).await;
     assert_eq!(r.code(), 200, "{}", r.text());
@@ -166,10 +170,13 @@ async fn a_lockdown_is_set_read_changed_and_lifted() {
 }
 
 #[tokio::test]
-async fn a_listed_place_belongs_to_the_identity_not_the_address() {
-    // review B1: a listed address that is freed and taken by someone else is
-    // not on the list; the same identity coming back is
-    let (_pg, hub, _url) = test_hub("hublockfp").await;
+async fn a_listed_address_stays_allowed_through_a_new_registration() {
+    // user 2026-11-25 14:08Z, answer 7 (replaces review B1's identity
+    // binding): "allow new registrations from the same address, we dont want
+    // to accidentally lock out people because of network blips or hardware
+    // changes. its the orgs responsibility to cross their name from the
+    // whitelist." An entry follows the address on this hub.
+    let (_pg, hub, _url) = test_hub("hublockaddr").await;
     let org = register(&hub, "org", "org").await;
     let slug = format!("friend.lock.{}", token_hex3());
     let friend = register_with(&hub, &slug, &token_hex16(), "person").await;
@@ -177,20 +184,18 @@ async fn a_listed_place_belongs_to_the_identity_not_the_address() {
     assert_eq!(send(&hub, &friend, &org.0, "m-1").await.code(), 200);
 
     assert_eq!(post(&hub, &friend, "/api/unregister", json!({})).await.code(), 200);
-    let st = state(&hub, &org).await;
-    assert_eq!(st["allow"][0]["counts"], json!(false), "gone: the place does not count: {st}");
-    let thief = register_with(&hub, &slug, &token_hex16(), "person").await;
-    let r = send(&hub, &thief, &org.0, "m-2").await;
-    assert_eq!(r.code(), 403, "someone else on the freed address: {}", r.text());
-    let b = sync_now(&hub, &thief, "thief-phone", None).await;
-    assert_eq!(b["locked"][&org.0], json!("closed"), "and they see it closed: {b}");
-    println!("  ok  a new holder of a listed address is not on the list");
-
-    assert_eq!(post(&hub, &thief, "/api/unregister", json!({})).await.code(), 200);
-    register_with(&hub, &friend.0, &friend.1, "person").await;
-    assert_eq!(send(&hub, &friend, &org.0, "m-3").await.code(), 200, "the listed identity back");
+    assert_eq!(state(&hub, &org).await["allow"][0]["counts"], json!(false), "not registered now");
+    let renewed = register_with(&hub, &slug, &token_hex16(), "person").await;
+    assert_eq!(send(&hub, &renewed, &org.0, "m-2").await.code(), 200, "a new key on the listed address is still listed");
+    let b = sync_now(&hub, &renewed, "new-phone", None).await;
+    assert_eq!(b["locked"][&org.0], json!("open"), "{b}");
     assert_eq!(state(&hub, &org).await["allow"][0]["counts"], json!(true));
-    println!("  ok  the listed identity coming back is");
+    println!("  ok  a listed address keeps its place through a new registration");
+
+    // crossing the name off is the org's: then it is refused
+    assert_eq!(lock(&hub, &org, &[]).await.code(), 200);
+    assert_eq!(send(&hub, &renewed, &org.0, "m-3").await.code(), 403);
+    println!("  ok  and loses it when the org takes it off the list");
 }
 
 #[tokio::test]
