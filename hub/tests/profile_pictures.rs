@@ -130,6 +130,6 @@ async fn picture_authority_convergence_and_lifetime() {
     let c=sql_client(&url).await;
     assert_eq!(c.query_one("SELECT count(*) FROM mailhub.messages",&[]).await.unwrap().get::<_,i64>(0),0);
     assert_eq!(c.query_one("SELECT count(*) FROM mailhub.attachments",&[]).await.unwrap().get::<_,i64>(0),0);
-    assert_eq!(mailhub::db::latest_schema(),16,"pictures add no schema: 10 is the reserved question-card message meta, 11 a person's status, 12 Invisible, 13 translation, 14 Web Push, 15 last active, 16 blocks");
+    assert_eq!(mailhub::db::latest_schema(),17,"pictures add no schema: 10 is the reserved question-card message meta, 11 a person's status, 12 Invisible, 13 translation, 14 Web Push, 15 last active, 16 blocks, 17 lockdown");
     drop(hub); drop(c); drop(pg); std::fs::remove_dir_all(data).unwrap();
 }

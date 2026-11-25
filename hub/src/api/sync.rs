@@ -193,9 +193,18 @@ impl Cursor {
 /// the sets busy and Do not disturb (v2.3.0), so a change in any is news;
 /// and the status its own address chose (v2.3.0), so a choice made on one
 /// of its devices is news to the others. v2.6.0: and the set active now.
-fn presence_print(sets: &Sets, status: Status, me: &str, blocks: &crate::blocks::Blocks) -> u64 {
+fn presence_print(sets: &Sets, status: Status, me: &str, blocks: &crate::blocks::Blocks, lockdown: &crate::lockdown::Lockdowns) -> u64 {
+    // v2.6.0: the sets as this address may see them (an address in lockdown
+    // that does not list it shows it none of its presence)
+    let sets = &seen_sets(sets, me, lockdown);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (&sets.online, &sets.busy, &sets.dnd, status.as_str()).hash(&mut h);
+    // v2.6.0: the lockdowns as this address sees them, left out while there
+    // is none (as 2.5 printed)
+    let locked = lockdown.view(std::slice::from_ref(&me.to_string()));
+    if !locked.is_empty() {
+        ("locked", serde_json::to_string(&locked).unwrap_or_default()).hash(&mut h);
+    }
     // v2.6.0: whom it blocks and who blocks it, left out while both are
     // empty (an address that never blocked prints as 2.5 did)
     let (mine, by) = (blocks.of(me), blocks.by(me));
@@ -211,6 +220,21 @@ fn presence_print(sets: &Sets, status: Status, me: &str, blocks: &crate::blocks:
     h.finish()
 }
 
+/// The sets without the addresses in lockdown that do not list `me`
+/// (v2.6.0; `crate::lockdown`).
+fn seen_sets(sets: &Sets, me: &str, lockdown: &crate::lockdown::Lockdowns) -> Sets {
+    if !lockdown.any() {
+        return sets.clone();
+    }
+    let v = [me.to_string()];
+    Sets {
+        online: lockdown.filter_set(&sets.online, &v),
+        busy: lockdown.filter_set(&sets.busy, &v),
+        dnd: lockdown.filter_set(&sets.dnd, &v),
+        active: lockdown.filter_set(&sets.active, &v),
+    }
+}
+
 /// The addresses active now but the asker's own (v2.6.0).
 fn others_active<'a>(sets: &'a Sets, me: &str) -> Vec<&'a String> {
     sets.active.iter().filter(|s| s.as_str() != me).collect()
@@ -219,7 +243,14 @@ fn others_active<'a>(sets: &'a Sets, me: &str) -> Vec<&'a String> {
 /// The sets an answer carries beside each other: `online`, `busy`, `dnd`
 /// and (v2.6.0) `active_now` (not `active`: that is the asker's own
 /// devices in use), never the asker itself.
-fn put_sets(out: &mut Value, sets: Sets, me: &str, blocks: &crate::blocks::Blocks) {
+fn put_sets(out: &mut Value, sets: Sets, me: &str, blocks: &crate::blocks::Blocks, lockdown: &crate::lockdown::Lockdowns) {
+    let sets = seen_sets(&sets, me, lockdown);
+    // v2.6.0: every address in lockdown, "open" when it lists this one,
+    // else "closed"; its own lockdown, when it has one
+    out["locked"] = Value::Object(lockdown.view(std::slice::from_ref(&me.to_string())));
+    if let Some(l) = lockdown.of(me) {
+        out["lockdown"] = crate::lockdown::own(Some(&l));
+    }
     // v2.6.0: whom this address blocks (oldest first), and who blocks it
     // (user 2026-11-24 19:06Z: the blocked party is told at once); never
     // anyone else's
@@ -481,13 +512,15 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
     mark_seen(hub, &c, std::slice::from_ref(&slug.to_string())).await?;
     let sets = hub.presence.now_sets();
     let status = hub.presence.status(slug);
-    let print = presence_print(&sets, status, slug, &hub.blocks);
+    let print = presence_print(&sets, status, slug, &hub.blocks, &hub.lockdown);
     // in every answer, read now: a device deciding whether to notify about
     // the mail in this answer sees who is in use as of this answer
     let active = active_others(&c, slug, device).await?;
     // v2.4.0: the language this person reads in, told only to them
     let language: Option<String> =
         db::query_opt(&c, "SELECT language FROM identities WHERE slug = $1", &[&slug]).await?.and_then(|r| r.get(0));
+    let mut b = b;
+    hub.lockdown.mask_all(&mut b.roster, std::slice::from_ref(&slug.to_string()));
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
@@ -507,7 +540,7 @@ async fn sync_answer(hub: &Hub, slug: &str, device: &str, cur: Cursor, b: Batch,
         "now": clock::now().timestamp_millis(),
     });
     if b.reset || cur.online != Some(print) {
-        put_sets(&mut out, sets, slug, &hub.blocks);
+        put_sets(&mut out, sets, slug, &hub.blocks, &hub.lockdown);
     }
     if b.reset {
         out["reset"] = json!(true);
@@ -540,7 +573,7 @@ fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64
     let mut out = json!({
         "name": hub.cfg.hub_name,
         "version": crate::VERSION,
-        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&sets, status, slug, &hub.blocks))),
+        "cursor": cur.render(cur.online.unwrap_or_else(|| presence_print(&sets, status, slug, &hub.blocks, &hub.lockdown))),
         "changes": [],
         "roster": [],
         "roster_removed": [],
@@ -551,7 +584,7 @@ fn typing_answer(hub: &Hub, slug: &str, cur: Cursor, key_version: i32, seen: u64
         "typing_only": true,
     });
     if cur.online.is_none() {
-        put_sets(&mut out, sets, slug, &hub.blocks);
+        put_sets(&mut out, sets, slug, &hub.blocks, &hub.lockdown);
     }
     typing_rows(hub, slug, seen, &mut out);
     ok(out)
@@ -663,7 +696,7 @@ pub(crate) async fn sync_core(hub: &Arc<Hub>, pairs: Vec<crate::auth::Pair>, wai
                 in_use
                     && (hub.presence.soft_roster() != soft
                         || cur.online.is_some_and(|p| {
-                            p != presence_print(&hub.presence.now_sets(), hub.presence.status(&slug), &slug, &hub.blocks)
+                            p != presence_print(&hub.presence.now_sets(), hub.presence.status(&slug), &slug, &hub.blocks, &hub.lockdown)
                         }))
             };
             // a heartbeat for a device in use that asked for them (typing,

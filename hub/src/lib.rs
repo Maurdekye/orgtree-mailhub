@@ -22,6 +22,7 @@ pub mod api;
 pub mod auth;
 pub mod blobs;
 pub mod blocks;
+pub mod lockdown;
 pub mod clock;
 pub mod config;
 pub mod db;

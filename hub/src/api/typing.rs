@@ -34,6 +34,8 @@ pub async fn typing(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     // v2.6.0: a heartbeat between a blocked address and its blocker is
     // answered as any other and never relayed
     let to: Vec<String> = to.into_iter().filter(|t| !hub.blocks.stops(&from, t)).collect();
+    // v2.6.0: nor between an address in lockdown and one not on its list
+    let to: Vec<String> = to.into_iter().filter(|t| !hub.lockdown.stops(&from, t)).collect();
     if to.is_empty() {
         return ok(json!({ "ok": true, "counted": 0 }));
     }

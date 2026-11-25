@@ -7,6 +7,7 @@
 //! differs by its trailing slash.
 
 pub mod blocks;
+pub mod lockdown;
 pub mod files;
 pub mod history;
 pub mod keys;
@@ -64,6 +65,9 @@ pub struct Hub {
     pub translate: crate::translate::Shared,
     /// who blocks whom, as the database says (v2.6.0; `crate::blocks`)
     pub blocks: crate::blocks::Blocks,
+    /// who is in lockdown and whom each lists, as the database says (v2.6.0;
+    /// `crate::lockdown`)
+    pub lockdown: crate::lockdown::Lockdowns,
     /// the open WebSocket streams (v2.5.0)
     pub streams: stream::Streams,
 }
@@ -273,6 +277,8 @@ enum Route {
     IdentitySet,
     BlocksGet,
     BlocksSet,
+    LockdownGet,
+    LockdownSet,
     Conversations,
     Directory,
     History,
@@ -318,6 +324,7 @@ fn route(method: &Method, path: &str) -> Option<Result<Route, &'static str>> {
         "/api/devices" => return get_or_post(Devices, Enrol),
         "/api/identity" => return get_or_post(IdentityGet, IdentitySet),
         "/api/blocks" => return get_or_post(BlocksGet, BlocksSet),
+        "/api/lockdown" => return get_or_post(LockdownGet, LockdownSet),
         _ => {}
     }
     // POST here is the active signal; DELETE still signs out a device that
@@ -547,6 +554,8 @@ async fn handle(hub: &Arc<Hub>, r: Route, req: &mut Req) -> ApiResult {
         Route::IdentitySet => keys::set_identity(hub, req).await,
         Route::BlocksGet => blocks::list(hub, req).await,
         Route::BlocksSet => blocks::set(hub, req).await,
+        Route::LockdownGet => lockdown::get(hub, req).await,
+        Route::LockdownSet => lockdown::set(hub, req).await,
         Route::Conversations => history::conversations(hub, req).await,
         Route::Directory => mail::directory(hub, req).await,
         Route::History => history::history(hub, req).await,

@@ -407,12 +407,21 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         woke.extend(before.iter().chain(now_blocks.iter()).map(String::as_str));
         hub.presence.wake_sync(woke);
     }
+    // v2.6.0: a lockdown too; this owner's counts again
+    let stale = db::execute(&c, "DELETE FROM lockdowns WHERE address = $1 AND owner_fp <> $2", &[&slug, &fp]).await?;
+    let before = hub.lockdown.of(&slug);
+    let now_lock = hub.lockdown.reload(&c, &slug).await?;
+    if stale > 0 || before != now_lock {
+        db::execute(&c, "UPDATE identities SET roster_seq = nextval('roster_seq') WHERE slug = $1", &[&slug]).await?;
+        hub.presence.roster_changed();
+    }
     // v2.3.0: a person goes busy for want of a device in use
     if let Some(r) = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&slug]).await? {
         hub.presence.set_person(&slug, r.get::<_, String>(0) == "person");
     }
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
-    let roster = roster(hub, &c).await?;
+    let mut roster = roster(hub, &c).await?;
+    hub.lockdown.mask_all(&mut roster, std::slice::from_ref(&slug));
     ok(json!({ "ok": true, "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "roster": roster }))
 }
 
@@ -437,6 +446,8 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         // v2.6.0: its blocks stop counting while it is gone
         let had = hub.blocks.of(s);
         hub.blocks.forget(s);
+        // and its lockdown
+        hub.lockdown.forget(s);
         hub.presence.wake_sync(had.iter().map(String::as_str));
     }
     if !gone.is_empty() {
@@ -545,8 +556,26 @@ async fn poll_check(hub: &Hub, slugs: &[String]) -> ApiResult<(Vec<Value>, Vec<V
 async fn poll_answer(hub: &Hub, slugs: &[String], messages: Vec<Value>, receipts: Vec<Value>) -> ApiResult {
     let c = hub.db.get().await?;
     mark_seen(hub, &c, slugs).await?;
-    let roster = roster(hub, &c).await?;
+    let mut roster = roster(hub, &c).await?;
+    hub.lockdown.mask_all(&mut roster, slugs);
     let mut out = json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "messages": messages, "receipts": receipts, "roster": roster });
+    // v2.6.0: every address in lockdown as these see it, and each polling
+    // address's own lockdown; both left out when there is none
+    if hub.lockdown.any() {
+        let locked = hub.lockdown.view(slugs);
+        if !locked.is_empty() {
+            out["locked"] = Value::Object(locked);
+        }
+        let mut own = serde_json::Map::new();
+        for s in slugs {
+            if let Some(l) = hub.lockdown.of(s) {
+                own.insert(s.clone(), crate::lockdown::own(Some(&l)));
+            }
+        }
+        if !own.is_empty() {
+            out["lockdown"] = Value::Object(own);
+        }
+    }
     // v2.6.0: for each polling address that blocks anyone or is blocked,
     // whom it blocks and who blocks it (Orgtree polls; the user's 19:06Z
     // "Show it in their DM" holds for orgs too). Left out when there is
@@ -726,6 +755,11 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         // block's write takes too, so a block that committed first is seen;
         // a retry of mail accepted before it stays accepted (above).
         if let Some(body) = crate::blocks::refusal(&tx, &frm, &to).await? {
+            return Err(ApiError::Body(StatusCode::FORBIDDEN, body));
+        }
+        // v2.6.0: lockdown, asked the same way (its write takes the same
+        // row lock); a block is told first
+        if let Some(body) = crate::lockdown::refusal(&tx, &frm, &to).await? {
             return Err(ApiError::Body(StatusCode::FORBIDDEN, body));
         }
         // G8: the limit bounds one message, its body and files together
@@ -990,7 +1024,8 @@ pub async fn roster_route(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     }
     let c = hub.db.get().await?;
     mark_seen(hub, &c, &slugs).await?;
-    let roster = roster(hub, &c).await?;
+    let mut roster = roster(hub, &c).await?;
+    hub.lockdown.mask_all(&mut roster, &slugs);
     ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "roster": roster }))
 }
 
@@ -1034,7 +1069,8 @@ pub async fn directory(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     )
     .await?;
     let more = rows.len() as i64 > limit;
-    let entries: Vec<Value> = rows.iter().take(limit as usize).map(|r| roster_entry(hub, r)).collect();
+    let mut entries: Vec<Value> = rows.iter().take(limit as usize).map(|r| roster_entry(hub, r)).collect();
+    hub.lockdown.mask_all(&mut entries, &slugs);
     let next = if more { entries.last().and_then(|e| e["slug"].as_str()).map(str::to_string) } else { None };
     ok(json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "entries": entries, "after": next }))
 }

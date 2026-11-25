@@ -115,6 +115,7 @@ pub async fn run_once(hub: &Hub) -> Result<Swept> {
     for s in &pruned {
         hub.presence.forget(s);
         hub.blocks.forget(s);
+        hub.lockdown.forget(s);
     }
     if !pruned.is_empty() {
         hub.presence.roster_changed();

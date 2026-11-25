@@ -602,6 +602,8 @@ async fn the_upgrade_fills_last_active_from_what_the_hub_has() {
     sql.batch_execute(&format!(
         "UPDATE identities SET status_since = now() - interval '1 hour' WHERE slug = '{ivy}';
          UPDATE devices SET active_until = now() - interval '2 minutes' WHERE slug IN ('{ivy}', '{pat}');
+         DROP TABLE lockdown_allow;
+         DROP TABLE lockdowns;
          DROP TABLE blocks;
          ALTER TABLE identities DROP COLUMN active_at;
          UPDATE hub_meta SET v = to_jsonb(14) WHERE k = 'schema_version';",
