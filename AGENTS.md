@@ -9,7 +9,12 @@
   through `hub.lockdown` (`mask_all` for roster/directory entries, `seen_sets`
   for the sets): a `closed` viewer sees `locked: "closed"` and no presence
   (user 13:37Z Q2). A lockdown change bumps the address's `roster_seq`. Owner
-  = address + `owner_fp`, as blocks. A test that fakes an older schema must
+  = address + `owner_fp`, as blocks. An ALLOW ENTRY IS AN IDENTITY
+  (`allowed_fp`; review B1/B3): never compare a sender to the list by address
+  alone; the mirror holds only entries that count, and anything that changes
+  who holds an address calls `lockdown::holder_changed`/`refresh_listing`
+  (register, unregister, the idle prune). Changes are ordered by `rev` (409
+  on a lower one; lifting keeps the row). A test that fakes an older schema must
   drop `lockdown_allow` and `lockdowns` too. [decided: user 2026-11-25 13:26Z
   m0388b64a9372, 13:37Z mf95eda126994 via Orgtree docket
   org-mailbox-lockdown-allow-list-mode-that-denies; verified: hub/src/lockdown.rs,
