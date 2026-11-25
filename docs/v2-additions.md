@@ -948,26 +948,26 @@ GET  /api/lockdown?slug=
 - `on: true` with `allow` replaces the list; without it keeps the list (a new
   lockdown starts with none, so nobody may write). `on: false` lifts it, list
   and all. Any identity kind may lock down.
-- **An entry is an identity, not a name.** The hub binds each entry to the
-  identity holding its address when it is listed (the address and its
-  secret's fingerprint), and the entry counts only while that identity holds
-  the address. If the address is freed and someone else registers it, they
-  are not on the list; if the listed identity comes back, it is again
-  (review B1). An entry may name the identity it means with the `owner`
-  token its roster entry shows (`picture_owner`); the hub refuses it if
-  someone else holds the address now (review B3: a client lists the person
-  it saw, on this hub). A client on several hubs sends each hub only the
-  entries it saw there. `counts` in the answer says whether an entry counts
-  now. A key rotation does not change the fingerprint, so a person's place
-  survives device changes.
+- **An entry is an address on this hub, and follows it.** A new key or a new
+  registration for a listed address stays allowed, so nobody is locked out
+  by a network blip or a hardware change; taking a name off the list is the
+  org's job (user 2026-11-25 14:08Z, answer 7, replacing review B1's
+  identity binding). An address not registered yet may be listed. An entry
+  may name the identity it means with the `owner` token its roster entry
+  shows (`picture_owner`); the hub refuses it if someone else holds the
+  address at the time of listing (review B3: a client lists the person it
+  saw, on this hub). Entries are per hub: a client on several hubs sends each
+  hub only the entries it saw there, and the same name on another hub never
+  matches. In the answer, `counts` says whether the address is registered
+  now and `owner` is its holder's token (null when none).
 - **Revisions.** `rev` (a whole number) orders the owner's changes: a change
   with a lower `rev` than the stored one is refused, `409 {"detail", "rev":
   <stored>}`, so a late or repeated reconcile cannot undo a newer change. The
   same `rev` again is applied again (a retry). Without `rev` the revision goes
   up by one. Lifting keeps the revision (an old `on` arriving after a lift is
   refused).
-- 422 for listing itself, a malformed address, an address not registered on
-  this hub, an `owner` that does not match, `allow` that is not a list, a
+- 422 for listing itself, a malformed address, an `owner` that does not
+  match, `allow` that is not a list, a
   missing or non-boolean `on`, a negative `rev`, or more than 1,000 entries.
 - **Registering locks too.** `POST /api/register` takes `lockdown` (the same
   object) and applies it with the registration, in the same transaction for a
@@ -976,7 +976,7 @@ GET  /api/lockdown?slug=
   once anything it finds missing.
 - **Sends.** Inside the send transaction, under the recipient's row lock (which
   the lockdown's write takes too), after the block check: a send from an
-  identity not on the list is refused, `403 {"detail": "@<to> is in lockdown
+  address not on the list is refused, `403 {"detail": "@<to> is in lockdown
   and only takes messages from addresses on its list", "locked": "<to>"}`.
   Replies in a thread are no exception (user 13:37Z, Q1). Nothing is stored,
   pushed or translated; a long body is refused before it is written to disk
