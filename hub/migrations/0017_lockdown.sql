@@ -1,7 +1,7 @@
 -- mail hub v2.6.0, schema 17: lockdown (docs/v2-additions.md, "Lockdown";
 -- Orgtree docket org-mailbox-lockdown-allow-list-mode-that-denies, user
 -- 2026-11-25 13:26Z and 13:37Z). An address in lockdown takes messages
--- only from the identities on its list: the hub refuses everyone else's
+-- only from the addresses on its list: the hub refuses everyone else's
 -- sends to it, drops their typing heartbeats, and shows them a lock in
 -- place of its presence.
 --
@@ -12,10 +12,11 @@
 -- the row stays, `on = false`, when the lockdown is lifted, so an old
 -- change arriving late cannot turn it on again.
 --
--- An allow entry names an IDENTITY, not just an address: `allowed_fp` is
--- the fingerprint that held `allowed` when it was listed, and the entry
--- counts only while that same identity holds the address (review B1: a
--- freed and re-registered address must not inherit a place on the list).
+-- An allow entry names an ADDRESS on this hub and follows it: a new key or
+-- registration for a listed address stays allowed (user 2026-11-25 14:08Z,
+-- answer 7, replacing review B1's identity binding: "its the orgs
+-- responsibility to cross their name from the whitelist"). Entries are this
+-- hub's own, so the same name on another hub never matches (review B3).
 -- A hub without schema 17 refuses a database that has it.
 
 CREATE TABLE lockdowns (
@@ -29,7 +30,6 @@ CREATE TABLE lockdowns (
 CREATE TABLE lockdown_allow (
   address     text NOT NULL REFERENCES lockdowns ON DELETE CASCADE,
   allowed     text NOT NULL,
-  allowed_fp  text NOT NULL,
   PRIMARY KEY (address, allowed),
   CHECK (address <> allowed)
 );

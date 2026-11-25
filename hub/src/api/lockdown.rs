@@ -5,12 +5,13 @@
 //!
 //! - `on: true` with `allow` replaces the list; without it keeps the list (a
 //!   new lockdown starts with none). `on: false` lifts it, list and all.
-//! - An entry of `allow` is an address registered on this hub, or
-//!   `{"address", "owner"}` where `owner` is the `picture_owner` token its
-//!   roster entry shows: the hub then refuses the entry unless that same
-//!   identity still holds the address (review B3: the caller names the
-//!   person it means, not just a name). Either way the entry is bound to the
-//!   identity holding the address now (B1).
+//! - An entry of `allow` is an address on this hub (registered or not yet),
+//!   or `{"address", "owner"}` where `owner` is the `picture_owner` token its
+//!   roster entry shows: the hub then refuses the entry unless that identity
+//!   holds the address at the time of listing (review B3: the caller names
+//!   the person it means). Once listed, the entry follows the ADDRESS: a new
+//!   key or registration for it stays allowed (user 2026-11-25 14:08Z,
+//!   answer 7). `counts` in the answer says whether it is registered now.
 //! - `rev` (a whole number) orders the owner's changes: one lower than the
 //!   stored revision is refused with 409 and the stored `rev` (review I4: a
 //!   late or repeated reconcile never undoes a newer change). Without it the
@@ -110,22 +111,19 @@ pub async fn apply(tx: &impl GenericClient, me: &str, fp: &str, ch: &Change) -> 
         Some(r) => r,
         None => stored_rev + 1,
     };
-    // the entries, each bound to the identity holding its address now
-    let mut bound: Vec<(String, String)> = Vec::new();
+    // the entries; one naming an owner token is checked against the holder now
+    let mut bound: Vec<String> = Vec::new();
     if let (true, Some(list)) = (ch.on, &ch.allow) {
         let wanted: Vec<String> = list.iter().map(|e| e.address.clone()).collect();
         let rows = db::query(tx, "SELECT slug, fingerprint FROM identities WHERE slug = ANY($1)", &[&wanted]).await?;
         let held: HashMap<String, String> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
         for e in list {
-            let Some(efp) = held.get(&e.address) else {
-                return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("@{} is not registered on this hub", e.address));
-            };
             if let Some(t) = &e.owner {
-                if *t != super::pictures::owner_token(&e.address, efp) {
+                if held.get(&e.address).map(|efp| super::pictures::owner_token(&e.address, efp)).as_ref() != Some(t) {
                     return refuse(StatusCode::UNPROCESSABLE_ENTITY, format!("@{} is now held by a different identity than the one named", e.address));
                 }
             }
-            bound.push((e.address.clone(), efp.clone()));
+            bound.push(e.address.clone());
         }
     }
     let now = crate::clock::now();
@@ -143,11 +141,10 @@ pub async fn apply(tx: &impl GenericClient, me: &str, fp: &str, ch: &Change) -> 
         }
         if ch.allow.is_some() {
             db::execute(tx, "DELETE FROM lockdown_allow WHERE address = $1", &[&me]).await?;
-            let (a, f): (Vec<String>, Vec<String>) = bound.into_iter().unzip();
             db::execute(
                 tx,
-                "INSERT INTO lockdown_allow (address, allowed, allowed_fp) SELECT $1, x.a, x.f FROM unnest($2::text[], $3::text[]) AS x(a, f)",
-                &[&me, &a, &f],
+                "INSERT INTO lockdown_allow (address, allowed) SELECT $1, x.a FROM unnest($2::text[]) AS x(a)",
+                &[&me, &bound],
             )
             .await?;
         }
@@ -166,7 +163,8 @@ pub async fn apply(tx: &impl GenericClient, me: &str, fp: &str, ch: &Change) -> 
     Ok(())
 }
 
-/// The full answer for `me`: every entry, with whether it counts now.
+/// The full answer for `me`: every entry, with whether its address is
+/// registered now (`counts`) and the owner token of whoever holds it.
 pub async fn answer(c: &impl GenericClient, me: &str) -> ApiResult<Value> {
     let l = db::query_opt(
         c,
@@ -180,8 +178,8 @@ pub async fn answer(c: &impl GenericClient, me: &str) -> ApiResult<Value> {
     };
     let rows = db::query(
         c,
-        "SELECT a.allowed, a.allowed_fp, (j.fingerprint IS NOT NULL) FROM lockdown_allow a
-           LEFT JOIN identities j ON j.slug = a.allowed AND j.fingerprint = a.allowed_fp
+        "SELECT a.allowed, j.fingerprint FROM lockdown_allow a
+           LEFT JOIN identities j ON j.slug = a.allowed
           WHERE a.address = $1 ORDER BY a.allowed",
         &[&me],
     )
@@ -189,8 +187,8 @@ pub async fn answer(c: &impl GenericClient, me: &str) -> ApiResult<Value> {
     let allow: Vec<Value> = rows
         .iter()
         .map(|r| {
-            let (a, f): (String, String) = (r.get(0), r.get(1));
-            json!({ "address": a, "owner": super::pictures::owner_token(&a, &f), "counts": r.get::<_, bool>(2) })
+            let (a, f): (String, Option<String>) = (r.get(0), r.get(1));
+            json!({ "address": a, "owner": f.as_ref().map(|f| super::pictures::owner_token(&a, f)), "counts": f.is_some() })
         })
         .collect();
     Ok(json!({
@@ -206,17 +204,6 @@ pub async fn answer(c: &impl GenericClient, me: &str) -> ApiResult<Value> {
 pub async fn after(hub: &Hub, c: &impl GenericClient, me: &str) -> ApiResult<()> {
     hub.lockdown.reload(c, me).await?;
     hub.presence.roster_changed();
-    Ok(())
-}
-
-/// Who holds `slug` changed: the lockdowns that list it are read again, and
-/// those whose view moved send their roster entries out again.
-pub async fn holder_changed(hub: &Hub, c: &impl GenericClient, slug: &str) -> ApiResult<()> {
-    let moved = hub.lockdown.refresh_listing(c, slug).await?;
-    if !moved.is_empty() {
-        db::execute(c, "UPDATE identities SET roster_seq = nextval('roster_seq') WHERE slug = ANY($1)", &[&moved]).await?;
-        hub.presence.roster_changed();
-    }
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 //! "a final last-straw defense against an onslaught of attackers creating
 //! dozens of new accounts and flooding the inbox faster than they can be
 //! blocked"): an address in lockdown takes messages only from the
-//! identities on its list. The hub refuses everyone else's sends to it
+//! addresses on its list. The hub refuses everyone else's sends to it
 //! (`refusal`, asked inside `send`'s transaction) and drops their typing
 //! heartbeats. Everyone sees the lock: a viewer on the list sees the address
 //! as usual, `locked: "open"`; anyone else sees `locked: "closed"` and none
@@ -11,18 +11,16 @@
 //! stream, which is built from them), the roster and the directory. The
 //! address itself may still write to anyone (Q4).
 //!
-//! An allow entry is an identity: the address and the fingerprint that held
-//! it when it was listed. It counts only while that identity holds the
-//! address (review B1, 2026-11-25: a freed address re-registered by someone
-//! else is not on the list). A lockdown belongs to its owner (address +
-//! fingerprint), as a block does, and its changes are ordered by `rev`.
+//! An allow entry is an address on this hub and follows it: a new key or
+//! registration for a listed address stays allowed (user 2026-11-25 14:08Z,
+//! answer 7, replacing review B1's identity binding; taking a name off is
+//! the org's job). A lockdown belongs to its owner (address + fingerprint),
+//! as a block does, and its changes are ordered by `rev`.
 //!
 //! As with blocks, the database is the truth for `send`, and a mirror in
 //! memory (loaded at start, changed only by this hub's own writes) serves
 //! what must not touch the database: heartbeats, the sync print and the
-//! views. The mirror holds, per address in lockdown, the listed addresses
-//! that count now; anything that changes who holds an address refreshes the
-//! lockdowns listing it (`refresh_listing`).
+//! views. The mirror holds, per address in lockdown, its listed addresses.
 
 use std::sync::Arc;
 
@@ -35,7 +33,7 @@ use crate::db;
 pub const MAX_ALLOWED: usize = 1_000;
 
 /// One lockdown that is on and counts: since when, its revision, and the
-/// listed addresses that count now (sorted).
+/// listed addresses (sorted).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lockdown {
     pub since: Option<chrono::DateTime<chrono::Utc>>,
@@ -49,10 +47,9 @@ pub struct Lockdowns {
 }
 
 /// The lockdowns that count (on, and their owner still holds the address),
-/// each with the entries that count (their identity still holds theirs).
+/// each with its listed addresses.
 const COUNTING: &str = "SELECT l.address, l.since, l.rev,
          COALESCE((SELECT array_agg(a.allowed ORDER BY a.allowed) FROM lockdown_allow a
-                     JOIN identities j ON j.slug = a.allowed AND j.fingerprint = a.allowed_fp
                     WHERE a.address = l.address), '{}')
     FROM lockdowns l JOIN identities i ON i.slug = l.address AND i.fingerprint = l.owner_fp
    WHERE l.on_";
@@ -88,22 +85,6 @@ impl Lockdowns {
             }
         }
         Ok(now)
-    }
-
-    /// Who holds `slug` changed (it registered, left or was pruned): reload
-    /// every lockdown that lists it. Answers those whose view moved, whose
-    /// roster entries must go out again.
-    pub async fn refresh_listing(&self, c: &impl GenericClient, slug: &str) -> Result<Vec<String>, tokio_postgres::Error> {
-        let rows = db::query(c, "SELECT DISTINCT address FROM lockdown_allow WHERE allowed = $1", &[&slug]).await?;
-        let mut moved = Vec::new();
-        for r in &rows {
-            let a: String = r.get(0);
-            let before = self.of(&a);
-            if self.reload(c, &a).await? != before {
-                moved.push(a);
-            }
-        }
-        Ok(moved)
     }
 
     /// The address left (its lockdown stops counting until it comes back).
@@ -212,8 +193,7 @@ impl Lockdowns {
 }
 
 /// An address's own lockdown from the mirror (sync and poll answers):
-/// `{"on", "since", "rev", "allow"}`, `allow` being the listed addresses that
-/// count now. `GET /api/lockdown` answers the full entries.
+/// `{"on", "since", "rev", "allow"}`, `allow` being the listed addresses. `GET /api/lockdown` answers the full entries.
 pub fn own(l: Option<&Lockdown>) -> Value {
     match l {
         Some(l) => json!({ "on": true, "allow": *l.allow, "since": l.since.map(crate::clock::iso), "rev": l.rev }),
@@ -222,7 +202,7 @@ pub fn own(l: Option<&Lockdown>) -> Value {
 }
 
 /// Why a send from `from` to `to` is refused, if `to` is in lockdown and
-/// `from` is not a listed identity, asked of the database (inside the send's
+/// `from` is not on its list, asked of the database (inside the send's
 /// transaction for the decision; on any connection for the early look). The
 /// JSON body of the 403.
 pub async fn refusal(c: &impl GenericClient, from: &str, to: &str) -> Result<Option<Value>, tokio_postgres::Error> {
@@ -231,8 +211,7 @@ pub async fn refusal(c: &impl GenericClient, from: &str, to: &str) -> Result<Opt
     }
     let locked = db::query_opt(
         c,
-        "SELECT NOT EXISTS (SELECT 1 FROM lockdown_allow a JOIN identities j ON j.slug = a.allowed AND j.fingerprint = a.allowed_fp
-                             WHERE a.address = l.address AND a.allowed = $1)
+        "SELECT NOT EXISTS (SELECT 1 FROM lockdown_allow a WHERE a.address = l.address AND a.allowed = $1)
            FROM lockdowns l JOIN identities i ON i.slug = l.address AND i.fingerprint = l.owner_fp
           WHERE l.address = $2 AND l.on_",
         &[&from, &to],

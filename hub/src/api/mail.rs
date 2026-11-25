@@ -436,8 +436,6 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         db::execute(&c, "UPDATE identities SET roster_seq = nextval('roster_seq') WHERE slug = $1", &[&slug]).await?;
         hub.presence.roster_changed();
     }
-    // and the lockdowns that list this address count it again, or no longer
-    super::lockdown::holder_changed(hub, &c, &slug).await?;
     // v2.3.0: a person goes busy for want of a device in use
     if let Some(r) = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&slug]).await? {
         hub.presence.set_person(&slug, r.get::<_, String>(0) == "person");
@@ -472,9 +470,8 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         // v2.6.0: its blocks stop counting while it is gone
         let had = hub.blocks.of(s);
         hub.blocks.forget(s);
-        // and its lockdown; the lockdowns listing it no longer count it
+        // and its lockdown (lists naming it keep it: user answer 7)
         hub.lockdown.forget(s);
-        super::lockdown::holder_changed(hub, &c, s).await?;
         hub.presence.wake_sync(had.iter().map(String::as_str));
     }
     if !gone.is_empty() {
