@@ -1,5 +1,21 @@
 # Mail hub development invariants
 
+- 2026-11-25: Lockdown (feature `lockdown`, 2.6.0, schema 17;
+  docs/v2-additions.md "Lockdown"). Built like blocking: the DATABASE decides
+  sends (`lockdown::refusal` in `send`, after `blocks::refusal`, under the
+  recipient's `FOR UPDATE`, which `/api/lockdown` takes too); the memory
+  mirror (`hub.lockdown`) serves only heartbeats, the sync print and the
+  VIEWS. Every place that shows an address's presence to another must go
+  through `hub.lockdown` (`mask_all` for roster/directory entries, `seen_sets`
+  for the sets): a `closed` viewer sees `locked: "closed"` and no presence
+  (user 13:37Z Q2). A lockdown change bumps the address's `roster_seq`. Owner
+  = address + `owner_fp`, as blocks. A test that fakes an older schema must
+  drop `lockdown_allow` and `lockdowns` too. [decided: user 2026-11-25 13:26Z
+  m0388b64a9372, 13:37Z mf95eda126994 via Orgtree docket
+  org-mailbox-lockdown-allow-list-mode-that-denies; verified: hub/src/lockdown.rs,
+  api/lockdown.rs, api/mail.rs, api/sync.rs, api/typing.rs,
+  migrations/0017_lockdown.sql; tests/lockdown.rs]
+
 - 2026-11-24: Blocking (feature `blocking`, 2.6.0, schema 16;
   docs/v2-additions.md "Blocking"). The DATABASE decides sends:
   `blocks::refusal` runs inside `send`'s transaction after the recipient's

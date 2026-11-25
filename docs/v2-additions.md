@@ -929,6 +929,60 @@ GET  /api/blocks?slug=
 - `/healthz` lists `blocking`. Schema 16 is one-way: a hub without it refuses
   the database.
 
+## Lockdown (feature `lockdown`, v2.6.0, schema 17)
+
+An address in lockdown takes messages only from the addresses on its list: a
+last-straw defence against a flood of new accounts (user 2026-11-25 13:26Z,
+answers 13:37Z; Orgtree docket org-mailbox-lockdown-allow-list-mode-that-denies).
+The hub enforces it, so a modified client cannot get around it.
+
+```
+POST /api/lockdown {"on": true|false, "allow"?: ["<slug>", ...], "slug"?}
+GET  /api/lockdown?slug=
+→ 200 {"on": bool, "allow": ["<slug>", ...], "since": "<iso>"|null}   (allow sorted)
+```
+
+- `on: true` with `allow` replaces the list; without it keeps the list (a new
+  lockdown starts with none, so nobody may write). `on: false` lifts it, list
+  and all. Idempotent. Any identity kind may lock down. An address the hub
+  does not know may be listed. 422 for listing itself, a malformed address,
+  `allow` that is not a list, a missing or non-boolean `on`, or more than
+  1,000 addresses.
+- **Sends.** Inside the send transaction, under the recipient's row lock (which
+  the lockdown's write takes too), after the block check: a send from an
+  address not on the list is refused, `403 {"detail": "@<to> is in lockdown
+  and only takes messages from addresses on its list", "locked": "<to>"}`.
+  Replies in a thread are no exception (user 13:37Z, Q1). Nothing is stored,
+  pushed or translated. A retry of mail accepted before the lockdown stays
+  accepted; mail accepted before it is delivered as usual. The address itself
+  may still write to anyone (Q4).
+- **Typing.** A heartbeat from an address not on the list is answered and never
+  relayed.
+- **Everyone sees the lock.** Sync answers carry `locked`: `{"<slug>":
+  "open"|"closed"}` for every address in lockdown but the asker, `open` when
+  its list names the asker. Roster and directory entries of an address in
+  lockdown carry `locked` the same way. For a `closed` viewer the hub also
+  hides the address's presence (Q2): it is left out of `online`, `busy`,
+  `dnd` and `active_now`, and its entry shows `online`, `busy`, `dnd` and
+  `active` false and `last_seen`/`active_at` null. The address's own devices get
+  `lockdown` (`{"on", "allow", "since"}`) in their sync answers. The view is
+  folded into the cursor's presence print, and a change marks the address's
+  roster entry changed, so every device hears it.
+- **Polls too.** A `/api/poll` answer carries `locked` (as the polling addresses
+  see it: `open` when the list names any of them) and `lockdown`
+  (`{"<slug>": {"on", "allow", "since"}}` for each polling address in
+  lockdown), both left out when there is none; roster entries are masked as
+  above.
+- **Owner.** As a block: a lockdown belongs to the address and its secret's
+  fingerprint; it does not count while the address is unregistered; the same
+  owner registering again gets it back; a new owner inherits none.
+- `/healthz` lists `lockdown`. Schema 17 is one-way: a hub without it refuses
+  the database.
+- Not hidden: an address in lockdown stays in the roster and directory (with
+  its name and picture), and its roster entry is marked changed when it goes
+  offline, as everyone's is (inferred: a closed viewer can tell that
+  something changed, not what).
+
 ## Telling what a hub supports
 
 `/healthz` also reports `"version"` (`"2.2.0-alpha.0"` in the local alpha), `"features"` and `"now"`
