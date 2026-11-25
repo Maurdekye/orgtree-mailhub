@@ -117,6 +117,14 @@ pub async fn run_once(hub: &Hub) -> Result<Swept> {
         hub.blocks.forget(s);
         hub.lockdown.forget(s);
     }
+    // v2.6.0: the lockdowns that listed a pruned address no longer count it
+    let mut moved: Vec<String> = Vec::new();
+    for s in &pruned {
+        moved.extend(hub.lockdown.refresh_listing(&c, s).await?);
+    }
+    if !moved.is_empty() {
+        db::execute(&c, "UPDATE identities SET roster_seq = nextval('roster_seq') WHERE slug = ANY($1)", &[&moved]).await?;
+    }
     if !pruned.is_empty() {
         hub.presence.roster_changed();
     }

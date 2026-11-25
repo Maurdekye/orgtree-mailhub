@@ -331,6 +331,14 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let org_name = pg_text(str_field(&body, "org_name"));
     let username = pg_text(str_field(&body, "username"));
     let blurb = pg_text(str_field(&body, "blurb"));
+    // v2.6.0: a lockdown to apply with the registration (review I4: a new
+    // address is never reachable before its lockdown)
+    let lock_change = match body.get("lockdown") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(o)) => Some(super::lockdown::parse(o, &slug)?),
+        Some(_) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, "lockdown must be an object"),
+    };
+    let mut lock_applied = false;
     let mut c = hub.db.get().await?;
     let mut changed = false;
     for _ in 0..3 {
@@ -352,6 +360,10 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
                 &[&slug, &fp, &org_name, &username, &blurb, &now, &kind],
             )
             .await?;
+            if let (1, Some(ch)) = (inserted, &lock_change) {
+                super::lockdown::apply(&tx, &slug, &fp, ch).await?;
+                lock_applied = true;
+            }
             tx.commit().await?;
             if inserted == 1 {
                 changed = true;
@@ -407,7 +419,16 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         woke.extend(before.iter().chain(now_blocks.iter()).map(String::as_str));
         hub.presence.wake_sync(woke);
     }
-    // v2.6.0: a lockdown too; this owner's counts again
+    // v2.6.0: a lockdown too (a previous owner's goes; this owner's counts
+    // again), applied now when it came with this registration and was not
+    // applied with the insert
+    if let (false, Some(ch)) = (lock_applied, &lock_change) {
+        let tx = c.transaction().await?;
+        if db::query_opt(&tx, "SELECT 1 FROM identities WHERE slug = $1 AND fingerprint = $2 FOR UPDATE", &[&slug, &fp]).await?.is_some() {
+            super::lockdown::apply(&tx, &slug, &fp, ch).await?;
+        }
+        tx.commit().await?;
+    }
     let stale = db::execute(&c, "DELETE FROM lockdowns WHERE address = $1 AND owner_fp <> $2", &[&slug, &fp]).await?;
     let before = hub.lockdown.of(&slug);
     let now_lock = hub.lockdown.reload(&c, &slug).await?;
@@ -415,6 +436,8 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         db::execute(&c, "UPDATE identities SET roster_seq = nextval('roster_seq') WHERE slug = $1", &[&slug]).await?;
         hub.presence.roster_changed();
     }
+    // and the lockdowns that list this address count it again, or no longer
+    super::lockdown::holder_changed(hub, &c, &slug).await?;
     // v2.3.0: a person goes busy for want of a device in use
     if let Some(r) = db::query_opt(&c, "SELECT kind FROM identities WHERE slug = $1", &[&slug]).await? {
         hub.presence.set_person(&slug, r.get::<_, String>(0) == "person");
@@ -422,7 +445,10 @@ pub async fn register(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     mark_seen(hub, &c, std::slice::from_ref(&slug)).await?;
     let mut roster = roster(hub, &c).await?;
     hub.lockdown.mask_all(&mut roster, std::slice::from_ref(&slug));
-    ok(json!({ "ok": true, "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "roster": roster }))
+    // v2.6.0: its own lockdown as it stands, so a client re-applies at once
+    // what it finds missing
+    let lockdown = super::lockdown::answer(&c, &slug).await?;
+    ok(json!({ "ok": true, "name": hub.cfg.hub_name, "version": crate::VERSION, "retention_days": hub.cfg.retention_days, "roster": roster, "lockdown": lockdown }))
 }
 
 // ---------------------------------------------------------------- unregister
@@ -446,8 +472,9 @@ pub async fn unregister(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         // v2.6.0: its blocks stop counting while it is gone
         let had = hub.blocks.of(s);
         hub.blocks.forget(s);
-        // and its lockdown
+        // and its lockdown; the lockdowns listing it no longer count it
         hub.lockdown.forget(s);
+        super::lockdown::holder_changed(hub, &c, s).await?;
         hub.presence.wake_sync(had.iter().map(String::as_str));
     }
     if !gone.is_empty() {
@@ -641,6 +668,23 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let frm = get_or(&body, "from").map(py_str).unwrap_or_else(|| slugs.first().cloned().unwrap_or_default());
     if !slugs.contains(&frm) {
         return refuse(StatusCode::UNAUTHORIZED, "sender credentials required");
+    }
+    // v2.6.0: a sender an address in lockdown does not list is refused
+    // before its body touches the disk (review M4); the decision is made
+    // again inside the transaction below. A retry of mail accepted before
+    // the lockdown stays accepted.
+    if hub.lockdown.stops(&frm, &to) {
+        let c = hub.db.get().await?;
+        let mid = get_or(&body, "id").map(py_str).unwrap_or_default();
+        let known = !mid.is_empty() && db::query_opt(&c, "SELECT 1 FROM messages WHERE id = $1", &[&mid]).await?.is_some();
+        if !known {
+            if let Some(b) = crate::blocks::refusal(&c, &frm, &to).await? {
+                return Err(ApiError::Body(StatusCode::FORBIDDEN, b));
+            }
+            if let Some(b) = crate::lockdown::refusal(&c, &frm, &to).await? {
+                return Err(ApiError::Body(StatusCode::FORBIDDEN, b));
+            }
+        }
     }
     // G6: the body is kept whole. One too long for its row goes to a file
     // first (or comes from an upload, `body_part`), before any lock is held.
