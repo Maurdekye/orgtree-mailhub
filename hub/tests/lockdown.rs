@@ -58,6 +58,11 @@ async fn send(hub: &Arc<Hub>, from: &Id, to: &str, id: &str) -> Resp {
     post(hub, from, "/api/send", json!({ "id": id, "to": to, "body": format!("hello {id}") })).await
 }
 
+/// The addresses of an answer's `allow` entries that count.
+fn allowed(v: &Value) -> Vec<String> {
+    v["allow"].as_array().unwrap_or_else(|| panic!("no allow: {v}")).iter().filter(|e| e["counts"] == json!(true)).map(|e| e["address"].as_str().unwrap().to_string()).collect()
+}
+
 fn strings(v: &Value) -> Vec<String> {
     v.as_array().unwrap_or_else(|| panic!("not a list: {v}")).iter().map(|s| s.as_str().unwrap().to_string()).collect()
 }
@@ -101,46 +106,55 @@ async fn a_lockdown_is_set_read_changed_and_lifted() {
 
     let org = register(&hub, "org", "org").await;
     let ann = register(&hub, "ann", "person").await;
+    let bea = register(&hub, "bea", "person").await;
     assert_eq!(state(&hub, &org).await["on"], json!(false));
 
-    let r = lock(&hub, &org, &[&ann.0, "not.here.yet"]).await;
+    let r = lock(&hub, &org, &[&ann.0, &bea.0]).await;
     assert_eq!(r.code(), 200, "{}", r.text());
     let j = r.json();
     assert_eq!(j["on"], json!(true));
-    let mut allow = strings(&j["allow"]);
-    allow.sort();
-    let mut want = vec![ann.0.clone(), "not.here.yet".to_string()];
+    let mut want = vec![ann.0.clone(), bea.0.clone()];
     want.sort();
-    assert_eq!(allow, want, "an address the hub does not know may be listed ahead");
-    assert!(j["since"].is_string(), "{j}");
+    assert_eq!(allowed(&j), want, "{j}");
+    assert!(j["since"].is_string() && j["rev"].is_i64(), "{j}");
+    let entry = j["allow"].as_array().unwrap().iter().find(|e| e["address"] == json!(ann.0)).unwrap().clone();
+    assert!(entry["owner"].as_str().is_some_and(|t| t.len() == 64), "the owner token: {entry}");
+    // the owner token is the one the roster shows (picture_owner)
+    let roster = Call::new("GET", "/api/roster").auth(pair(&org.0, &org.1)).send(&hub).await.json();
+    assert_eq!(roster_row(&roster, &ann.0).unwrap()["picture_owner"], entry["owner"]);
     let since = j["since"].clone();
     // `on` without `allow` keeps the list; with it, replaces it
     let r = post(&hub, &org, "/api/lockdown", json!({ "on": true })).await;
     assert_eq!(r.code(), 200, "{}", r.text());
-    assert_eq!(r.json()["allow"].as_array().unwrap().len(), 2, "kept: {}", r.text());
+    assert_eq!(allowed(&r.json()).len(), 2, "kept: {}", r.text());
     assert_eq!(r.json()["since"], since, "still the same lockdown");
     let r = lock(&hub, &org, &[&ann.0]).await;
-    assert_eq!(strings(&r.json()["allow"]), vec![ann.0.clone()]);
-    assert_eq!(state(&hub, &org).await["allow"], json!([ann.0]));
+    assert_eq!(allowed(&r.json()), vec![ann.0.clone()]);
+    assert_eq!(allowed(&state(&hub, &org).await), vec![ann.0.clone()]);
+    // an entry may name the identity it means: the roster's owner token
+    let r = post(&hub, &org, "/api/lockdown", json!({ "on": true, "allow": [{ "address": ann.0, "owner": entry["owner"] }] })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
     // an empty list is allowed: nobody on the hub may write
     assert_eq!(lock(&hub, &org, &[]).await.code(), 200);
     assert_eq!(state(&hub, &org).await["allow"], json!([]));
-    println!("  ok  set, read, keep, replace, empty");
+    println!("  ok  set, read, keep, replace, owner token, empty");
 
+    let many: Vec<String> = (0..1001).map(|i| format!("x{i}")).collect();
     for (bad, what) in [(json!({ "on": true, "allow": [org.0] }), "itself"),
                         (json!({ "on": true, "allow": ["Not A Slug"] }), "a malformed address"),
+                        (json!({ "on": true, "allow": ["not.here.yet"] }), "an address not registered here (review B1)"),
+                        (json!({ "on": true, "allow": [{ "address": ann.0, "owner": "0".repeat(64) }] }), "an owner token that does not match (B3)"),
                         (json!({ "on": true, "allow": "x" }), "allow that is not a list"),
+                        (json!({ "on": true, "allow": many }), "over the cap"),
                         (json!({ "allow": [] }), "no on flag"),
+                        (json!({ "on": true, "rev": -1 }), "a negative rev"),
                         (json!({ "on": "yes" }), "on that is not a boolean")] {
         let r = post(&hub, &org, "/api/lockdown", bad).await;
         assert_eq!(r.code(), 422, "{what}: {}", r.text());
     }
-    let many: Vec<String> = (0..1001).map(|i| format!("x{i}")).collect();
-    let r = post(&hub, &org, "/api/lockdown", json!({ "on": true, "allow": many })).await;
-    assert_eq!(r.code(), 422, "over the cap: {}", r.text());
     assert_eq!(Call::new("GET", "/api/lockdown").send(&hub).await.code(), 401);
     assert_eq!(Call::new("POST", "/api/lockdown").json(json!({ "on": false })).send(&hub).await.code(), 401);
-    println!("  ok  refusals: itself, malformed, not a list, flags, cap, no credentials");
+    println!("  ok  refusals: itself, malformed, unregistered, wrong owner, not a list, cap, flags, no credentials");
 
     let r = unlock(&hub, &org).await;
     assert_eq!(r.code(), 200, "{}", r.text());
@@ -150,6 +164,76 @@ async fn a_lockdown_is_set_read_changed_and_lifted() {
     assert_eq!(r.json()["allow"], json!([]), "a new lockdown starts with no list: {}", r.text());
     println!("  ok  lifted, idempotent, the old list is gone");
 }
+
+#[tokio::test]
+async fn a_listed_place_belongs_to_the_identity_not_the_address() {
+    // review B1: a listed address that is freed and taken by someone else is
+    // not on the list; the same identity coming back is
+    let (_pg, hub, _url) = test_hub("hublockfp").await;
+    let org = register(&hub, "org", "org").await;
+    let slug = format!("friend.lock.{}", token_hex3());
+    let friend = register_with(&hub, &slug, &token_hex16(), "person").await;
+    assert_eq!(lock(&hub, &org, &[&slug]).await.code(), 200);
+    assert_eq!(send(&hub, &friend, &org.0, "m-1").await.code(), 200);
+
+    assert_eq!(post(&hub, &friend, "/api/unregister", json!({})).await.code(), 200);
+    let st = state(&hub, &org).await;
+    assert_eq!(st["allow"][0]["counts"], json!(false), "gone: the place does not count: {st}");
+    let thief = register_with(&hub, &slug, &token_hex16(), "person").await;
+    let r = send(&hub, &thief, &org.0, "m-2").await;
+    assert_eq!(r.code(), 403, "someone else on the freed address: {}", r.text());
+    let b = sync_now(&hub, &thief, "thief-phone", None).await;
+    assert_eq!(b["locked"][&org.0], json!("closed"), "and they see it closed: {b}");
+    println!("  ok  a new holder of a listed address is not on the list");
+
+    assert_eq!(post(&hub, &thief, "/api/unregister", json!({})).await.code(), 200);
+    register_with(&hub, &friend.0, &friend.1, "person").await;
+    assert_eq!(send(&hub, &friend, &org.0, "m-3").await.code(), 200, "the listed identity back");
+    assert_eq!(state(&hub, &org).await["allow"][0]["counts"], json!(true));
+    println!("  ok  the listed identity coming back is");
+}
+
+#[tokio::test]
+async fn changes_are_ordered_by_revision_and_a_registration_can_lock() {
+    // review I4
+    let (_pg, hub, _url) = test_hub("hublockrev").await;
+    let org = register(&hub, "org", "org").await;
+    let ann = register(&hub, "ann", "person").await;
+    let r = post(&hub, &org, "/api/lockdown", json!({ "on": true, "allow": [ann.0], "rev": 5 })).await;
+    assert_eq!((r.code(), r.json()["rev"].clone()), (200, json!(5)), "{}", r.text());
+    let r = post(&hub, &org, "/api/lockdown", json!({ "on": true, "allow": [], "rev": 4 })).await;
+    assert_eq!(r.code(), 409, "an older change arriving late: {}", r.text());
+    assert_eq!(r.json()["rev"], json!(5));
+    assert_eq!(allowed(&state(&hub, &org).await), vec![ann.0.clone()], "and it changed nothing");
+    assert_eq!(post(&hub, &org, "/api/lockdown", json!({ "on": true, "allow": [ann.0], "rev": 5 })).await.code(), 200, "the same change again");
+    let r = post(&hub, &org, "/api/lockdown", json!({ "on": false, "rev": 6 })).await;
+    assert_eq!(r.code(), 200);
+    let r = post(&hub, &org, "/api/lockdown", json!({ "on": true, "rev": 5 })).await;
+    assert_eq!(r.code(), 409, "a late `on` cannot undo the lift: {}", r.text());
+    assert_eq!(state(&hub, &org).await["on"], json!(false));
+    let r = post(&hub, &org, "/api/lockdown", json!({ "on": true })).await;
+    assert_eq!(r.json()["rev"], json!(7), "without rev: one up");
+    println!("  ok  a lower rev is refused; without one it goes up");
+
+    // registering with a lockdown: locked from the first moment
+    let slug = format!("neworg.lock.{}", token_hex3());
+    let secret = token_hex16();
+    let r = Call::new("POST", "/api/register")
+        .auth(pair(&slug, &secret))
+        .json(json!({ "slug": slug, "org_name": "n", "username": "lock", "kind": "org", "lockdown": { "on": true, "allow": [ann.0], "rev": 1 } }))
+        .send(&hub)
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(r.json()["lockdown"]["on"], json!(true), "the answer carries it: {}", r.text());
+    let bob = register(&hub, "bob", "person").await;
+    assert_eq!(send(&hub, &bob, &slug, "m-new").await.code(), 403);
+    assert_eq!(send(&hub, &ann, &slug, "m-ann").await.code(), 200);
+    // a plain registration again keeps it, and says so
+    let r = Call::new("POST", "/api/register").auth(pair(&slug, &secret)).json(json!({ "slug": slug, "org_name": "n", "username": "lock", "kind": "org" })).send(&hub).await;
+    assert_eq!(r.json()["lockdown"]["rev"], json!(1), "{}", r.text());
+    println!("  ok  a registration can lock, and its answer tells the lockdown");
+}
+
 
 #[tokio::test]
 async fn only_listed_addresses_may_write_and_nothing_else_is_kept() {
@@ -173,6 +257,17 @@ async fn only_listed_addresses_may_write_and_nothing_else_is_kept() {
     println!("  ok  an unlisted sender: 403 with `locked`, nothing stored");
 
     assert_eq!(send(&hub, &ann, &org.0, "m-listed").await.code(), 200, "a listed sender");
+    // review M7: an id the hub already has answers 200 whoever sends it, and
+    // nothing new is stored (no bypass)
+    let r = post(&hub, &bob, "/api/send", json!({ "id": "m-listed", "to": org.0, "body": "spoof" })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let body: String = c.query_one("SELECT body FROM messages WHERE id = 'm-listed'", &[]).await.unwrap().get(0);
+    assert_eq!(body, "hello m-listed", "the stored message is unchanged");
+    // review M4: a long body from an unlisted sender is refused before it is
+    // written anywhere
+    let long = "x".repeat(200_000);
+    let r = post(&hub, &bob, "/api/send", json!({ "id": "m-long", "to": org.0, "body": long })).await;
+    assert_eq!(r.code(), 403, "{}", r.text());
     // the locked address may still write to anyone (user 13:37Z, Q4)
     assert_eq!(send(&hub, &org, &bob.0, "m-out").await.code(), 200);
     // a reply in a thread is mail like any other (Q1)

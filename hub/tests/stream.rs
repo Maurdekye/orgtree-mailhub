@@ -858,3 +858,27 @@ async fn t15_a_parked_stream_request_is_presence() {
     assert!(!r.hub.presence.online(&ann.0), "offline once the stream is gone and the grace has passed");
     println!("  ok  parked stream request = online; dropped stream ends it; /ui/data counts streams");
 }
+
+/// Lockdown (v2.6.0, review I7): the stream answers with the same view as
+/// HTTP, so an address not on the list sees the lock and none of the
+/// presence there too.
+#[tokio::test]
+async fn t_lockdown_the_stream_shows_a_closed_viewer_only_the_lock() {
+    let r = rig(&[]).await;
+    let org = register(&r.hub, "org", "org").await;
+    let bob = register(&r.hub, "bob", "person").await;
+    let _ = Call::new("POST", "/api/poll?wait=0").auth(pair(&org.0, &org.1)).send(&r.hub).await;
+    let l = Call::new("POST", "/api/lockdown").auth(pair(&org.0, &org.1)).json(json!({ "on": true })).send(&r.hub).await;
+    assert_eq!(l.code(), 200, "{}", l.text());
+    let mut ws = open(r.full, Some(&pair(&bob.0, &bob.1))).await;
+    hello(&mut ws, None).await;
+    say(&mut ws, json!({ "type": "sync", "id": 1, "body": { "device_id": "bob-web", "wait": 0 } })).await;
+    let a = json_frame(&mut ws).await;
+    let b = &a["body"];
+    assert_eq!(b["locked"][&org.0], json!("closed"), "{a}");
+    assert!(!b["online"].as_array().unwrap().contains(&json!(org.0)), "{a}");
+    let row = b["roster"].as_array().unwrap().iter().find(|e| e["slug"] == json!(org.0)).unwrap();
+    assert_eq!((row["locked"].clone(), row["online"].clone(), row["last_seen"].clone()), (json!("closed"), json!(false), Value::Null), "{row}");
+    r.hub.shutdown.cancel();
+    let _ = r.serving.await;
+}
