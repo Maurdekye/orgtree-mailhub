@@ -584,15 +584,22 @@ async fn poll_answer(hub: &Hub, slugs: &[String], messages: Vec<Value>, receipts
     let c = hub.db.get().await?;
     mark_seen(hub, &c, slugs).await?;
     let mut roster = roster(hub, &c).await?;
-    hub.lockdown.mask_all(&mut roster, slugs);
+    // v2.6.0 (lockdown review 5): one roster serves every polling address,
+    // so an address in lockdown shows its presence only when it lists them
+    // all
+    hub.lockdown.mask_all_strict(&mut roster, slugs);
     let mut out = json!({ "name": hub.cfg.hub_name, "version": crate::VERSION, "messages": messages, "receipts": receipts, "roster": roster });
-    // v2.6.0: every address in lockdown as these see it, and each polling
-    // address's own lockdown; both left out when there is none
+    // v2.6.0: while any address on the hub is in lockdown, for each polling
+    // address, every address in lockdown as it sees it (`{}` when none);
+    // and each polling address's own lockdown when it has one. A poll
+    // answer is whole, so on a hub that lists `lockdown` a missing `locked`
+    // means no address is in lockdown (an answer with none stays as 2.5's)
     if hub.lockdown.any() {
-        let locked = hub.lockdown.view(slugs);
-        if !locked.is_empty() {
-            out["locked"] = Value::Object(locked);
+        let mut per = serde_json::Map::new();
+        for s in slugs {
+            per.insert(s.clone(), Value::Object(hub.lockdown.view(std::slice::from_ref(s))));
         }
+        out["locked"] = Value::Object(per);
         let mut own = serde_json::Map::new();
         for s in slugs {
             if let Some(l) = hub.lockdown.of(s) {
@@ -676,7 +683,8 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     if hub.lockdown.stops(&frm, &to) {
         let c = hub.db.get().await?;
         let mid = get_or(&body, "id").map(py_str).unwrap_or_default();
-        let known = !mid.is_empty() && db::query_opt(&c, "SELECT 1 FROM messages WHERE id = $1", &[&mid]).await?.is_some();
+        let known = !mid.is_empty()
+            && db::query_opt(&c, "SELECT 1 FROM messages WHERE id = $1 AND from_slug = $2 AND to_slug = $3", &[&mid, &frm, &to]).await?.is_some();
         if !known {
             if let Some(b) = crate::blocks::refusal(&c, &frm, &to).await? {
                 return Err(ApiError::Body(StatusCode::FORBIDDEN, b));
@@ -793,7 +801,12 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let received = clock::now();
     // a retry is answered without touching the insert: v1's INSERT OR
     // IGNORE never used up a message number, and neither does this
-    let known = db::query_opt(&tx, "SELECT 1 FROM messages WHERE id = $1", &[&mid]).await?.is_some();
+    // v2.6.0 (lockdown review 10): a retry is the same sender writing to the
+    // same recipient; an id another message holds is no retry, and is told
+    // so after the block and lockdown checks (so it reveals nothing more)
+    let prior = db::query_opt(&tx, "SELECT from_slug, to_slug FROM messages WHERE id = $1", &[&mid]).await?;
+    let known = prior.as_ref().is_some_and(|r| r.get::<_, String>(0) == frm && r.get::<_, String>(1) == to);
+    let taken = prior.is_some() && !known;
     if !known {
         // v2.6.0: blocking. Asked under the recipient's row lock, which a
         // block's write takes too, so a block that committed first is seen;
@@ -805,6 +818,9 @@ pub async fn send(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
         // row lock); a block is told first
         if let Some(body) = crate::lockdown::refusal(&tx, &frm, &to).await? {
             return Err(ApiError::Body(StatusCode::FORBIDDEN, body));
+        }
+        if taken {
+            return refuse(StatusCode::CONFLICT, "this message id is already used by another message");
         }
         // G8: the limit bounds one message, its body and files together
         let Ok(limit) = crate::blobs::attachment_limit(&hub.cfg) else {

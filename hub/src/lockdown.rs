@@ -175,6 +175,28 @@ impl Lockdowns {
         }
     }
 
+    /// One answer shared by several viewers (a poll for several orgs): an
+    /// entry shows its presence only when it is open to every one of them
+    /// (review 5).
+    pub fn mask_all_strict(&self, entries: &mut [Value], viewers: &[String]) {
+        if !self.any() {
+            return;
+        }
+        for e in entries {
+            let Some(slug) = e["slug"].as_str().map(str::to_string) else { continue };
+            let others: Vec<String> = viewers.iter().filter(|v| **v != slug).cloned().collect();
+            if others.is_empty() {
+                continue;
+            }
+            if others.iter().any(|v| self.closed_to(&slug, std::slice::from_ref(v))) {
+                let closer: Vec<String> = others.iter().filter(|v| self.closed_to(&slug, std::slice::from_ref(*v))).take(1).cloned().collect();
+                self.mask(e, &closer);
+            } else {
+                self.mask(e, &others);
+            }
+        }
+    }
+
     pub fn mask_all(&self, entries: &mut [Value], viewers: &[String]) {
         if self.any() {
             for e in entries {

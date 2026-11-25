@@ -36,6 +36,9 @@ pub async fn typing(hub: &Arc<Hub>, req: &mut Req) -> ApiResult {
     let to: Vec<String> = to.into_iter().filter(|t| !hub.blocks.stops(&from, t)).collect();
     // v2.6.0: nor between an address in lockdown and one not on its list
     let to: Vec<String> = to.into_iter().filter(|t| !hub.lockdown.stops(&from, t)).collect();
+    // and (review 5) an address in lockdown shows those it does not list no
+    // sign of activity, its typing included
+    let to: Vec<String> = to.into_iter().filter(|t| !hub.lockdown.stops(t, &from)).collect();
     if to.is_empty() {
         return ok(json!({ "ok": true, "counted": 0 }));
     }
