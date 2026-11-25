@@ -257,12 +257,17 @@ async fn only_listed_addresses_may_write_and_nothing_else_is_kept() {
     println!("  ok  an unlisted sender: 403 with `locked`, nothing stored");
 
     assert_eq!(send(&hub, &ann, &org.0, "m-listed").await.code(), 200, "a listed sender");
-    // review M7: an id the hub already has answers 200 whoever sends it, and
-    // nothing new is stored (no bypass)
+    // review M7 / Astra 10: an id another message holds is no retry: an
+    // unlisted sender is refused as any other, a listed one is told the id
+    // is taken, and nothing is stored or changed
     let r = post(&hub, &bob, "/api/send", json!({ "id": "m-listed", "to": org.0, "body": "spoof" })).await;
-    assert_eq!(r.code(), 200, "{}", r.text());
+    assert_eq!(r.code(), 403, "{}", r.text());
+    let r = post(&hub, &ann, "/api/send", json!({ "id": "m-before", "to": org.0, "body": "spoof" })).await;
+    assert_eq!(r.code(), 409, "{}", r.text());
     let body: String = c.query_one("SELECT body FROM messages WHERE id = 'm-listed'", &[]).await.unwrap().get(0);
     assert_eq!(body, "hello m-listed", "the stored message is unchanged");
+    let from: String = c.query_one("SELECT from_slug FROM messages WHERE id = 'm-before'", &[]).await.unwrap().get(0);
+    assert_eq!(from, bob.0);
     // review M4: a long body from an unlisted sender is refused before it is
     // written anywhere
     let long = "x".repeat(200_000);
@@ -303,6 +308,45 @@ async fn an_unlisted_senders_heartbeats_are_not_relayed() {
     let from: Vec<String> = r.json()["typing"].as_array().unwrap().iter().map(|x| x["from"].as_str().unwrap().to_string()).collect();
     assert_eq!(from, vec![ann.0.clone()], "only the listed one");
     println!("  ok  the unlisted sender's heartbeat is dropped");
+
+    // review 5: the address in lockdown shows those it does not list no
+    // typing either
+    let b0 = sync_now(&hub, &bob, "bob-desk", None).await;
+    let a0 = sync_now(&hub, &ann, "ann-desk", None).await;
+    let r = post(&hub, &org, "/api/typing", json!({ "to": [bob.0, ann.0] })).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    for (who, cur, want) in [(&bob, &b0, Vec::<String>::new()), (&ann, &a0, vec![org.0.clone()])] {
+        let body = json!({ "device_id": format!("{}-desk", &who.0[..3]), "wait": 0, "cursor": cur["cursor"], "typing": true });
+        let r = Call::new("POST", "/api/sync").auth(pair(&who.0, &who.1)).json(body).send(&hub).await;
+        let from: Vec<String> = r.json()["typing"].as_array().unwrap().iter().map(|x| x["from"].as_str().unwrap().to_string()).collect();
+        assert_eq!(from, want, "{}", who.0);
+    }
+    println!("  ok  and its own typing reaches only those it lists");
+}
+
+#[tokio::test]
+async fn a_poll_for_several_orgs_shows_each_its_own_view_and_shares_only_what_all_may_see() {
+    // review 5: one roster serves every polling address
+    let (_pg, hub, _url) = test_hub("hublockpoll").await;
+    let locked = register(&hub, "locked", "org").await;
+    let friend = register(&hub, "friend", "org").await;
+    let other = register(&hub, "other", "org").await;
+    let _ = Call::new("POST", "/api/poll?wait=0").auth(pair(&locked.0, &locked.1)).send(&hub).await;
+    let p = Call::new("POST", "/api/poll?wait=0").auth(pair(&friend.0, &friend.1)).send(&hub).await.json();
+    assert!(p.get("locked").is_none(), "nobody in lockdown: as before: {p}");
+    assert_eq!(lock(&hub, &locked, &[&friend.0]).await.code(), 200);
+    let both = format!("{} {}", pair(&friend.0, &friend.1), pair(&other.0, &other.1));
+    let p = Call::new("POST", "/api/poll?wait=0").auth(both).send(&hub).await.json();
+    assert_eq!(p["locked"][&friend.0][&locked.0], json!("open"), "{p}");
+    assert_eq!(p["locked"][&other.0][&locked.0], json!("closed"), "{p}");
+    let row = roster_row(&p, &locked.0).unwrap();
+    assert_eq!((row["locked"].clone(), row["online"].clone(), row["last_seen"].clone()), (json!("closed"), json!(false), Value::Null), "the shared row shows what all may see: {row}");
+    let p = Call::new("POST", "/api/poll?wait=0").auth(pair(&friend.0, &friend.1)).send(&hub).await.json();
+    assert_eq!(roster_row(&p, &locked.0).unwrap()["online"], json!(true), "alone, the listed org sees it: {p}");
+    assert_eq!(unlock(&hub, &locked).await.code(), 200);
+    let p = Call::new("POST", "/api/poll?wait=0").auth(pair(&other.0, &other.1)).send(&hub).await.json();
+    assert!(p.get("locked").is_none(), "lifted: none in lockdown: {p}");
+    println!("  ok  each polling org its own view; the shared roster only what all may see");
 }
 
 #[tokio::test]
@@ -366,7 +410,7 @@ async fn everyone_sees_the_lock_and_the_unlisted_see_nothing_else() {
     assert_eq!((e["locked"].clone(), e["online"].clone()), (json!("closed"), json!(false)), "{e}");
     let other = register(&hub, "acme", "org").await;
     let p = Call::new("POST", "/api/poll?wait=0").auth(pair(&other.0, &other.1)).send(&hub).await.json();
-    assert_eq!(p["locked"][&org.0], json!("closed"), "{p}");
+    assert_eq!(p["locked"][&other.0][&org.0], json!("closed"), "{p}");
     assert_eq!(roster_row(&p, &org.0).unwrap()["online"], json!(false));
     println!("  ok  roster, directory and poll the same");
 
