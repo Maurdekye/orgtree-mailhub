@@ -1022,7 +1022,7 @@ GET  /api/lockdown?slug=
 hub serves: `person`, `profile`, `reply_to`, `sync`, `devices`, `history`,
 `delete`, `long_messages`, `message_limit`, `directory`, `uploads`, `link`,
 `device_keys`, `active`, `lazy_history`, `door`, `unifiedpush` (2.1.0),
-`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), `translate` (2.4.0), `webpush` (2.5.1), and `last_active` and `blocking` (2.6.0). A
+`profile_pictures` and `meta` (local 2.2.0-alpha.0), `typing`, `busy`, `dnd`, `status` and `invisible` (2.3.0), `translate` (2.4.0), `webpush` (2.5.1), and `last_active`, `blocking` and `lockdown` (2.6.0). A
 v1 hub reports none of them. On the main port, `/healthz` also says where
 the relay-only door listens (`door`, when one runs).
 
